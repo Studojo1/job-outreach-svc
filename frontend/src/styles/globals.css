@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@layer base {
+  body {
+    @apply bg-page text-text-primary font-sans;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary text-white px-6 py-3 rounded-xl font-semibold
+           transition-all duration-200 hover:-translate-y-0.5 hover:shadow-elevated
+           hover:bg-primary-dark active:translate-y-0;
+  }
+
+  .btn-outline {
+    @apply bg-transparent border-2 border-primary text-primary px-6 py-3 rounded-xl font-semibold
+           transition-all duration-200 hover:-translate-y-0.5 hover:shadow-elevated
+           hover:bg-primary hover:text-white active:translate-y-0;
+  }
+
+  .card {
+    @apply bg-card border border-border-light rounded-xl shadow-soft p-l;
+  }
+
+  .card-hover {
+    @apply card transition-all duration-200 hover:border-primary hover:shadow-elevated;
+  }
+}
+
+/* Flashcard flip animation */
+.perspective-1000 {
+  perspective: 1000px;
+}
+
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+
+.backface-hidden {
+  backface-visibility: hidden;
+}
+
+.rotate-y-180 {
+  transform: rotateY(180deg);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F9FAFB;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #E5E7EB;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #D1D5DB;
+}

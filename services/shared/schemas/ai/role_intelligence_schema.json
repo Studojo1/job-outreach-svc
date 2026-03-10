@@ -1,0 +1,49 @@
+{
+    "type": "object",
+    "properties": {
+        "departments": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "hiring_roles": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "industry_expansion": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "company_size_preferences": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "target_seniorities": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "apollo_departments": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        }
+    },
+    "required": [
+        "departments",
+        "hiring_roles",
+        "industry_expansion",
+        "company_size_preferences",
+        "target_seniorities",
+        "apollo_departments"
+    ]
+}

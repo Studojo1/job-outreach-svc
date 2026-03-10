@@ -1,0 +1,64 @@
+import logging
+import sys
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import ValidationError
+
+# Initialize basic logging for config loading
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("config_loader")
+
+class Settings(BaseSettings):
+    # DATABASE
+    DATABASE_URL: str
+
+    # APOLLO
+    APOLLO_API_KEY: str
+
+    # GOOGLE LOGIN OAUTH
+    GOOGLE_LOGIN_CLIENT_ID: str
+    GOOGLE_LOGIN_CLIENT_SECRET: str
+    GOOGLE_LOGIN_REDIRECT_URI: str
+
+    # GMAIL OAUTH
+    GMAIL_CLIENT_ID: str
+    GMAIL_CLIENT_SECRET: str
+    GMAIL_REDIRECT_URI: str
+
+    # AZURE OPENAI
+    AZURE_OPENAI_ENDPOINT: str
+    AZURE_OPENAI_API_VERSION: str
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str
+    AZURE_OPENAI_LLM_DEPLOYMENT: str
+    AZURE_OPENAI_KEY: str
+
+    # AUTH
+    JWT_SECRET_KEY: str = "change-me-in-production-use-a-real-secret"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRY_HOURS: int = 24
+
+    # REDIS
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # FRONTEND
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).parent.parent / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+try:
+    logger.info("Initializing environment configuration...")
+    settings = Settings()
+    logger.info("Configuration loaded successfully.")
+except ValidationError as e:
+    logger.error("CRITICAL: Environment validation failed!")
+    for error in e.errors():
+        logger.error(f"  - Missing or invalid variable: {error['loc'][0]}")
+    logger.error("The application cannot start without these required variables.")
+    sys.exit(1)
+except Exception as e:
+    logger.error(f"CRITICAL: Unexpected error loading configuration: {e}")
+    sys.exit(1)

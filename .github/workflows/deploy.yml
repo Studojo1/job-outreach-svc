@@ -1,0 +1,63 @@
+name: Build and Deploy job-outreach-svc to AKS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  ACR_NAME: acrstudojo-dhfsdrfhf6a6bbg2
+  SERVICE_NAME: job-outreach-svc
+  AKS_NAMESPACE: studojo
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.ACR_NAME }}.azurecr.io
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:$IMAGE_TAG .
+          docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:$IMAGE_TAG ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:latest
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:$IMAGE_TAG
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:latest
+
+      - name: Get AKS Credentials
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Deploy to AKS
+        run: |
+          kubectl set image deployment/${{ env.SERVICE_NAME }} ${{ env.SERVICE_NAME }}=${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVICE_NAME }}:${GITHUB_SHA::7} -n ${{ env.AKS_NAMESPACE }}
+          kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n ${{ env.AKS_NAMESPACE }} --timeout=300s
+
+      - name: Record Deployment
+        if: success()
+        run: |
+          curl -X POST https://api.studojo.com/v1/dev/deployments \
+            -H "Content-Type: application/json" \
+            -d '{
+              "service": "${{ env.SERVICE_NAME }}",
+              "version": "${GITHUB_SHA::7}",
+              "deployed_at": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'",
+              "deployed_by": "${{ github.actor }}",
+              "status": "success",
+              "workflow_run": "${{ github.run_id }}"
+            }'
