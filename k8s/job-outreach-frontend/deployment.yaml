@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-outreach-frontend
+  namespace: studojo
+  labels:
+    app: job-outreach-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: job-outreach-frontend
+  template:
+    metadata:
+      labels:
+        app: job-outreach-frontend
+    spec:
+      containers:
+        - name: job-outreach-frontend
+          image: acrstudojo-dhfsdrfhf6a6bbg2.azurecr.io/job-outreach-frontend:latest
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 30

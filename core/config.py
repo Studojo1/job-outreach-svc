@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # FRONTEND
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # OBSERVABILITY
+    SENTRY_DSN: str = ""
+    SERVICE_NAME: str = "job-outreach-svc"
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
         env_file_encoding="utf-8",

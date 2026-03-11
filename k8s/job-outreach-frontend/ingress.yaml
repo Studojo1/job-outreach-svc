@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: job-outreach-frontend-ingress
+  namespace: studojo
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - studojo.com
+      secretName: studojo-tls-secret
+  rules:
+    - host: studojo.com
+      http:
+        paths:
+          - path: /outreach(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: job-outreach-frontend
+                port:
+                  number: 3000

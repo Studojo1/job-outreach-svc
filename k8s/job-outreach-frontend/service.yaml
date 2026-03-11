@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-outreach-frontend
+  namespace: studojo
+  labels:
+    app: job-outreach-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: job-outreach-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP

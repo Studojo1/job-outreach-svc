@@ -8,7 +8,7 @@ import { Spinner } from '@/components/ui/Spinner';
 import { useAppStore } from '@/store/useAppStore';
 import api from '@/lib/api';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const AUTH_BASE = process.env.NEXT_PUBLIC_AUTH_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 function LoginContent() {
   const router = useRouter();
@@ -41,7 +41,7 @@ function LoginContent() {
   }, [searchParams, router, setUser]);
 
   const handleGoogleLogin = () => {
-    window.location.href = `${API_BASE}/auth/google/login`;
+    window.location.href = `${AUTH_BASE}/auth/google/login`;
   };
 
   return (

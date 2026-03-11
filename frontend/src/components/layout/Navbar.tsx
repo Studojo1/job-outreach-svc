@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { useAppStore } from '@/store/useAppStore';
-import { LogOut, User } from 'lucide-react';
+import { LogOut, User, Rocket, BarChart3 } from 'lucide-react';
 
 export function Navbar() {
   const { user, setUser } = useAppStore();
@@ -24,6 +24,20 @@ export function Navbar() {
         <div className="flex items-center gap-m">
           {user ? (
             <>
+              <Link
+                href="/onboarding/upload"
+                className="flex items-center gap-s text-body-sm text-text-secondary hover:text-primary transition-colors"
+              >
+                <Rocket className="w-4 h-4" />
+                <span className="hidden sm:inline">Start Outreach</span>
+              </Link>
+              <Link
+                href="/campaign/dashboard"
+                className="flex items-center gap-s text-body-sm text-text-secondary hover:text-primary transition-colors"
+              >
+                <BarChart3 className="w-4 h-4" />
+                <span className="hidden sm:inline">My Campaigns</span>
+              </Link>
               <div className="flex items-center gap-s text-body-sm text-text-secondary">
                 <User className="w-4 h-4" />
                 <span>{user.name || user.email}</span>

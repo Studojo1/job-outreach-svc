@@ -13,6 +13,7 @@ from sqlalchemy import func
 
 from database.models import Campaign, EmailSent, Lead, EmailAccount, Candidate
 from core.logger import get_logger
+from core.metrics import CAMPAIGNS_RUNNING, EMAILS_SENT_TOTAL
 from services.email_campaign.email_generator_service import (
     assign_style,
     generate_email_for_lead,
@@ -186,7 +187,13 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
     campaign.status = target_status
     db.commit()
 
-    logger.info("[CAMPAIGN] Campaign #%d: %s -> %s", campaign_id, old_status, target_status)
+    logger.info("[CAMPAIGN] Campaign #%d: %s -> %s", campaign_id, old_status, target_status,
+                extra={"event": "campaign_state_change", "campaign_id": campaign_id})
+
+    if target_status == "running":
+        CAMPAIGNS_RUNNING.inc()
+    elif old_status == "running":
+        CAMPAIGNS_RUNNING.dec()
 
     # Queue campaign bootstrap (scheduler initialization) if transitioning to "running"
     if target_status == "running":

@@ -7,6 +7,7 @@ from typing import Dict, Any
 import requests
 
 from core.logger import get_logger
+from core.metrics import EMAILS_SENT_TOTAL
 
 logger = get_logger(__name__)
 
@@ -57,10 +58,12 @@ def send_gmail_email(
     resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers)
 
     if not resp.ok:
+        EMAILS_SENT_TOTAL.labels(status="failed").inc()
         logger.error("Gmail send failed: %d %s", resp.status_code, resp.text)
         raise RuntimeError(f"Gmail send failed: {resp.text}")
 
     result = resp.json()
+    EMAILS_SENT_TOTAL.labels(status="sent").inc()
     logger.info("Email sent successfully (id=%s, threadId=%s)", result.get("id"), result.get("threadId"))
 
     return result

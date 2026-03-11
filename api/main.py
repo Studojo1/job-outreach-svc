@@ -1,4 +1,4 @@
-import logging
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,9 +9,22 @@ from api.routes_enrichment import router as enrichment_router
 from api.routes_campaign import router as campaign_router
 from api.routes_auth import router as auth_router
 from api.routes_gmail import router as gmail_router
+from core.config import settings
 from core.logger import get_logger
+from core.middleware import RequestLoggingMiddleware
+from core.metrics import metrics_endpoint
 
 logger = get_logger("job_outreach_tool.api.main")
+
+# Sentry
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=0.2,
+        environment="production",
+        release=f"{settings.SERVICE_NAME}@1.0.0",
+    )
+    logger.info("Sentry initialized")
 
 app = FastAPI(
     title="Job Outreach Service",
@@ -20,7 +33,8 @@ app = FastAPI(
     root_path="/job-outreach",
 )
 
-# CORS
+# Middleware (order matters — outermost first)
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,6 +52,12 @@ app.include_router(campaign_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(gmail_router, prefix="/api/v1")
 
+
 @app.get("/health")
 def health_check():
     return {"status": "online"}
+
+
+@app.get("/metrics")
+def metrics():
+    return metrics_endpoint()

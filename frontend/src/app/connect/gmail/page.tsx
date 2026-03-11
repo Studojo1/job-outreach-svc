@@ -8,9 +8,8 @@ import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
+import { API_BASE } from '@/lib/api';
 import { Mail, Shield, Eye, Send, CheckCircle } from 'lucide-react';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 function GmailConnectContent() {
   const router = useRouter();
