@@ -14,9 +14,10 @@ from core.logger import get_logger
 logger = get_logger("job_outreach_tool.api.main")
 
 app = FastAPI(
-    title="InternReach Job Outreach Tool",
+    title="Job Outreach Service",
     description="Clean Backend Architecture Implementation",
-    version="1.0.0"
+    version="1.0.0",
+    root_path="/job-outreach",
 )
 
 # CORS
