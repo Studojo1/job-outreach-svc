@@ -4,7 +4,7 @@ Provides ``get_active_questions`` and ``get_question`` without pulling in the
 full FastAPI application from the intelligence layer.
 """
 
-from job_outreach_tool.services.candidate_intelligence.career_ontology import (
+from services.candidate_intelligence.career_ontology import (
     CAREER_ONTOLOGY,
     get_all_clusters,
 )

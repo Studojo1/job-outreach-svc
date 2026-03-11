@@ -6,7 +6,7 @@ User-provided values must be normalized to match.
 
 from typing import List, Optional
 
-from job_outreach_tool.core.logger import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

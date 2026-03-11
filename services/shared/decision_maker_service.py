@@ -4,8 +4,8 @@ from typing import List
 
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.database.models import decision_maker_model import DecisionMaker
-from job_outreach_tool.core.logger import get_logger
+from database.models import decision_maker_model import DecisionMaker
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

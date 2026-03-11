@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Any
 from urllib.parse import urlencode
 
-from job_outreach_tool.core.config import settings
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 

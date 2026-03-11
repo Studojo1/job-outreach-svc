@@ -4,7 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
+from services.shared.schemas.filter_schema import LeadFilter
 
 
 class ExpansionResult(BaseModel):

@@ -4,9 +4,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User
-from job_outreach_tool.services.authentication.jwt_service import verify_token
+from database.session import get_db
+from database.models import User
+from services.authentication.jwt_service import verify_token
 
 security = HTTPBearer()
 

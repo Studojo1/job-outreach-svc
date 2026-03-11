@@ -14,8 +14,8 @@ import json
 import os
 from typing import Dict, Any, List
 
-from job_outreach_tool.core.logger import get_logger
-from job_outreach_tool.services.shared.ai.apollo_industry_mapper import APOLLO_INDUSTRY_MAP
+from core.logger import get_logger
+from services.shared.ai.apollo_industry_mapper import APOLLO_INDUSTRY_MAP
 
 logger = get_logger(__name__)
 

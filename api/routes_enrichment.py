@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User, Candidate
-from job_outreach_tool.services.enrichment.enrichment_service import enrich_contacts
-from job_outreach_tool.api.dependencies import get_current_user
+from database.session import get_db
+from database.models import User, Candidate
+from services.enrichment.enrichment_service import enrich_contacts
+from api.dependencies import get_current_user
 
 router = APIRouter(prefix="/enrichment", tags=["Enrichment"])
 

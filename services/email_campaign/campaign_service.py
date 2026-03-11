@@ -11,9 +11,9 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from job_outreach_tool.database.models import Campaign, EmailSent, Lead, EmailAccount, Candidate
-from job_outreach_tool.core.logger import get_logger
-from job_outreach_tool.services.email_campaign.email_generator_service import (
+from database.models import Campaign, EmailSent, Lead, EmailAccount, Candidate
+from core.logger import get_logger
+from services.email_campaign.email_generator_service import (
     assign_style,
     generate_email_for_lead,
 )

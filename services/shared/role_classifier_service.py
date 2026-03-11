@@ -4,7 +4,7 @@ Maps a candidate's target role to a high-level function category
 so the system can select the right title family.
 """
 
-from job_outreach_tool.core.logger import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

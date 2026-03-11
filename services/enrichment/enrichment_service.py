@@ -11,9 +11,9 @@ from typing import Dict, Any, List, Optional
 import requests
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.core.config import settings
-from job_outreach_tool.database.models import Lead
-from job_outreach_tool.core.logger import get_logger
+from core.config import settings
+from database.models import Lead
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

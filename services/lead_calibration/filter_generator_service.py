@@ -7,12 +7,12 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.services.shared.schemas.candidate_schema import CandidateProfile
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
-from job_outreach_tool.services.shared.schemas.target_segment_schema import TargetSegment
-from job_outreach_tool.services.shared.decision_maker_engine import generate_titles_by_company_size
-from job_outreach_tool.services.shared.apollo_normalizer import normalize_industries, normalize_locations
-from job_outreach_tool.core.logger import get_logger
+from services.shared.schemas.candidate_schema import CandidateProfile
+from services.shared.schemas.filter_schema import LeadFilter
+from services.shared.schemas.target_segment_schema import TargetSegment
+from services.shared.decision_maker_engine import generate_titles_by_company_size
+from services.shared.apollo_normalizer import normalize_industries, normalize_locations
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

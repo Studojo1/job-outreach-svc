@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
-from job_outreach_tool.database.models import EmailAccount
-from job_outreach_tool.services.authentication.google_oauth import refresh_gmail_access_token
+from database.models import EmailAccount
+from services.authentication.google_oauth import refresh_gmail_access_token
 
 logger = logging.getLogger(__name__)
 

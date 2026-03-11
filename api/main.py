@@ -2,14 +2,14 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from job_outreach_tool.api.routes_candidate import router as candidate_router
-from job_outreach_tool.api.routes_discovery import router as discovery_router
-from job_outreach_tool.api.routes_scoring import router as scoring_router
-from job_outreach_tool.api.routes_enrichment import router as enrichment_router
-from job_outreach_tool.api.routes_campaign import router as campaign_router
-from job_outreach_tool.api.routes_auth import router as auth_router
-from job_outreach_tool.api.routes_gmail import router as gmail_router
-from job_outreach_tool.core.logger import get_logger
+from api.routes_candidate import router as candidate_router
+from api.routes_discovery import router as discovery_router
+from api.routes_scoring import router as scoring_router
+from api.routes_enrichment import router as enrichment_router
+from api.routes_campaign import router as campaign_router
+from api.routes_auth import router as auth_router
+from api.routes_gmail import router as gmail_router
+from core.logger import get_logger
 
 logger = get_logger("job_outreach_tool.api.main")
 

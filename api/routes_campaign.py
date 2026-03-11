@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User, Campaign
-from job_outreach_tool.services.email_campaign.campaign_service import (
+from database.session import get_db
+from database.models import User, Campaign
+from services.email_campaign.campaign_service import (
     create_campaign,
     transition_campaign,
     get_campaign_metrics,
 )
-from job_outreach_tool.api.dependencies import get_current_user
+from api.dependencies import get_current_user
 
 router = APIRouter(prefix="/campaign", tags=["Campaign"])
 
@@ -78,7 +78,7 @@ async def validate_campaign_readiness(
     db: Session = Depends(get_db),
 ):
     """Pre-launch validation: check leads, Gmail, and profile are ready."""
-    from job_outreach_tool.database.models import Candidate, Lead, EmailAccount
+    from database.models import Candidate, Lead, EmailAccount
 
     # Check candidate profile exists
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
@@ -175,8 +175,8 @@ async def preview_email(
     db: Session = Depends(get_db),
 ):
     """Generate a sample email preview so the user can see quality before launching."""
-    from job_outreach_tool.database.models import Candidate, Lead
-    from job_outreach_tool.services.email_campaign.email_generator_service import (
+    from database.models import Candidate, Lead
+    from services.email_campaign.email_generator_service import (
         assign_style,
         generate_email_for_lead,
     )

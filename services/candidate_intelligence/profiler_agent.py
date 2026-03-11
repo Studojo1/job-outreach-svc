@@ -10,7 +10,7 @@ import logging
 import time
 from openai import AzureOpenAI
 from dotenv import load_dotenv
-from job_outreach_tool.services.candidate_intelligence.models import AgentResponse, MCQQuestion, MCQOption, ChatMessage
+from services.candidate_intelligence.models import AgentResponse, MCQQuestion, MCQOption, ChatMessage
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def _get_model():
 
 def get_ontology_as_text() -> str:
     try:
-        from job_outreach_tool.services.candidate_intelligence.career_ontology import CAREER_ONTOLOGY
+        from services.candidate_intelligence.career_ontology import CAREER_ONTOLOGY
         lines = []
         for cluster_name, specializations in CAREER_ONTOLOGY.items():
             lines.append(f"\n### {cluster_name}")
@@ -409,7 +409,7 @@ def generate_final_payload(
     """
     Generate the final candidate profile payload using direct JSON mode.
     """
-    from job_outreach_tool.services.candidate_intelligence.models import CandidatePayload
+    from services.candidate_intelligence.models import CandidatePayload
     import uuid
     from datetime import datetime
 

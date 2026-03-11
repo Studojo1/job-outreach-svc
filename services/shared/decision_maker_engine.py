@@ -10,12 +10,12 @@
 
 from typing import List
 
-from job_outreach_tool.services.shared.role_classifier_service import classify_role_function
-from job_outreach_tool.services.shared.title_family_service import get_title_family, filter_titles_by_seniority
-from job_outreach_tool.services.shared.company_size_service import get_company_size_segments, get_target_seniority_by_size
-from job_outreach_tool.services.shared.title_expansion_service import expand_titles
-from job_outreach_tool.services.shared.schemas.target_segment_schema import TargetSegment
-from job_outreach_tool.core.logger import get_logger
+from services.shared.role_classifier_service import classify_role_function
+from services.shared.title_family_service import get_title_family, filter_titles_by_seniority
+from services.shared.company_size_service import get_company_size_segments, get_target_seniority_by_size
+from services.shared.title_expansion_service import expand_titles
+from services.shared.schemas.target_segment_schema import TargetSegment
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

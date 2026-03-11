@@ -8,7 +8,7 @@ import re
 import uuid as _uuid
 from datetime import datetime as _dt
 
-from job_outreach_tool.services.candidate_intelligence.career_ontology import CAREER_ONTOLOGY
+from services.candidate_intelligence.career_ontology import CAREER_ONTOLOGY
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,8 @@ import os
 import asyncio
 from typing import Dict, Any, List
 
-from job_outreach_tool.services.ai.azure_openai_client import generate_json
-from job_outreach_tool.core.logger import get_logger
+from services.ai.azure_openai_client import generate_json
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

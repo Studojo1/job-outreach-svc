@@ -2,8 +2,8 @@ import json
 import os
 from typing import Dict, Any
 
-from job_outreach_tool.services.ai.azure_openai_client import generate_json
-from job_outreach_tool.core.logger import get_logger
+from services.ai.azure_openai_client import generate_json
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -40,10 +40,10 @@ PERMITTED_APOLLO_KEYS = {
     "person_seniorities"
 }
 
-from job_outreach_tool.services.ai.azure_openai_client import generate_json
-from job_outreach_tool.services.ai.filter_calibration_ai import _classify_titles_by_cluster, _classify_titles_by_seniority
-from job_outreach_tool.services.ai.hiring_authority_service import get_hiring_titles
-from job_outreach_tool.core.logger import get_logger
+from services.ai.azure_openai_client import generate_json
+from services.ai.filter_calibration_ai import _classify_titles_by_cluster, _classify_titles_by_seniority
+from services.ai.hiring_authority_service import get_hiring_titles
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

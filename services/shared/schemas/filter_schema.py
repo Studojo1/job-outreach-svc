@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from job_outreach_tool.services.shared.schemas.target_segment_schema import TargetSegment
+from services.shared.schemas.target_segment_schema import TargetSegment
 
 
 class LeadFilter(BaseModel):

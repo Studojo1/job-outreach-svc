@@ -10,9 +10,9 @@ Each email is tailored using:
 """
 
 from typing import Tuple, Dict, Any
-from job_outreach_tool.database.models import Lead, Candidate
-from job_outreach_tool.services.shared.ai.azure_openai_client import generate_json
-from job_outreach_tool.core.logger import get_logger
+from database.models import Lead, Candidate
+from services.shared.ai.azure_openai_client import generate_json
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -2,10 +2,10 @@ import logging
 from typing import Dict, Any, List
 from sqlalchemy import or_
 
-from job_outreach_tool.database.models import contact import Contact
-from job_outreach_tool.services.apollo_service import search_people_chunked
-from job_outreach_tool.services.lead_collector_service import parse_apollo_person
-from job_outreach_tool.core.logger import get_logger
+from database.models import contact import Contact
+from services.apollo_service import search_people_chunked
+from services.lead_collector_service import parse_apollo_person
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -1,15 +1,3 @@
 {
-  "/_not-found/page": "app/_not-found/page.js",
-  "/campaign/setup/page": "app/campaign/setup/page.js",
-  "/connect/gmail/page": "app/connect/gmail/page.js",
-  "/enrichment/page": "app/enrichment/page.js",
-  "/campaign/dashboard/page": "app/campaign/dashboard/page.js",
-  "/login/page": "app/login/page.js",
-  "/leads/discovery/page": "app/leads/discovery/page.js",
-  "/leads/results/page": "app/leads/results/page.js",
-  "/onboarding/profile/page": "app/onboarding/profile/page.js",
-  "/onboarding/upload/page": "app/onboarding/upload/page.js",
-  "/page": "app/page.js",
-  "/onboarding/chat/page": "app/onboarding/chat/page.js",
-  "/campaign/templates/page": "app/campaign/templates/page.js"
+  "/page": "app/page.js"
 }

@@ -3,8 +3,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from datetime import datetime
 
-from job_outreach_tool.services.authentication.google_oauth import generate_gmail_auth_url, exchange_gmail_code, get_google_user_info
-from job_outreach_tool.services.authentication.token_manager import store_user_tokens, get_user_token, refresh_access_token
+from services.authentication.google_oauth import generate_gmail_auth_url, exchange_gmail_code, get_google_user_info
+from services.authentication.token_manager import store_user_tokens, get_user_token, refresh_access_token
 
 logger = logging.getLogger(__name__)
 

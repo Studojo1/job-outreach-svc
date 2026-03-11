@@ -5,15 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User
-from job_outreach_tool.core.config import settings
-from job_outreach_tool.services.authentication.google_oauth import (
+from database.session import get_db
+from database.models import User
+from core.config import settings
+from services.authentication.google_oauth import (
     generate_gmail_auth_url,
     exchange_gmail_code,
     get_google_user_info,
 )
-from job_outreach_tool.services.authentication.token_manager import store_user_tokens
+from services.authentication.token_manager import store_user_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def gmail_oauth_connect(token: str = Query(None)):
         raise HTTPException(status_code=401, detail="Token required. Pass ?token=<jwt>")
 
     # Verify the token manually since we can't use Depends(get_current_user)
-    from job_outreach_tool.services.authentication.jwt_service import verify_token
+    from services.authentication.jwt_service import verify_token
     payload = verify_token(token)
     if not payload:
         logger.error("[GmailOAuth] Invalid or expired JWT token")

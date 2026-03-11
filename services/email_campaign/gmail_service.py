@@ -12,9 +12,9 @@ from typing import Dict, Any, Optional
 import requests
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.database.models import EmailAccount
-from job_outreach_tool.core.config import settings
-from job_outreach_tool.core.logger import get_logger
+from database.models import EmailAccount
+from core.config import settings
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

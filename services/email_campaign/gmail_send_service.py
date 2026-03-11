@@ -6,7 +6,7 @@ from typing import Dict, Any
 
 import requests
 
-from job_outreach_tool.core.logger import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -83,7 +83,7 @@ def _refresh_token_sync(email_account, db) -> str:
 
     logger.info("Refreshing expired Gmail token for account %d", email_account.id)
 
-    from job_outreach_tool.core.config import settings
+    from core.config import settings
 
     resp = requests.post("https://oauth2.googleapis.com/token", data={
         "client_id": settings.GMAIL_CLIENT_ID,
@@ -126,8 +126,8 @@ def send_email_via_gmail(
     Returns:
         True if email sent successfully, False otherwise.
     """
-    from job_outreach_tool.database.session import SessionLocal
-    from job_outreach_tool.database.models import EmailAccount
+    from database.session import SessionLocal
+    from database.models import EmailAccount
 
     db = SessionLocal()
     try:

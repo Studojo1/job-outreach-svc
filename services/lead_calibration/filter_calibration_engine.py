@@ -24,11 +24,11 @@ LOOSENING PRIORITY:
 
 from typing import Dict, Any, List, Tuple, Optional, NamedTuple
 
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
-from job_outreach_tool.services.shared.schemas.target_segment_schema import TargetSegment
-from job_outreach_tool.services.lead_discovery.apollo_query_builder import build_apollo_query
-from job_outreach_tool.services.lead_discovery.apollo_service import search_people_count
-from job_outreach_tool.core.logger import get_logger
+from services.shared.schemas.filter_schema import LeadFilter
+from services.shared.schemas.target_segment_schema import TargetSegment
+from services.lead_discovery.apollo_query_builder import build_apollo_query
+from services.lead_discovery.apollo_service import search_people_count
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -181,7 +181,7 @@ class CalibrationState:
 
     def clone(self) -> "CalibrationState":
         """Deep copy for revert support."""
-        from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
+        from services.shared.schemas.filter_schema import LeadFilter
         c = CalibrationState.__new__(CalibrationState)
         c.title_tiers = {k: list(v) for k, v in self.title_tiers.items()}
         c.active_tiers = dict(self.active_tiers)

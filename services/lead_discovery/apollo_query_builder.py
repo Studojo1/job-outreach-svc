@@ -6,8 +6,8 @@ people search API JSON payloads.
 
 from typing import Dict, Any
 
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
-from job_outreach_tool.core.logger import get_logger
+from services.shared.schemas.filter_schema import LeadFilter
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

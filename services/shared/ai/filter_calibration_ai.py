@@ -2,10 +2,10 @@ import json
 import time
 from typing import Dict, Any, Tuple, List
 
-from job_outreach_tool.services.apollo_service import search_people_count
-from job_outreach_tool.services.debug.debug_trace_service import DebugTrace
-from job_outreach_tool.services.ai.apollo_industry_mapper import validate_and_map_industries
-from job_outreach_tool.core.logger import get_logger
+from services.apollo_service import search_people_count
+from services.debug.debug_trace_service import DebugTrace
+from services.ai.apollo_industry_mapper import validate_and_map_industries
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -4,9 +4,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User, Candidate
-from job_outreach_tool.api.dependencies import get_current_user
+from database.session import get_db
+from database.models import User, Candidate
+from api.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ async def score_leads(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     try:
-        from job_outreach_tool.api.routes_discovery import _score_candidate_leads
+        from api.routes_discovery import _score_candidate_leads
         scored_count = _score_candidate_leads(db, candidate)
         return {"status": "success", "scored_count": scored_count}
     except Exception as e:

@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User, Candidate, Lead, LeadScore
-from job_outreach_tool.services.candidate_intelligence.parser import parse_resume
-from job_outreach_tool.api.dependencies import get_current_user
+from database.session import get_db
+from database.models import User, Candidate, Lead, LeadScore
+from services.candidate_intelligence.parser import parse_resume
+from api.dependencies import get_current_user
 
 import logging
 import time
@@ -67,8 +67,8 @@ async def candidate_chat(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     try:
-        from job_outreach_tool.services.candidate_intelligence.profiler_agent import get_agent_response
-        from job_outreach_tool.services.candidate_intelligence.models import ChatMessage
+        from services.candidate_intelligence.profiler_agent import get_agent_response
+        from services.candidate_intelligence.models import ChatMessage
 
         t_db = time.perf_counter()
         logger.info(f"[TIMING] DB lookup: {(t_db - t_start)*1000:.0f}ms")
@@ -121,8 +121,8 @@ async def generate_payload(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     try:
-        from job_outreach_tool.services.candidate_intelligence.profiler_agent import generate_final_payload
-        from job_outreach_tool.services.candidate_intelligence.models import ChatMessage
+        from services.candidate_intelligence.profiler_agent import generate_final_payload
+        from services.candidate_intelligence.models import ChatMessage
 
         chat_history = [
             ChatMessage(role=msg["role"], content=msg["content"])

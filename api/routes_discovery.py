@@ -7,12 +7,12 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 
-from job_outreach_tool.database.session import get_db
-from job_outreach_tool.database.models import User, Candidate, Lead, LeadScore
-from job_outreach_tool.services.lead_discovery.lead_collector_service import collect_leads
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
-from job_outreach_tool.services.shared.schemas.candidate_schema import CandidateProfile
-from job_outreach_tool.api.dependencies import get_current_user
+from database.session import get_db
+from database.models import User, Candidate, Lead, LeadScore
+from services.lead_discovery.lead_collector_service import collect_leads
+from services.shared.schemas.filter_schema import LeadFilter
+from services.shared.schemas.candidate_schema import CandidateProfile
+from api.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
 
-    from job_outreach_tool.services.lead_scoring.lead_scoring_service import score_and_select_leads as score_leads_svc
+    from services.lead_scoring.lead_scoring_service import score_and_select_leads as score_leads_svc
     scored = score_leads_svc(
         leads=lead_dicts,
         candidate_profile=candidate_profile,
@@ -180,7 +180,7 @@ async def search_leads(
 
             logger.info(f"[LeadSearch] Built CandidateProfile: roles={profile.preferred_roles}, locations={profile.location_preferences}")
 
-            from job_outreach_tool.services.lead_calibration.filter_generator_service import generate_apollo_filters
+            from services.lead_calibration.filter_generator_service import generate_apollo_filters
             filters = generate_apollo_filters(profile, db)
 
             logger.info(f"[LeadSearch] Filters generated — segments={len(filters.target_segments)}, "

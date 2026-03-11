@@ -19,12 +19,12 @@ from copy import deepcopy
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from job_outreach_tool.services.shared.schemas.filter_schema import LeadFilter
-from job_outreach_tool.services.shared.schemas.target_segment_schema import TargetSegment
-from job_outreach_tool.services.lead_discovery.apollo_query_builder import build_apollo_query
-from job_outreach_tool.services.lead_discovery.apollo_service import search_people_chunked
-from job_outreach_tool.database.models import Lead
-from job_outreach_tool.core.logger import get_logger
+from services.shared.schemas.filter_schema import LeadFilter
+from services.shared.schemas.target_segment_schema import TargetSegment
+from services.lead_discovery.apollo_query_builder import build_apollo_query
+from services.lead_discovery.apollo_service import search_people_chunked
+from database.models import Lead
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

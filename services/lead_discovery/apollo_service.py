@@ -8,8 +8,8 @@ import time
 import requests
 from typing import Dict, Any, List
 
-from job_outreach_tool.core.config import settings
-from job_outreach_tool.core.logger import get_logger
+from core.config import settings
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
