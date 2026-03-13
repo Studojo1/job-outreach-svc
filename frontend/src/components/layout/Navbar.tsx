@@ -1,61 +1,318 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAppStore } from '@/store/useAppStore';
-import { LogOut, User, Rocket, BarChart3 } from 'lucide-react';
+
+/**
+ * Navbar — mirrors the Studojo platform Header component.
+ *
+ * Logged-in users see a settings-icon dropdown with:
+ *   My Resumes, My Applications, My Orders, Settings, Sign out
+ *
+ * Links to platform-level pages (resumes, applications, orders, settings)
+ * use absolute hrefs so the browser navigates to the main Studojo app
+ * rather than staying within the /outreach Next.js sub-app.
+ */
+
+const STUDOJO_BASE = 'https://studojo.com';
+
+const NAV_LINKS = [
+  { href: STUDOJO_BASE, label: 'Home', internal: false },
+  { href: `${STUDOJO_BASE}/blog`, label: 'Blog', internal: false },
+  { href: '/', label: 'Outreach', internal: true },
+  { href: `${STUDOJO_BASE}/dojos`, label: 'Dojos', internal: false },
+  { href: `${STUDOJO_BASE}/reviews`, label: 'Reviews', internal: false },
+] as const;
+
+const USER_MENU_LINKS = [
+  { href: `${STUDOJO_BASE}/resumes`, label: 'My Resumes', icon: 'resume', internal: false },
+  { href: `${STUDOJO_BASE}/my-applications`, label: 'My Applications', icon: 'briefcase', internal: false },
+  { href: '/orders', label: 'My Orders', icon: 'order', internal: true },
+  { href: `${STUDOJO_BASE}/settings`, label: 'Settings', icon: 'settings', internal: false },
+] as const;
+
+function MenuIcon({ name }: { name: string }) {
+  switch (name) {
+    case 'resume':
+      return (
+        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+      );
+    case 'briefcase':
+      return (
+        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+      );
+    case 'order':
+      return (
+        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+        </svg>
+      );
+    case 'settings':
+      return (
+        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
 
 export function Navbar() {
   const { user, setUser } = useAppStore();
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
+  const handleSignOut = () => {
     setUser(null);
-    window.location.href = '/';
+    window.location.href = STUDOJO_BASE;
   };
 
-  return (
-    <nav className="sticky top-0 z-40 h-16 bg-white border-b border-border-light">
-      <div className="max-w-container mx-auto h-full flex items-center justify-between px-l">
-        <Link href="/" className="text-h3 text-primary font-bold">
-          InternReach
-        </Link>
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    if (userMenuOpen) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [userMenuOpen]);
 
-        <div className="flex items-center gap-m">
+  return (
+    <header className="sticky top-0 z-50 w-full border-b border-ink bg-white">
+      <div className="mx-auto flex h-16 max-w-container items-center justify-between px-4 md:h-20 md:px-6">
+        {/* Brand */}
+        <a
+          href={STUDOJO_BASE}
+          className="font-satoshi text-2xl font-black leading-9 text-ink"
+        >
+          studojo
+        </a>
+
+        {/* Desktop nav */}
+        <nav className="hidden items-center gap-8 md:flex" aria-label="Main">
+          {NAV_LINKS.map((link) =>
+            link.internal ? (
+              <Link
+                key={link.label}
+                href={link.href}
+                className="font-satoshi text-base font-bold leading-6 text-secondary"
+              >
+                {link.label}
+              </Link>
+            ) : (
+              <a
+                key={link.label}
+                href={link.href}
+                className="font-satoshi text-base leading-6 text-muted hover:text-ink transition-colors"
+              >
+                {link.label}
+              </a>
+            )
+          )}
+        </nav>
+
+        <div className="flex items-center gap-4">
           {user ? (
             <>
-              <Link
-                href="/onboarding/upload"
-                className="flex items-center gap-s text-body-sm text-text-secondary hover:text-primary transition-colors"
-              >
-                <Rocket className="w-4 h-4" />
-                <span className="hidden sm:inline">Start Outreach</span>
-              </Link>
-              <Link
-                href="/campaign/dashboard"
-                className="flex items-center gap-s text-body-sm text-text-secondary hover:text-primary transition-colors"
-              >
-                <BarChart3 className="w-4 h-4" />
-                <span className="hidden sm:inline">My Campaigns</span>
-              </Link>
-              <div className="flex items-center gap-s text-body-sm text-text-secondary">
-                <User className="w-4 h-4" />
-                <span>{user.name || user.email}</span>
+              {/* User dropdown — mirrors Studojo Header */}
+              <div className="relative hidden sm:block" ref={userMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen(!userMenuOpen)}
+                  className="flex items-center gap-2 font-satoshi text-base font-medium leading-6 text-muted hover:text-ink"
+                >
+                  <MenuIcon name="settings" />
+                  <span>{user.name || user.email}</span>
+                  <svg
+                    className={`h-4 w-4 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {userMenuOpen && (
+                  <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border-2 border-ink bg-white shadow-lg z-50">
+                    <div className="py-2">
+                      {USER_MENU_LINKS.map((item) =>
+                        item.internal ? (
+                          <Link
+                            key={item.label}
+                            href={item.href}
+                            onClick={() => setUserMenuOpen(false)}
+                            className="flex items-center gap-3 px-4 py-2 font-satoshi text-sm text-muted hover:bg-surface-muted"
+                          >
+                            <MenuIcon name={item.icon} />
+                            <span>{item.label}</span>
+                          </Link>
+                        ) : (
+                          <a
+                            key={item.label}
+                            href={item.href}
+                            onClick={() => setUserMenuOpen(false)}
+                            className="flex items-center gap-3 px-4 py-2 font-satoshi text-sm text-muted hover:bg-surface-muted"
+                          >
+                            <MenuIcon name={item.icon} />
+                            <span>{item.label}</span>
+                          </a>
+                        )
+                      )}
+                      <div className="my-1 border-t border-ink/10" />
+                      <button
+                        type="button"
+                        onClick={() => { setUserMenuOpen(false); handleSignOut(); }}
+                        className="flex w-full items-center gap-3 px-4 py-2 font-satoshi text-sm text-muted hover:bg-surface-muted"
+                      >
+                        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                        </svg>
+                        <span>Sign out</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-              <button
-                onClick={handleLogout}
-                className="flex items-center gap-s text-body-sm text-text-secondary hover:text-text-primary transition-colors"
+
+              {/* Mobile: settings icon */}
+              <a
+                href={`${STUDOJO_BASE}/settings`}
+                className="flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-surface-muted sm:hidden"
+                aria-label="Settings"
               >
-                <LogOut className="w-4 h-4" />
-              </button>
+                <MenuIcon name="settings" />
+              </a>
             </>
           ) : (
-            <Link href="/login" className="btn-primary text-body-sm px-4 py-2 rounded-lg">
-              Sign In
-            </Link>
+            <>
+              <a
+                href={`${STUDOJO_BASE}/auth?mode=signin&redirect=/outreach`}
+                className="hidden font-satoshi text-base font-medium leading-6 text-muted sm:block"
+              >
+                Sign In
+              </a>
+              <a
+                href={`${STUDOJO_BASE}/auth?mode=signup`}
+                className="inline-flex h-12 items-center justify-center rounded-2xl bg-ink px-4 font-satoshi text-sm font-medium leading-6 text-white shadow-brutal transition-transform hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active border-2 border-ink"
+              >
+                Get Started
+              </a>
+            </>
           )}
+
+          {/* Mobile hamburger */}
+          <button
+            type="button"
+            onClick={() => setMobileOpen((o) => !o)}
+            className="flex h-10 w-10 items-center justify-center rounded-lg text-ink hover:bg-surface-muted md:hidden"
+            aria-expanded={mobileOpen}
+            aria-label="Toggle menu"
+          >
+            {mobileOpen ? (
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            ) : (
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            )}
+          </button>
         </div>
       </div>
-    </nav>
+
+      {/* Mobile menu */}
+      {mobileOpen && (
+        <nav className="border-t border-ink/10 bg-white px-6 py-4 md:hidden" aria-label="Mobile menu">
+          <ul className="flex flex-col gap-2">
+            {NAV_LINKS.map(({ href, label, internal }) => (
+              <li key={label}>
+                {internal ? (
+                  <Link
+                    href={href}
+                    onClick={() => setMobileOpen(false)}
+                    className="block rounded-lg py-2 font-satoshi font-bold text-secondary"
+                  >
+                    {label}
+                  </Link>
+                ) : (
+                  <a
+                    href={href}
+                    onClick={() => setMobileOpen(false)}
+                    className="block rounded-lg py-2 font-satoshi text-muted hover:bg-surface-muted"
+                  >
+                    {label}
+                  </a>
+                )}
+              </li>
+            ))}
+            {user ? (
+              <>
+                {USER_MENU_LINKS.map((item) => (
+                  <li key={item.label}>
+                    {item.internal ? (
+                      <Link
+                        href={item.href}
+                        onClick={() => setMobileOpen(false)}
+                        className="block rounded-lg py-2 font-satoshi text-muted hover:bg-surface-muted"
+                      >
+                        {item.label}
+                      </Link>
+                    ) : (
+                      <a
+                        href={item.href}
+                        onClick={() => setMobileOpen(false)}
+                        className="block rounded-lg py-2 font-satoshi text-muted hover:bg-surface-muted"
+                      >
+                        {item.label}
+                      </a>
+                    )}
+                  </li>
+                ))}
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => { setMobileOpen(false); handleSignOut(); }}
+                    className="block w-full rounded-lg py-2 text-left font-satoshi text-muted hover:bg-surface-muted"
+                  >
+                    Sign out
+                  </button>
+                </li>
+              </>
+            ) : (
+              <>
+                <li>
+                  <a
+                    href={`${STUDOJO_BASE}/auth?mode=signin&redirect=/outreach`}
+                    onClick={() => setMobileOpen(false)}
+                    className="block rounded-lg py-2 font-satoshi text-muted hover:bg-surface-muted"
+                  >
+                    Sign In
+                  </a>
+                </li>
+                <li>
+                  <a
+                    href={`${STUDOJO_BASE}/auth?mode=signup`}
+                    onClick={() => setMobileOpen(false)}
+                    className="block rounded-lg py-2 font-satoshi text-muted hover:bg-surface-muted"
+                  >
+                    Get Started
+                  </a>
+                </li>
+              </>
+            )}
+          </ul>
+        </nav>
+      )}
+    </header>
   );
 }
