@@ -18,8 +18,8 @@ interface AppState {
   clearChatHistory: () => void;
 
   // Lead discovery
-  selectedTier: 5 | 200 | 350 | 500;
-  setSelectedTier: (tier: 5 | 200 | 350 | 500) => void;
+  selectedTier: 200 | 350 | 500;
+  setSelectedTier: (tier: 200 | 350 | 500) => void;
 
   // Campaign
   selectedTemplate: EmailTemplate | null;
@@ -33,6 +33,10 @@ interface AppState {
 
   emailAccountId: number | null;
   setEmailAccountId: (id: number | null) => void;
+
+  // Order tracking
+  orderId: number | null;
+  setOrderId: (id: number | null) => void;
 
   // Current step in onboarding
   currentStep: number;
@@ -65,6 +69,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   emailAccountId: null,
   setEmailAccountId: (emailAccountId) => set({ emailAccountId }),
 
+  orderId: null,
+  setOrderId: (orderId) => set({ orderId }),
+
   currentStep: 1,
   setCurrentStep: (currentStep) => set({ currentStep }),
 }), {
@@ -76,5 +83,6 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     selectedStyles: state.selectedStyles,
     campaignId: state.campaignId,
     emailAccountId: state.emailAccountId,
+    orderId: state.orderId,
   }),
 }));
