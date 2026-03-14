@@ -3,8 +3,13 @@ import '@/styles/globals.css';
 import { Providers } from './providers';
 
 export const metadata: Metadata = {
-  title: 'InternReach - Job Outreach Tool',
+  title: 'OpportunityApply - Job Outreach Tool',
   description: 'Find hiring managers for your dream job',
+  icons: {
+    icon: '/outreach/favicon.png',
+    shortcut: '/outreach/favicon.png',
+    apple: '/outreach/favicon.png',
+  },
 };
 
 export default function RootLayout({

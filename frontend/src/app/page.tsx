@@ -58,29 +58,28 @@ export default function LandingPage() {
     <div className="min-h-screen bg-surface-muted flex flex-col">
       <Navbar />
 
-      {/* Hero — darker purple background */}
-      <section className="border-b border-ink bg-gradient-to-br from-purple-100 via-purple-50 to-violet-100">
+      {/* Hero — dark purple background */}
+      <section className="border-b border-ink bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
         <Container className="py-16 md:py-24 text-center md:text-left">
-          <h1 className="font-clash text-4xl md:text-5xl lg:text-6xl font-medium leading-tight tracking-tight text-ink max-w-3xl">
+          <h1 className="font-clash text-4xl md:text-5xl lg:text-6xl font-medium leading-tight tracking-tight text-white max-w-3xl">
             Find Hiring Managers for Your Dream Job
           </h1>
-          <p className="text-base md:text-lg text-muted mt-5 md:mt-7 max-w-xl font-satoshi">
+          <p className="text-base md:text-lg text-purple-200 mt-5 md:mt-7 max-w-xl font-satoshi">
             OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
           </p>
           <div className="mt-8 flex flex-col gap-4 md:flex-row md:flex-wrap">
-            <Button
-              size="lg"
+            <button
               onClick={() => router.push('/onboarding/upload')}
+              className="inline-flex items-center justify-center font-satoshi font-medium rounded-2xl border-2 border-ink h-14 px-10 text-lg bg-gradient-to-r from-purple-300 via-violet-300 to-purple-200 text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none transition-all"
             >
               Get Started <ArrowRight className="w-5 h-5 ml-2 inline" />
-            </Button>
-            <Button
-              size="lg"
-              variant="outline"
+            </button>
+            <button
               onClick={() => router.push('/orders')}
+              className="inline-flex items-center justify-center font-satoshi font-medium rounded-2xl border-2 border-white/40 h-14 px-10 text-lg text-white hover:bg-white/10 transition-all"
             >
               <ClipboardList className="w-5 h-5 mr-2 inline" /> View Campaigns
-            </Button>
+            </button>
           </div>
         </Container>
       </section>
@@ -212,7 +211,7 @@ export default function LandingPage() {
           {/* Legal */}
           <div className="mt-8 flex flex-col items-center justify-between gap-4 border-t border-ink/10 pt-6 md:mt-8 md:flex-row md:border-0 md:pt-0">
             <p className="text-center font-satoshi text-xs text-muted md:text-lg">
-              &copy; {new Date().getFullYear()} Studojo. Crafted with care by students
+              &copy; 2025 Studojo. Crafted with ❤️ by students
             </p>
             <div className="flex flex-wrap justify-center gap-4 md:gap-8">
               <a href={`${STUDOJO_BASE}/privacy`} className="font-satoshi text-xs text-muted md:text-lg hover:underline">Privacy Policy</a>
