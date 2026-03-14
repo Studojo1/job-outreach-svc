@@ -3,9 +3,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAppStore } from '@/store/useAppStore';
+import api from '@/lib/api';
 
 /**
  * Navbar — mirrors the Studojo platform Header component.
+ *
+ * Automatically detects auth state via a silent /auth/me check so that
+ * users who logged in on studojo.com see their profile on /outreach too.
  *
  * Logged-in users see a settings-icon dropdown with:
  *   My Resumes, My Applications, My Orders, Settings, Sign out
@@ -69,6 +73,17 @@ export function Navbar() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  // Silent auth check — detect BetterAuth session cookie from main site
+  useEffect(() => {
+    if (user) return;
+    api.get('/auth/me')
+      .then((res) => {
+        const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        setUser({ ...res.data, timezone: res.data.timezone || browserTz });
+      })
+      .catch(() => { /* not logged in — ignore */ });
+  }, []);
 
   const handleSignOut = () => {
     setUser(null);
