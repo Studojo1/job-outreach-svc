@@ -1,0 +1,97 @@
+name: Build and Deploy (Staging)
+
+on:
+  push:
+    branches: [staging]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  REGISTRY: acrstudojo-dhfsdrfhf6a6bbg2.azurecr.io
+  ACR_NAME: acrstudojo
+  SERVICE_NAME: job-outreach-svc
+  IMAGE_TAG: staging
+  NAMESPACE: staging
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: |
+          TOKEN=$(az acr login --name ${{ env.ACR_NAME }} --expose-token --output tsv --query accessToken)
+          docker login ${{ env.REGISTRY }} -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging
+            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "latest"
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group rg-studojo \
+            --name studojo-aks \
+            --overwrite-existing
+
+      - name: Deploy to Kubernetes (staging)
+        run: |
+          kubectl set image deployment/${{ env.SERVICE_NAME }} \
+            ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging \
+            -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
+            -n ${{ env.NAMESPACE }} --timeout=10m || {
+            echo "Rollout failed or timed out. Checking pod status..."
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.SERVICE_NAME }} -o wide
+            LATEST_POD=$(kubectl get pods -n ${{ env.NAMESPACE }} \
+              -l app=${{ env.SERVICE_NAME }} \
+              --sort-by=.metadata.creationTimestamp \
+              -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$LATEST_POD" ]; then
+              kubectl get events -n ${{ env.NAMESPACE }} \
+                --field-selector involvedObject.name=$LATEST_POD \
+                --sort-by='.lastTimestamp' | tail -20 || true
+              kubectl logs -n ${{ env.NAMESPACE }} $LATEST_POD --tail=50 || true
+            fi
+            exit 1
+          }
