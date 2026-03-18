@@ -33,11 +33,12 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:latest
+            # :latest removed during production recovery — prevents accidental pod auto-update
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
 
   deploy:
+    if: false  # SAFETY LOCK — disabled during production recovery
     needs: build
     runs-on: ubuntu-latest
     steps:

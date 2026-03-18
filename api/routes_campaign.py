@@ -1,8 +1,13 @@
 """Campaign Routes — Campaign lifecycle, templates, and analytics."""
 
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+import logging
+import time
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from typing import Optional
 
 from database.session import get_db
 from database.models import User, Campaign
@@ -13,39 +18,43 @@ from services.email_campaign.campaign_service import (
 )
 from api.dependencies import get_current_user
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/campaign", tags=["Campaign"])
 
-# Pre-built email templates
+# Pre-built email templates (legacy fallback for non-AI mode)
+# When AI styles are selected, the structured pipeline in email_generator_service.py
+# handles generation instead.
 EMAIL_TEMPLATES = [
     {
         "id": 1,
         "name": "Warm Introduction",
-        "subject": "Quick intro - {name}",
-        "body": "Hi {name},\n\nI came across your profile at {company} and was impressed by your work as {title}.\n\nI'm a motivated professional looking to contribute to teams like yours. I'd love to have a brief conversation about potential opportunities.\n\nWould you be open to a quick 10-minute chat this week?\n\nBest regards",
+        "subject": "quick intro",
+        "body": "Hi {name},\n\nI noticed {company} recently and wanted to reach out. I've been working in the space and your team caught my eye.\n\nWould you mind pointing me in the right direction if there's anyone I should talk to?\n\nAppreciate your time either way.\n\nBest,",
     },
     {
         "id": 2,
-        "name": "Skills Highlight",
-        "subject": "Skilled candidate for {company}",
-        "body": "Hi {name},\n\nI noticed {company} is doing great things in the industry. As someone with hands-on experience in the field, I believe I could add value to your team.\n\nI'd appreciate the chance to discuss how my background aligns with what you're building.\n\nWould you have 10 minutes for a quick conversation?\n\nThank you",
+        "name": "Skills-Based Pitch",
+        "subject": "saw your team at {company}",
+        "body": "Hi {name},\n\nI've been building some projects in the same area {company} works in and thought it'd be worth reaching out. I'm looking for a role where I can keep working on similar problems.\n\nIs there someone on the team I should connect with?\n\nThanks for reading.",
     },
     {
         "id": 3,
-        "name": "Company Interest",
-        "subject": "Excited about {company}'s mission",
-        "body": "Hi {name},\n\nI've been following {company}'s growth and I'm genuinely excited about your direction. Your work as {title} caught my attention.\n\nI'm exploring opportunities where I can make a meaningful impact and would love to learn more about your team's needs.\n\nCould we connect briefly this week?\n\nBest",
+        "name": "Company Curiosity",
+        "subject": "curious about {company}",
+        "body": "Hey {name},\n\nCame across {company} while looking at teams in the space and got curious about what you're building. I've been spending time on related work and would love to learn more.\n\nWould you have a few minutes to chat sometime?\n\nCheers,",
     },
     {
         "id": 4,
-        "name": "Mutual Connection",
-        "subject": "Connecting with you, {name}",
-        "body": "Hi {name},\n\nI hope this message finds you well. I'm reaching out because I'm actively exploring roles in the space where {company} operates.\n\nGiven your role as {title}, I thought you might have insights into opportunities that could be a good fit.\n\nI'd be grateful for even a brief conversation. Would that work for you?\n\nWarm regards",
+        "name": "Peer Connect",
+        "subject": "quick question about {company}",
+        "body": "Hi {name},\n\nI saw your role at {company} and thought we might share some overlapping interests. I've been working on a few things in the same area and figured it was worth saying hi.\n\nWould you be up for a quick chat? No worries if not.\n\nThanks,",
     },
     {
         "id": 5,
-        "name": "Value Proposition",
-        "subject": "How I can help {company}",
-        "body": "Hi {name},\n\nI'm reaching out because I believe my skills and experience could directly benefit your team at {company}.\n\nI've been working on projects that align closely with what {company} does, and I'm eager to bring that expertise to a role where I can contribute from day one.\n\nWould you be open to a quick chat? I'd love to share more about what I can bring to the table.\n\nThank you for your time",
+        "name": "Direct Outreach",
+        "subject": "looking for roles at {company}",
+        "body": "Hi {name},\n\nI'm exploring roles in the area {company} works in. I've got some relevant experience and wanted to see if there's anyone on the team I should reach out to.\n\nWould appreciate any direction.\n\nThanks,",
     },
 ]
 
@@ -58,6 +67,7 @@ class CampaignCreateRequest(BaseModel):
     subject_template: str = ""
     body_template: str = ""
     selected_styles: list[str] = []  # Email styles for AI generation
+    user_timezone: str = "Asia/Kolkata"
 
 
 class CampaignTransitionRequest(BaseModel):
@@ -134,6 +144,7 @@ async def api_create_campaign(
                 email_account_id=request.email_account_id,
                 candidate_id=request.candidate_id,
                 selected_styles=request.selected_styles,
+                user_timezone=request.user_timezone,
             )
         else:
             # Fall back to template mode
@@ -155,7 +166,29 @@ async def api_create_campaign(
                 candidate_id=request.candidate_id,
                 subject_template=subject,
                 body_template=body,
+                user_timezone=request.user_timezone,
             )
+        # Auto-create an outreach order for tracking
+        try:
+            from database.models import OutreachOrder
+            from datetime import datetime
+            order = OutreachOrder(
+                user_id=current_user.id,
+                candidate_id=request.candidate_id,
+                campaign_id=result["campaign_id"],
+                email_account_id=request.email_account_id,
+                status="campaign_setup",
+                leads_collected=result.get("queued_messages", 0),
+            )
+            order.action_log = [{"ts": datetime.utcnow().isoformat(), "msg": f"Campaign '{request.name}' created with {result.get('queued_messages', 0)} emails"}]
+            db.add(order)
+            db.commit()
+            db.refresh(order)
+            result["order_id"] = order.id
+            logger.info("[CAMPAIGN] Auto-created order #%d for campaign #%d", order.id, result["campaign_id"])
+        except Exception as oe:
+            logger.error("[CAMPAIGN] Failed to auto-create order: %s", oe)
+
         return {"status": "success", **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -201,7 +234,8 @@ async def preview_email(
 
     try:
         style = assign_style(sample_lead, request.selected_styles)
-        subject, body = generate_email_for_lead(sample_lead, candidate, style)
+        # Run blocking AI call in thread pool to keep event loop responsive for health checks
+        subject, body = await asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style)
         return {
             "subject": subject,
             "body": body,
@@ -242,6 +276,37 @@ async def api_start_campaign(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/user/latest")
+async def get_user_latest_campaign(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the user's most recent campaign (any status). Used to recover after page reload."""
+    from database.models import Candidate
+    # Find campaigns via user's candidates
+    candidate_ids = [c.id for c in db.query(Candidate).filter_by(user_id=current_user.id).all()]
+    if not candidate_ids:
+        return {"campaign": None}
+
+    campaign = (
+        db.query(Campaign)
+        .filter(Campaign.candidate_id.in_(candidate_ids))
+        .order_by(Campaign.created_at.desc())
+        .first()
+    )
+    if not campaign:
+        return {"campaign": None}
+
+    return {
+        "campaign": {
+            "id": campaign.id,
+            "name": campaign.name,
+            "status": campaign.status,
+            "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
+        }
+    }
+
+
 @router.get("/{campaign_id}")
 async def get_campaign(
     campaign_id: int,
@@ -276,3 +341,308 @@ async def get_campaign_analytics(
         return {"status": "success", **metrics}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class TestEmailOverride(BaseModel):
+    lead_index: int
+    override_email: str
+
+
+class TestLaunchRequest(BaseModel):
+    candidate_id: int
+    email_account_id: int
+    overrides: Optional[list[TestEmailOverride]] = None
+    selected_styles: list[str] = ["value_prop"]
+
+
+# ── In-memory store for async test-launch jobs ────────────────────────────────
+import uuid
+import threading
+_test_launch_jobs: dict = {}  # job_id -> {status, results, ...}
+
+
+@router.post("/test-launch/preview")
+async def test_launch_preview(
+    request: TestLaunchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Preview the 5 test emails without sending. Returns lead info so user can set overrides."""
+    from database.models import Candidate, Lead
+    from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
+
+    candidate = db.query(Candidate).filter_by(
+        id=request.candidate_id, user_id=current_user.id
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    leads = (
+        db.query(Lead)
+        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
+        .limit(5).all()
+    )
+    if not leads:
+        raise HTTPException(status_code=400, detail="No leads with verified emails found")
+
+    emails = []
+    for idx, lead in enumerate(leads):
+        try:
+            style = assign_style(lead, request.selected_styles)
+            subject, body = await asyncio.to_thread(generate_email_for_lead, lead, candidate, style)
+        except Exception:
+            subject, body = f"Intro from {candidate.parsed_json.get('personal_info', {}).get('name', 'me')}", "Hi there..."
+        emails.append({
+            "index": idx,
+            "lead_name": lead.name,
+            "lead_company": lead.company,
+            "original_email": lead.email,
+            "subject": subject,
+            "body": body,
+        })
+
+    return {"emails": emails}
+
+
+def _run_test_launch_in_background(
+    job_id: str,
+    candidate_id: int,
+    email_account_id: int,
+    selected_styles: list,
+    override_map: dict,
+    user_id: str,
+):
+    """Background thread: send test emails, updating _test_launch_jobs leads in real-time."""
+    from database.session import SessionLocal
+    from database.models import Candidate, Lead, EmailAccount
+    from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
+    from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
+
+    db = SessionLocal()
+    job = _test_launch_jobs[job_id]
+    try:
+        candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
+        account = db.query(EmailAccount).filter_by(id=email_account_id).first()
+
+        if not candidate or not account or not account.access_token:
+            job["status"] = "failed"
+            job["error"] = "Candidate or email account not found"
+            return
+
+        leads_db = (
+            db.query(Lead)
+            .filter(Lead.candidate_id == candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
+            .limit(5).all()
+        )
+        if not leads_db:
+            job["status"] = "failed"
+            job["error"] = "No leads with verified emails found"
+            return
+
+        access_token = _refresh_token_sync(account, db)
+
+        # Populate the leads list with real data (the POST handler pre-populated placeholders)
+        job["leads"] = []
+        for idx, lead in enumerate(leads_db):
+            to_email = override_map.get(idx, lead.email)
+            job["leads"].append({
+                "lead_name": lead.name or "Unknown",
+                "company": lead.company or "",
+                "email": to_email,
+                "status": "queued",
+                "subject": "",
+                "schedule_offset": idx * 20,
+            })
+        job["total"] = len(leads_db)
+
+        for idx, lead in enumerate(leads_db):
+            to_email = override_map.get(idx, lead.email)
+            job["progress"] = f"Sending {idx + 1}/{len(leads_db)}"
+            job["leads"][idx]["status"] = "sending"
+
+            try:
+                style = assign_style(lead, selected_styles)
+                subject, body = generate_email_for_lead(lead, candidate, style)
+                if idx in override_map:
+                    subject = f"[TEST] {subject}"
+
+                logger.info("[TEST_LAUNCH] Sending email %d/%d to %s", idx + 1, len(leads_db), to_email)
+                send_gmail_email(access_token=access_token, to_email=to_email, subject=subject, body=body, from_email=account.email_address)
+
+                job["leads"][idx].update({"status": "sent", "subject": subject})
+                job["emails_sent"] += 1
+
+            except Exception as e:
+                logger.error("[TEST_LAUNCH] Failed email %d to %s: %s", idx + 1, to_email, e, exc_info=True)
+                job["leads"][idx].update({"status": "failed", "error": str(e)})
+                job["emails_failed"] += 1
+
+            if idx < len(leads_db) - 1:
+                time.sleep(20)
+
+        job["status"] = "completed"
+        logger.info("[TEST_LAUNCH] Job %s completed: %d sent, %d failed", job_id, job["emails_sent"], job["emails_failed"])
+
+    except Exception as e:
+        logger.error("[TEST_LAUNCH] Job %s crashed: %s", job_id, e, exc_info=True)
+        job["status"] = "failed"
+        job["error"] = str(e)
+    finally:
+        db.close()
+
+
+@router.post("/test-launch")
+async def test_launch_campaign(
+    request: TestLaunchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Launch test emails in background. Returns a job_id to poll for results.
+
+    This endpoint returns immediately to prevent blocking the event loop
+    and causing health probe failures (which was causing 503 errors).
+    Use GET /test-launch/{job_id}/status to poll for results.
+    """
+    from database.models import Candidate, Lead, EmailAccount
+
+    # Validate inputs before spawning background job
+    candidate = db.query(Candidate).filter_by(
+        id=request.candidate_id, user_id=current_user.id
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    account = db.query(EmailAccount).filter_by(id=request.email_account_id).first()
+    if not account or not account.access_token:
+        raise HTTPException(status_code=400, detail="Gmail account not connected or token missing")
+
+    leads_count = (
+        db.query(Lead)
+        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
+        .count()
+    )
+    if leads_count == 0:
+        raise HTTPException(status_code=400, detail="No leads with verified emails found")
+
+    # Build override map
+    override_map = {}
+    if request.overrides:
+        for ov in request.overrides:
+            override_map[ov.lead_index] = ov.override_email
+
+    # Pre-load leads so the dashboard can show them immediately
+    leads_preview = (
+        db.query(Lead)
+        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
+        .limit(5).all()
+    )
+
+    initial_leads = []
+    for idx, lead in enumerate(leads_preview):
+        to_email = override_map.get(idx, lead.email)
+        initial_leads.append({
+            "lead_name": lead.name or "Unknown",
+            "company": lead.company or "",
+            "email": to_email,
+            "status": "queued",
+            "subject": "",
+            "schedule_offset": idx * 20,
+        })
+
+    # Create job with pre-populated leads and spawn background thread
+    import math
+    from datetime import datetime as _dt
+    job_id = str(uuid.uuid4())[:8]
+    _test_launch_jobs[job_id] = {
+        "status": "processing",
+        "progress": "Starting...",
+        "started_at": _dt.utcnow().isoformat(),
+        "leads": initial_leads,
+        "total": len(initial_leads),
+        "emails_sent": 0,
+        "emails_failed": 0,
+        "error": "",
+    }
+
+    thread = threading.Thread(
+        target=_run_test_launch_in_background,
+        args=(job_id, request.candidate_id, request.email_account_id,
+              request.selected_styles, override_map, str(current_user.id)),
+        daemon=True,
+    )
+    thread.start()
+
+    logger.info("[TEST_LAUNCH] Job %s started in background for user %s", job_id, current_user.id)
+
+    return {
+        "status": "processing",
+        "job_id": job_id,
+        "test_mode": True,
+        "leads": initial_leads,
+        "total": len(initial_leads),
+    }
+
+
+@router.get("/test-launch/{job_id}/status")
+async def test_launch_status(job_id: str):
+    """Poll for test-launch job results with per-lead status."""
+    job = _test_launch_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job.get("progress", ""),
+        "test_mode": True,
+        "started_at": job.get("started_at", ""),
+        "total": job.get("total", 0),
+        "emails_sent": job.get("emails_sent", 0),
+        "emails_failed": job.get("emails_failed", 0),
+        "leads": job.get("leads", []),
+        "error": job.get("error", ""),
+    }
+
+
+@router.get("/{campaign_id}/emails")
+async def get_campaign_emails(
+    campaign_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all emails for a campaign with lead details and schedule info."""
+    from database.models import EmailSent, Lead
+
+    from database.models import Candidate
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    # Verify ownership through candidate
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    emails = (
+        db.query(EmailSent)
+        .filter(EmailSent.campaign_id == campaign_id)
+        .order_by(EmailSent.created_at.asc())
+        .all()
+    )
+
+    result = []
+    for email in emails:
+        lead = db.query(Lead).filter_by(id=email.lead_id).first() if email.lead_id else None
+        result.append({
+            "id": email.id,
+            "lead_name": lead.name if lead else "Unknown",
+            "lead_company": lead.company if lead else "",
+            "lead_title": lead.title if lead else "",
+            "to_email": email.to_email,
+            "subject": email.subject,
+            "status": email.status,
+            "assigned_style": email.assigned_style,
+            "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
+            "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+        })
+
+    return {"emails": result}

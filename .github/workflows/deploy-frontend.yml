@@ -38,7 +38,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:latest
+            # :latest removed during production recovery — prevents accidental pod auto-update
           build-args: |
             NEXT_PUBLIC_API_URL=https://api.studojo.com/v1/outreach
             NEXT_PUBLIC_AUTH_URL=https://api.studojo.com/v1
@@ -46,6 +46,7 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
 
   deploy:
+    if: false  # SAFETY LOCK — disabled during production recovery
     needs: build
     runs-on: ubuntu-latest
     steps:
