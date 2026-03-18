@@ -38,7 +38,6 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
 
   deploy:
-    if: false  # SAFETY LOCK — disabled during production recovery
     needs: build
     runs-on: ubuntu-latest
     steps:
