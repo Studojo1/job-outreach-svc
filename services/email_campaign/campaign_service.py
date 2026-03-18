@@ -6,6 +6,7 @@ Handles campaign creation, state transitions, email queuing,
 and metrics computation. Supports both AI-generated and template-based emails.
 """
 
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 from sqlalchemy.orm import Session
@@ -32,7 +33,7 @@ VALID_TRANSITIONS = {
 
 def create_campaign(
     db: Session,
-    user_id: int,
+    user_id: str,
     name: str,
     email_account_id: int,
     candidate_id: int,
@@ -40,6 +41,7 @@ def create_campaign(
     subject_template: str = "",
     body_template: str = "",
     selected_styles: Optional[list] = None,
+    user_timezone: str = "Asia/Kolkata",
 ) -> Dict[str, Any]:
     """Create a new email campaign and queue messages for enriched leads.
 
@@ -84,6 +86,7 @@ def create_campaign(
         status="draft",
         subject_template=subject_template,
         body_template=body_template,
+        user_timezone=user_timezone,
     )
     db.add(campaign)
     db.flush()
@@ -195,6 +198,12 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
     elif old_status == "running":
         CAMPAIGNS_RUNNING.dec()
 
+    # Record pause time when pausing
+    if old_status == "running" and target_status == "paused":
+        campaign.paused_at = datetime.utcnow()
+        db.commit()
+        logger.info("[CAMPAIGN] Paused campaign #%d, paused_at=%s", campaign_id, campaign.paused_at)
+
     # Queue campaign bootstrap (scheduler initialization) if transitioning to "running"
     if target_status == "running":
         # Safety: check that there are actually queued emails before launching
@@ -209,17 +218,42 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
             db.commit()
             raise ValueError("Cannot launch campaign: no emails in queue. Ensure leads have verified emails.")
 
-        try:
-            from workers.celery_app import celery_app
-            task = celery_app.send_task(
-                "workers.email_sender_worker.bootstrap_campaign_sending",
-                args=[campaign_id],
-                queue="celery"
-            )
-            logger.info("[CAMPAIGN] Queued campaign bootstrap task for campaign #%d (task_id=%s, queued=%d)",
-                        campaign_id, task.id, queued_count)
-        except Exception as e:
-            logger.error("[CAMPAIGN] Failed to queue bootstrap task for campaign #%d: %s", campaign_id, e)
+        # Pre-compute schedule timestamps for all queued emails
+        from services.email_campaign.campaign_worker import compute_campaign_schedule
+        compute_campaign_schedule(db, campaign_id)
+        logger.info("[CAMPAIGN] Computed schedule for campaign #%d (queued=%d)",
+                    campaign_id, queued_count)
+
+    # Handle pause → running (resume): shift schedules forward by pause duration
+    if old_status == "paused" and target_status == "running" and campaign.paused_at:
+        pause_duration = (datetime.utcnow() - campaign.paused_at).total_seconds()
+        from services.email_campaign.campaign_worker import shift_schedule_forward
+        shift_schedule_forward(db, campaign_id, pause_duration)
+        campaign.paused_at = None
+        db.commit()
+        logger.info("[CAMPAIGN] Resumed campaign #%d, shifted schedule by %.0f seconds",
+                    campaign_id, pause_duration)
+
+    # Sync order status
+    try:
+        from database.models import OutreachOrder
+        order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+        if order:
+            order_status_map = {
+                "running": "campaign_running",
+                "paused": "campaign_setup",
+                "completed": "completed",
+            }
+            new_order_status = order_status_map.get(target_status)
+            if new_order_status and order.status != new_order_status:
+                order.status = new_order_status
+                log = list(order.action_log or [])
+                log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Campaign {old_status} -> {target_status}"})
+                order.action_log = log
+                order.updated_at = datetime.utcnow()
+                db.commit()
+    except Exception as e:
+        logger.error("[CAMPAIGN] Failed to sync order status: %s", e)
 
     return {
         "campaign_id": campaign_id,

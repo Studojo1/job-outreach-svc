@@ -1,4 +1,7 @@
-"""Google OAuth utilities — separate clients for Login vs Gmail."""
+"""Google OAuth utilities — Gmail OAuth client only.
+
+Login OAuth is handled by BetterAuth on the main Studojo frontend.
+"""
 
 import httpx
 import logging
@@ -12,17 +15,6 @@ logger = logging.getLogger(__name__)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# --- Login OAuth client ---
-LOGIN_CLIENT_ID = settings.GOOGLE_LOGIN_CLIENT_ID
-LOGIN_CLIENT_SECRET = settings.GOOGLE_LOGIN_CLIENT_SECRET
-LOGIN_REDIRECT_URI = settings.GOOGLE_LOGIN_REDIRECT_URI
-
-LOGIN_SCOPES = [
-    "openid",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-]
-
 # --- Gmail OAuth client ---
 GMAIL_CLIENT_ID = settings.GMAIL_CLIENT_ID
 GMAIL_CLIENT_SECRET = settings.GMAIL_CLIENT_SECRET
@@ -33,20 +25,6 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
-
-
-def generate_login_auth_url() -> str:
-    """Generates the Google Sign-In consent URL using the Login OAuth client."""
-    params = urlencode({
-        "client_id": LOGIN_CLIENT_ID,
-        "redirect_uri": LOGIN_REDIRECT_URI,
-        "response_type": "code",
-        "scope": " ".join(LOGIN_SCOPES),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": "login",
-    })
-    return f"{GOOGLE_AUTH_URL}?{params}"
 
 
 def generate_gmail_auth_url(user_id: str) -> str:
@@ -86,11 +64,6 @@ async def exchange_code_for_tokens(code: str, client_id: str, client_secret: str
         token_data = response.json()
         logger.info("Successfully exchanged authorization code for Google tokens.")
         return token_data
-
-
-async def exchange_login_code(code: str) -> Dict[str, Any]:
-    """Exchange code using the Login OAuth client."""
-    return await exchange_code_for_tokens(code, LOGIN_CLIENT_ID, LOGIN_CLIENT_SECRET, LOGIN_REDIRECT_URI)
 
 
 async def exchange_gmail_code(code: str) -> Dict[str, Any]:

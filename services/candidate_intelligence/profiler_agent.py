@@ -72,7 +72,7 @@ def get_ontology_as_text() -> str:
 # SYSTEM PROMPT
 # ============================================================================
 
-SYSTEM_PROMPT = """You are **StudojoProfiler**, a career profiling chatbot. Your ONLY job is to understand the candidate's background, preferences, and career goals in 8 questions, then end the conversation.
+SYSTEM_PROMPT = """You are **StudojoProfiler**, a career profiling chatbot. Your ONLY job is to understand the candidate's background, preferences, and career goals in 7 questions, then end the conversation.
 
 ## YOUR MISSION
 Collect enough information to generate a structured career profile payload. You are NOT a career counselor, mentor, or advisor. Do NOT give tips, templates, comparisons, career advice, or do anything beyond asking profiling questions.
@@ -104,23 +104,22 @@ Collect enough information to generate a structured career profile payload. You 
 ### Q5: Industry interests
 "Which industries excite you most?" (multi-select, 5-7 options based on resume/context)
 
-### Q6: Salary/CTC expectations
-"What's your expected salary range?" (text_input: true, mcq: null)
-
-### Q7: Role focus / what they enjoy
+### Q6: Role focus / what they enjoy
 "What kind of work do you enjoy most?" (building product, analyzing data, managing people, etc.)
 
-### Q8: Skills to use or grow
+### Q7: Skills to use or grow
 "Which skills do you want to use or develop?" (multi-select based on resume + context)
 
-After Q8: Set `is_complete: true`. Do NOT ask more questions. Say something like:
-"Thanks! I have everything I need to build your career profile. Generating your report now..."
+After Q7: The user will answer Q7. ONLY AFTER you receive the user's Q7 answer, respond with is_complete: true. Do NOT combine Q7's question with the completion message. Your completion response (after receiving Q7 answer) should be:
+- Set `is_complete: true`, `mcq: null`, `text_input: false`
+- Message: acknowledge their answer briefly, then "Generating your report now..."
+- `questions_asked_so_far: 7`
 
 ## DYNAMIC MCQ RULES
 - Generate options RELEVANT to the candidate (Indian cities for Indian candidates, etc.)
 - Every MCQ MUST end with "Other" as the last option.
 - Multi-select questions: set `allow_multiple: true`.
-- Salary/CTC: ALWAYS use `text_input: true`, `mcq: null`.
+- Do NOT ask about salary or CTC. Skip salary questions entirely.
 
 ## CAREER ONTOLOGY (reference for recommended roles):
 {career_ontology}
@@ -128,7 +127,8 @@ After Q8: Set `is_complete: true`. Do NOT ask more questions. Say something like
 ## FORBIDDEN (NEVER DO THESE)
 - Do NOT give career advice, tips, or guidance.
 - Do NOT compare roles, explain day-to-day tasks, or create templates.
-- Do NOT go beyond 8 questions. After Q8, you MUST set is_complete: true.
+- Do NOT go beyond 7 questions. After the user answers Q7, you MUST set is_complete: true.
+- NEVER combine a question with the completion message. Ask the question, wait for the answer, THEN complete.
 - Do NOT ask clarifying follow-ups.
 - Do NOT spiral into sub-questions.
 - Do NOT promise to "prepare" or "provide" anything.
@@ -274,9 +274,9 @@ def _parse_llm_json(raw_text: str, chat_history: list[ChatMessage]) -> AgentResp
         else:
             logger.warning(f"[QUIZ] MCQ state but no structured options and could not extract from message. Message: {message[:200]}")
 
-    # Validation: Don't allow is_complete before exactly 8 questions are asked
-    if is_complete and questions_asked < 8:
-        logger.warning(f"[QUIZ] LLM tried to complete after only {questions_asked} questions (need 8) — forcing continuation")
+    # Validation: Don't allow is_complete before enough questions are asked
+    if is_complete and questions_asked < 7:
+        logger.warning(f"[QUIZ] LLM tried to complete after only {questions_asked} questions (need 7) — forcing continuation")
         is_complete = False
         current_state = "MCQ"
 
@@ -313,40 +313,49 @@ def get_agent_response(
     t_prep = time.perf_counter()
     logger.info(f"[TIMING] Message prep: {(t_prep - t_start)*1000:.0f}ms, history_len={len(chat_history)}")
 
-    try:
-        t_llm_start = time.perf_counter()
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_completion_tokens=16000,
-        )
-        t_llm_end = time.perf_counter()
-        raw = completion.choices[0].message.content
-        logger.info(f"[TIMING] LLM call: {(t_llm_end - t_llm_start)*1000:.0f}ms, response_len={len(raw) if raw else 0}")
-
-        if not raw:
-            logger.error("LLM returned empty response")
-            return AgentResponse(
-                message="Could you repeat that? I had trouble processing.",
-                current_state="MCQ",
-                questions_asked_so_far=len([m for m in chat_history if m.role == "assistant"]),
+    max_retries = 3
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            t_llm_start = time.perf_counter()
+            completion = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=2000,
             )
+            t_llm_end = time.perf_counter()
+            raw = completion.choices[0].message.content
+            logger.info(f"[TIMING] LLM call (attempt {attempt}): {(t_llm_end - t_llm_start)*1000:.0f}ms, response_len={len(raw) if raw else 0}")
 
-        response = _parse_llm_json(raw, chat_history)
-        t_total = time.perf_counter()
-        logger.info(f"[TIMING] Total get_agent_response: {(t_total - t_start)*1000:.0f}ms | "
-                    f"state={response.current_state}, has_mcq={response.mcq is not None}, "
-                    f"complete={response.is_complete}")
-        return response
+            if not raw:
+                logger.error("LLM returned empty response")
+                return AgentResponse(
+                    message="Could you repeat that? I had trouble processing.",
+                    current_state="MCQ",
+                    questions_asked_so_far=len([m for m in chat_history if m.role == "assistant"]),
+                )
 
-    except Exception as e:
-        logger.error(f"Agent error after {(time.perf_counter() - t_start)*1000:.0f}ms: {e}", exc_info=True)
-        return AgentResponse(
-            message="I hit a snag processing that. Could you try again?",
-            current_state="MCQ",
-            questions_asked_so_far=len([m for m in chat_history if m.role == "assistant"]),
-        )
+            response = _parse_llm_json(raw, chat_history)
+            t_total = time.perf_counter()
+            logger.info(f"[TIMING] Total get_agent_response: {(t_total - t_start)*1000:.0f}ms | "
+                        f"state={response.current_state}, has_mcq={response.mcq is not None}, "
+                        f"complete={response.is_complete}")
+            return response
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"[QUIZ] LLM attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}")
+            if attempt < max_retries:
+                time.sleep(1.5 * attempt)  # backoff: 1.5s, 3s
+            continue
+
+    logger.error(f"Agent error after {max_retries} attempts, {(time.perf_counter() - t_start)*1000:.0f}ms: {last_error}", exc_info=True)
+    return AgentResponse(
+        message="I hit a snag processing that. Could you try again?",
+        current_state="MCQ",
+        questions_asked_so_far=len([m for m in chat_history if m.role == "assistant"]),
+    )
 
 
 # ============================================================================
@@ -393,7 +402,7 @@ Return a JSON object with these fields:
   },
   "session_metadata": {
     "resume_uploaded": false,
-    "questions_answered": 8,
+    "questions_answered": 7,
     "confidence_score": 0.85
   }
 }
@@ -437,15 +446,27 @@ def generate_final_payload(
         {"role": "user", "content": f"Conversation transcript:\n{transcript}\n\nGenerate the JSON payload."},
     ]
 
+    max_retries = 3
+    raw = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_completion_tokens=4000,
+            )
+            raw = completion.choices[0].message.content
+            logger.info(f"Payload raw response length (attempt {attempt}): {len(raw) if raw else 0} chars")
+            break
+        except Exception as e:
+            logger.warning(f"[PAYLOAD] LLM attempt {attempt}/{max_retries} failed: {type(e).__name__}: {e}")
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+            else:
+                raise
+
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_completion_tokens=16000,
-        )
-        raw = completion.choices[0].message.content
-        logger.info(f"Payload raw response length: {len(raw) if raw else 0} chars")
 
         if not raw:
             raise ValueError("LLM returned empty payload response")

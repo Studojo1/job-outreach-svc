@@ -10,23 +10,29 @@ logger = logging.getLogger(__name__)
 async def store_user_tokens(db: Session, user_id: str, email_address: str, access_token: str, refresh_token: Optional[str], expires_in: int):
     """Stores or updates the user's Gmail tokens in the database."""
     try:
-        # Give a small buffer (e.g., 60 seconds) so we trigger refresh slightly before true expiry
         token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
-        
-        # Check if account already exists
+
+        # Check by user_id first, then fall back to email_address (unique constraint)
         account = db.query(EmailAccount).filter(
             EmailAccount.user_id == str(user_id),
             EmailAccount.provider == "gmail"
         ).first()
 
+        if not account:
+            # Also check if this email_address already exists (from a previous session/user)
+            account = db.query(EmailAccount).filter(
+                EmailAccount.email_address == email_address,
+                EmailAccount.provider == "gmail"
+            ).first()
+
         if account:
+            account.user_id = str(user_id)
             account.access_token = access_token
-            # Only update refresh token if a new one is provided (Google doesn't always send a new one on refresh)
             if refresh_token:
                 account.refresh_token = refresh_token
             account.token_expiry = token_expiry
             account.email_address = email_address
-            logger.info(f"Updated existing Gmail tokens for user_id: {user_id}")
+            logger.info(f"Updated existing Gmail tokens for user_id: {user_id}, email: {email_address}")
         else:
             account = EmailAccount(
                 user_id=str(user_id),
@@ -37,8 +43,8 @@ async def store_user_tokens(db: Session, user_id: str, email_address: str, acces
                 token_expiry=token_expiry
             )
             db.add(account)
-            logger.info(f"Stored new Gmail tokens for user_id: {user_id}")
-            
+            logger.info(f"Stored new Gmail tokens for user_id: {user_id}, email: {email_address}")
+
         db.commit()
     except Exception as e:
         db.rollback()

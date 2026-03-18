@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -7,22 +7,40 @@ Base = declarative_base()
 
 
 class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    google_sub = Column(String(255), unique=True)
-    name = Column(String(255))
-    avatar_url = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "user"
+    id = Column(Text, primary_key=True, index=True)
+    email = Column(Text, unique=True, index=True, nullable=False)
+    name = Column(Text, nullable=False)
+    image = Column(Text)
+    email_verified = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
     email_accounts = relationship("EmailAccount", back_populates="user", cascade="all, delete-orphan")
     candidates = relationship("Candidate", back_populates="user", cascade="all, delete-orphan")
+    outreach_orders = relationship("OutreachOrder", back_populates="user", cascade="all, delete-orphan")
+    payment_orders = relationship("PaymentOrder", back_populates="user", cascade="all, delete-orphan")
+    user_credits = relationship("UserCredit", back_populates="user", cascade="all, delete-orphan")
+
+
+class BetterAuthSession(Base):
+    """Maps to the BetterAuth 'session' table (shared DB)."""
+    __tablename__ = "session"
+    id = Column(Text, primary_key=True)
+    token = Column(Text, unique=True, nullable=False, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+    ip_address = Column(Text)
+    user_agent = Column(Text)
+    impersonated_by = Column(Text)
 
 
 class EmailAccount(Base):
     __tablename__ = "email_accounts"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     email_address = Column(String(255), unique=True, nullable=False)
     provider = Column(String(50), default="gmail", nullable=False)
     access_token = Column(Text, nullable=False)
@@ -38,7 +56,7 @@ class EmailAccount(Base):
 class Candidate(Base):
     __tablename__ = "candidates"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     resume_text = Column(Text)
     parsed_json = Column(JSONB)
     target_roles = Column(JSONB)
@@ -98,6 +116,8 @@ class Campaign(Base):
     subject_template = Column(Text)
     body_template = Column(Text)
     daily_limit = Column(Integer, default=20)
+    user_timezone = Column(String(50), default="Asia/Kolkata")
+    paused_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("Candidate", back_populates="campaigns")
@@ -115,6 +135,7 @@ class EmailSent(Base):
     body = Column(Text)
     to_email = Column(String(255))
     assigned_style = Column(String(50))  # Email style: warm_intro, value_prop, company_curiosity, peer_to_peer, direct_ask
+    scheduled_at = Column(DateTime)  # When this email should be sent (timezone-aware scheduling)
     sent_at = Column(DateTime)
     status = Column(String(50), default="queued")
     error_message = Column(Text)
@@ -122,3 +143,82 @@ class EmailSent(Base):
 
     campaign = relationship("Campaign", back_populates="emails_sent")
     lead = relationship("Lead", back_populates="emails_sent")
+
+
+class OutreachOrder(Base):
+    """Tracks the full lifecycle of an outreach run.
+
+    State machine:
+      CREATED → LEADS_GENERATING → LEADS_READY → CAMPAIGN_SETUP
+      → EMAIL_CONNECTED → CAMPAIGN_RUNNING → COMPLETED
+
+    Enables users to leave mid-process and resume later via My Orders.
+    """
+    __tablename__ = "outreach_orders"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    email_account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True)
+
+    status = Column(String(50), default="created", nullable=False)
+    leads_collected = Column(Integer, default=0)
+    leads_target = Column(Integer, default=500)
+
+    # Logs — JSONB array of timestamped action entries
+    action_log = Column(JSONB, default=list)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="outreach_orders")
+
+
+class Coupon(Base):
+    __tablename__ = "coupons"
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(50), unique=True, nullable=False)
+    discount_type = Column(String(20), default="percent", nullable=False)
+    discount_value = Column(Numeric(10, 2), nullable=False)
+    max_uses = Column(Integer, nullable=True)
+    uses = Column(Integer, default=0, nullable=False)
+    valid_from = Column(DateTime, default=datetime.utcnow)
+    valid_until = Column(DateTime, nullable=True)
+    distributor_name = Column(String(255))
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    payment_orders = relationship("PaymentOrder", back_populates="coupon")
+
+
+class PaymentOrder(Base):
+    __tablename__ = "payment_orders"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    razorpay_order_id = Column(String(255), unique=True)
+    razorpay_payment_id = Column(String(255))
+    razorpay_signature = Column(String(512))
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String(10), default="USD", nullable=False)
+    tier = Column(Integer, nullable=False)
+    coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(50), default="created", nullable=False)
+    credits_granted = Column(Integer, default=0, nullable=False)
+    idempotency_key = Column(String(255), unique=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="payment_orders")
+    coupon = relationship("Coupon", back_populates="payment_orders")
+
+
+class UserCredit(Base):
+    __tablename__ = "user_credits"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), unique=True, nullable=False)
+    total_credits = Column(Integer, default=0, nullable=False)
+    used_credits = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="user_credits")

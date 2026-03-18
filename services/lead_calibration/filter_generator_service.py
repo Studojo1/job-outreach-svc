@@ -119,7 +119,7 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
         person_locations=normalized_locs,
         organization_locations=normalized_locs,
         organization_industries=normalized_industries,
-        email_status=["verified"],
+        email_status=["verified"],  # Always require verified emails
     )
     logger.info("Production filters generated successfully")
     return filters

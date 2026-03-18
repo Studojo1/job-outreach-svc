@@ -50,28 +50,30 @@ def search_people(payload: Dict[str, Any]) -> Dict[str, Any]:
         "X-Api-Key": settings.APOLLO_API_KEY
     }
 
-    print("========== APOLLO REQUEST ==========")
-    print(payload)
-
-    logger.info("Executing Apollo People Search via POST %s (page=%s)", url, payload.get("page", 1))
+    import json
+    logger.info("[APOLLO_INPUT] page=%s, titles=%d, industries=%s, person_locations=%s, org_locations=%s, email_status=%s",
+                payload.get("page", 1), len(payload.get("person_titles", [])),
+                payload.get("organization_industries", []),
+                payload.get("person_locations", []),
+                payload.get("organization_locations", []),
+                payload.get("contact_email_status", []))
+    logger.debug("[APOLLO_PAYLOAD] %s", json.dumps(payload, default=str)[:3000])
 
     # Throttle request to protect against rate limits (as dictated by design docs)
     time.sleep(0.2)
 
     response = requests.post(url, json=request_data, headers=headers)
-    
-    print("========== APOLLO RESPONSE STATUS ==========")
-    print(response.status_code)
 
-    print("========== APOLLO RESPONSE BODY ==========")
-    print(response.text)
-
+    people_count = 0
     try:
-        print("========== APOLLO RESPONSE JSON ==========")
-        print(response.json())
-    except:
-        print("Apollo response is not JSON")
-        
+        resp_json = response.json() if response.ok else {}
+        people_count = len(resp_json.get("people", []))
+        total_entries = resp_json.get("pagination", {}).get("total_entries", resp_json.get("total_entries", 0))
+        logger.info("[APOLLO_OUTPUT] status=%d, people_returned=%d, total_available=%d, page=%s",
+                    response.status_code, people_count, total_entries, payload.get("page", 1))
+    except Exception:
+        logger.info("[APOLLO_OUTPUT] status=%d", response.status_code)
+
     if not response.ok:
         logger.error(
             "Apollo API Error: HTTP %d - %s",
@@ -118,7 +120,6 @@ def search_people_count(payload: Dict[str, Any]) -> int:
             chunk_total = result.get("total_entries", 0)
 
         total_entries += chunk_total
-        print(f"[APOLLO CHUNK SEARCH] chunk {idx}/{len(chunks)} returned {chunk_total} leads")
         logger.info("[APOLLO CHUNK SEARCH] chunk %d/%d returned %d leads", idx, len(chunks), chunk_total)
 
     logger.info("Apollo chunked count query aggregated total_entries=%d across %d chunks", total_entries, len(chunks))
@@ -154,7 +155,6 @@ def search_people_chunked(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         all_people.extend(chunk_people)
         total_entries += chunk_total
-        print(f"[APOLLO CHUNK SEARCH] chunk {idx}/{len(chunks)} returned {chunk_total} leads ({len(chunk_people)} people)")
         logger.info("[APOLLO CHUNK SEARCH] chunk %d/%d returned %d leads (%d people)", idx, len(chunks), chunk_total, len(chunk_people))
 
     logger.info("Apollo chunked search aggregated %d total_entries, %d people across %d chunks", total_entries, len(all_people), len(chunks))

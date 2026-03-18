@@ -141,7 +141,7 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
     if lead.apollo_id:
         payload["id"] = lead.apollo_id
 
-    resp = requests.post(APOLLO_MATCH_URL, json=payload, headers=headers)
+    resp = requests.post(APOLLO_MATCH_URL, json=payload, headers=headers, timeout=15)
 
     if not resp.ok:
         logger.warning("[ENRICHMENT] Apollo match failed for %s: %d", lead.name, resp.status_code)
