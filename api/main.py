@@ -43,6 +43,8 @@ app.add_middleware(
         "https://studojo.com",
         "https://www.studojo.com",
         "https://api.studojo.com",
+        "https://studojo.pro",
+        "https://api.studojo.pro",
         "http://localhost:3000",
         "http://localhost:3001",
     ],
