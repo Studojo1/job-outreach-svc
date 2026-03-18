@@ -161,7 +161,7 @@ class CalibrationState:
             person_locations=self.active_locations,
             organization_locations=self.active_locations,
             organization_industries=self.active_industries,
-            email_status=["verified"],
+            email_status=["verified"],  # Always require verified emails
         )
 
     def snapshot(self) -> Dict[str, Any]:

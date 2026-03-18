@@ -47,10 +47,10 @@ def build_apollo_query(filters: LeadFilter, page: int = 1) -> Dict[str, Any]:
         "per_page": 100,  # Max allowed by Apollo per page
     }
 
-    # ALWAYS enforce verified emails at the Apollo API level
-    email_status = filters.email_status or ["verified"]
-    payload["contact_email_status"] = email_status
-    logger.info("[LeadSearch] Email status filter enforced: %s", email_status)
+    # Always require verified emails — leads without verified emails cannot
+    # be enriched and waste enrichment credits. This is a hard rule.
+    payload["contact_email_status"] = ["verified"]
+    logger.info("[LeadSearch] Email status filter: verified (hard rule)")
 
     # Add optional exclusion list if provided
     if filters.person_titles_exclude:

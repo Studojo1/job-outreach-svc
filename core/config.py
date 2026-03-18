@@ -15,11 +15,6 @@ class Settings(BaseSettings):
     # APOLLO
     APOLLO_API_KEY: str
 
-    # GOOGLE LOGIN OAUTH
-    GOOGLE_LOGIN_CLIENT_ID: str
-    GOOGLE_LOGIN_CLIENT_SECRET: str
-    GOOGLE_LOGIN_REDIRECT_URI: str
-
     # GMAIL OAUTH
     GMAIL_CLIENT_ID: str
     GMAIL_CLIENT_SECRET: str
@@ -32,10 +27,11 @@ class Settings(BaseSettings):
     AZURE_OPENAI_LLM_DEPLOYMENT: str
     AZURE_OPENAI_KEY: str
 
-    # AUTH
-    JWT_SECRET_KEY: str = "change-me-in-production-use-a-real-secret"
-    JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRY_HOURS: int = 24
+    # RAZORPAY
+    RAZORPAY_KEY_ID: str = ""
+    RAZORPAY_KEY_SECRET: str = ""
+    RAZORPAY_WEBHOOK_SECRET: str = ""
+    RAZORPAY_TEST_MODE: bool = True
 
     # REDIS
     REDIS_URL: str = "redis://localhost:6379/0"

@@ -1,37 +1,65 @@
 """API Dependencies — Shared FastAPI dependencies for route handlers."""
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import datetime, timezone
+from urllib.parse import unquote
+
+from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from database.session import get_db
-from database.models import User
-from services.authentication.jwt_service import verify_token
+from database.models import BetterAuthSession, User
 
-security = HTTPBearer()
+
+COOKIE_NAMES = [
+    "__Secure-better-auth.session_token",
+    "better-auth.session_token",
+]
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-    """Extract and verify JWT from Authorization header, return the User.
+    """Extract BetterAuth session token from cookie, look up in shared DB.
 
     Raises:
-        HTTPException 401 if token is missing, invalid, or user not found.
+        HTTPException 401 if cookie is missing, session expired, or user not found.
     """
-    token = credentials.credentials
-    payload = verify_token(token)
+    token = None
+    for name in COOKIE_NAMES:
+        token = request.cookies.get(name)
+        if token:
+            token = unquote(token)
+            # BetterAuth cookie format is "token.signature" — DB stores only the token part
+            if "." in token:
+                token = token.split(".")[0]
+            break
 
-    if payload is None:
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Not authenticated",
         )
 
-    user_id = int(payload["sub"])
-    user = db.query(User).filter_by(id=user_id).first()
+    session = (
+        db.query(BetterAuthSession)
+        .filter(BetterAuthSession.token == token)
+        .first()
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session",
+        )
+
+    if session.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired",
+        )
+
+    user = db.query(User).filter(User.id == session.user_id).first()
 
     if not user:
         raise HTTPException(

@@ -1,12 +1,14 @@
 """Gmail OAuth Routes — Gmail Mailbox OAuth (separate from Login OAuth)."""
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from database.session import get_db
-from database.models import User
+from database.models import User, EmailAccount
 from core.config import settings
 from services.authentication.google_oauth import (
     generate_gmail_auth_url,
@@ -14,6 +16,7 @@ from services.authentication.google_oauth import (
     get_google_user_info,
 )
 from services.authentication.token_manager import store_user_tokens
+from api.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +24,11 @@ router = APIRouter(prefix="/gmail/oauth", tags=["Gmail OAuth"])
 
 
 @router.get("/connect")
-def gmail_oauth_connect(token: str = Query(None)):
-    """Redirect to Google OAuth to grant Gmail send/read permissions.
-
-    The frontend passes the JWT as a query param since browser redirects
-    (window.location.href) cannot send Authorization headers.
-    """
-    if not token:
-        logger.error("[GmailOAuth] /connect called without token query param")
-        raise HTTPException(status_code=401, detail="Token required. Pass ?token=<jwt>")
-
-    # Verify the token manually since we can't use Depends(get_current_user)
-    from services.authentication.jwt_service import verify_token
-    payload = verify_token(token)
-    if not payload:
-        logger.error("[GmailOAuth] Invalid or expired JWT token")
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    user_id = payload.get("sub")
-    logger.info(f"[GmailOAuth] OAuth flow started for user_id={user_id}")
-    url = generate_gmail_auth_url(str(user_id))
-    logger.info("[GmailOAuth] Redirecting to Google")
+def gmail_oauth_connect(current_user: User = Depends(get_current_user)):
+    """Redirect to Google OAuth to grant Gmail send/read permissions."""
+    logger.info(f"[GmailOAuth] OAuth flow started for user_id={current_user.id}")
+    url = generate_gmail_auth_url(str(current_user.id))
+    logger.info("[GmailOAuth] Redirecting to Google, redirect_uri=%s", settings.GMAIL_REDIRECT_URI)
     return RedirectResponse(url=url)
 
 
@@ -52,27 +39,34 @@ async def gmail_oauth_callback(
     db: Session = Depends(get_db),
 ):
     """Gmail OAuth callback — stores Gmail tokens for the user."""
-    logger.info(f"[GmailOAuth] Callback received, state={state}")
+    frontend_base = f"{settings.FRONTEND_URL}/connect/gmail"
+    logger.info(f"[GmailOAuth] Callback received, state={state}, code_length={len(code)}")
+    logger.info(f"[GmailOAuth] Will redirect to frontend_base={frontend_base}")
 
     if not state:
         logger.error("[GmailOAuth] Callback missing state parameter")
         return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/connect/gmail?status=error&message=missing_state"
+            url=f"{frontend_base}?status=error&message=missing_state"
         )
 
     user_id = state
     try:
+        logger.info(f"[GmailOAuth] Step 1: Exchanging code for tokens (user_id={user_id})")
         token_data = await exchange_gmail_code(code)
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token")
         expires_in = token_data.get("expires_in", 3599)
+        logger.info(f"[GmailOAuth] Step 1 OK: got access_token={bool(access_token)}, refresh_token={bool(refresh_token)}, expires_in={expires_in}")
 
+        logger.info(f"[GmailOAuth] Step 2: Fetching Google user info")
         user_info = await get_google_user_info(access_token)
         email_address = user_info.get("email")
+        logger.info(f"[GmailOAuth] Step 2 OK: email={email_address}")
 
         if not email_address:
             raise ValueError("Email address missing from Google OAuth profile.")
 
+        logger.info(f"[GmailOAuth] Step 3: Storing tokens for user_id={user_id}")
         await store_user_tokens(
             db=db,
             user_id=user_id,
@@ -81,14 +75,35 @@ async def gmail_oauth_callback(
             refresh_token=refresh_token,
             expires_in=expires_in,
         )
+        logger.info(f"[GmailOAuth] Step 3 OK: tokens stored")
 
-        logger.info(f"[GmailOAuth] Gmail account connected successfully for user_id={user_id}, email={email_address}")
+        redirect_url = f"{frontend_base}?status=success"
+        logger.info(f"[GmailOAuth] SUCCESS — redirecting to {redirect_url}")
+        return RedirectResponse(url=redirect_url)
 
-        return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/connect/gmail?status=success"
-        )
     except Exception as e:
-        logger.error(f"[GmailOAuth] Callback failed: {e}", exc_info=True)
-        return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/connect/gmail?status=error&message={str(e)}"
-        )
+        error_msg = str(e)[:200]
+        logger.error(f"[GmailOAuth] Callback FAILED for user_id={user_id}: {error_msg}", exc_info=True)
+        encoded_msg = quote(error_msg, safe="")
+        redirect_url = f"{frontend_base}?status=error&message={encoded_msg}"
+        logger.info(f"[GmailOAuth] ERROR — redirecting to {redirect_url}")
+        return RedirectResponse(url=redirect_url)
+
+
+@router.get("/account")
+async def get_gmail_account(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the current user's connected Gmail account ID and email."""
+    account = db.query(EmailAccount).filter_by(
+        user_id=str(current_user.id), provider="gmail"
+    ).first()
+
+    if not account:
+        raise HTTPException(status_code=404, detail="No Gmail account connected")
+
+    return {
+        "email_account_id": account.id,
+        "email_address": account.email_address,
+    }

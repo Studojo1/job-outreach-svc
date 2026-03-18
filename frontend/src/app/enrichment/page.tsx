@@ -353,7 +353,7 @@ export default function EnrichmentPage() {
                     placeholder="Enter coupon code"
                     className="flex-1"
                   />
-                  <Button variant="secondary" onClick={validateCoupon} loading={couponLoading}>Apply</Button>
+                  <Button variant="outline" onClick={validateCoupon} loading={couponLoading}>Apply</Button>
                 </div>
                 {couponError && <p className="text-error text-xs mt-2 font-satoshi">{couponError}</p>}
                 {couponResult?.valid && (

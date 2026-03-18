@@ -1,5 +1,6 @@
 """Candidate Routes — Resume upload, profiling chat, and profile retrieval."""
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
@@ -79,7 +80,9 @@ async def candidate_chat(
         ]
         chat_history.append(ChatMessage(role="user", content=request.message))
 
-        response = get_agent_response(
+        # Run blocking LLM call in a thread to avoid blocking the event loop
+        response = await asyncio.to_thread(
+            get_agent_response,
             chat_history=chat_history,
             resume_summary=candidate.parsed_json,
             resume_raw_text=candidate.resume_text,
@@ -124,12 +127,17 @@ async def generate_payload(
         from services.candidate_intelligence.profiler_agent import generate_final_payload
         from services.candidate_intelligence.models import ChatMessage
 
+        logger.info(f"[PAYLOAD] chat_history length: {len(request.chat_history)}, resume_text length: {len(candidate.resume_text or '')}, parsed_json keys: {list(candidate.parsed_json.keys()) if isinstance(candidate.parsed_json, dict) else type(candidate.parsed_json)}")
+
         chat_history = [
             ChatMessage(role=msg["role"], content=msg["content"])
             for msg in request.chat_history
         ]
 
-        payload = generate_final_payload(
+        logger.info(f"[PAYLOAD] Calling generate_final_payload with {len(chat_history)} messages")
+        # Run blocking LLM call in a thread to avoid blocking the event loop
+        payload = await asyncio.to_thread(
+            generate_final_payload,
             chat_history=chat_history,
             resume_summary=candidate.parsed_json,
             resume_raw_text=candidate.resume_text,
@@ -140,23 +148,29 @@ async def generate_payload(
         logger.info(f"[TIMING] Payload generation LLM: {(t_llm - t_start)*1000:.0f}ms")
 
         # Store profile in candidate record
-        candidate.parsed_json = payload.dict() if hasattr(payload, 'dict') else payload.model_dump()
+        payload_dict = payload.dict() if hasattr(payload, 'dict') else payload.model_dump()
+        logger.info(f"[PAYLOAD] Generated payload keys: {list(payload_dict.keys())}")
+        candidate.parsed_json = payload_dict
         if payload.career_analysis and payload.career_analysis.recommended_roles:
             candidate.target_roles = [r.title for r in payload.career_analysis.recommended_roles]
+            logger.info(f"[PAYLOAD] target_roles: {candidate.target_roles}")
         if payload.preferences and payload.preferences.industry_interests:
             candidate.target_industries = payload.preferences.industry_interests
+            logger.info(f"[PAYLOAD] target_industries: {candidate.target_industries}")
         db.commit()
 
         t_end = time.perf_counter()
-        logger.info(f"[TIMING] Total payload request: {(t_end - t_start)*1000:.0f}ms")
+        logger.info(f"[TIMING] Total payload request: {(t_end - t_start)*1000:.0f}ms — SUCCESS")
 
         return {
             "status": "success",
-            "payload": payload.dict() if hasattr(payload, 'dict') else payload.model_dump(),
+            "payload": payload_dict,
         }
     except Exception as e:
-        logger.error(f"Payload generation error for candidate {candidate_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        logger.error(f"[PAYLOAD] FAILED for candidate {candidate_id} after {(time.perf_counter() - t_start)*1000:.0f}ms: {type(e).__name__}: {e}")
+        logger.error(f"[PAYLOAD] Traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Profile generation failed: {type(e).__name__}: {str(e)}")
 
 
 @router.get("/{candidate_id}/profile")

@@ -94,6 +94,11 @@ def generate_json(prompt: str, schema: Dict[str, Any], temperature: float = 0.0)
             # Validate against schema
             try:
                 jsonschema.validate(instance=parsed, schema=schema)
+                # Log usage stats and key output fields for debugging
+                usage = data.get("usage", {})
+                logger.info("[AI_OUTPUT] tokens_in=%d, tokens_out=%d, total=%d, keys=%s",
+                            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                            usage.get("total_tokens", 0), list(parsed.keys()))
                 logger.info("[AI] Successfully generated and validated JSON payload.")
                 return parsed
             except jsonschema.ValidationError as e:

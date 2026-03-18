@@ -1,5 +1,6 @@
 """Discovery Routes — Lead discovery via Apollo."""
 
+import asyncio
 import logging
 import time
 from fastapi import APIRouter, Depends, HTTPException
@@ -131,6 +132,10 @@ async def search_leads(
 ):
     """Execute lead discovery based on candidate profile."""
     t_start = time.perf_counter()
+    # Hard minimum: always retrieve at least 500 leads for a usable pool
+    if request.target_leads < 500:
+        logger.info(f"[DISCOVERY] target_leads={request.target_leads} below minimum, enforcing 500")
+        request.target_leads = 500
     logger.info(f"[DISCOVERY] POST /discovery/search — candidate_id={request.candidate_id}, target={request.target_leads}")
 
     candidate = db.query(Candidate).filter_by(
@@ -193,7 +198,9 @@ async def search_leads(
         t_filter = time.perf_counter()
         logger.info(f"[LeadSearch] Filter generation: {(t_filter - t_start)*1000:.0f}ms")
 
-        count = collect_leads(
+        # Run blocking Apollo API calls in a thread to avoid blocking the event loop
+        count = await asyncio.to_thread(
+            collect_leads,
             filters=filters,
             candidate_id=candidate.id,
             target_leads=request.target_leads,
@@ -206,7 +213,7 @@ async def search_leads(
         # Score all newly collected leads
         scored_count = 0
         try:
-            scored_count = _score_candidate_leads(db, candidate)
+            scored_count = await asyncio.to_thread(_score_candidate_leads, db, candidate)
             logger.info(f"[LeadSearch] Leads scored: {scored_count}")
         except Exception as score_err:
             logger.error(f"[LeadSearch] Scoring failed (non-fatal): {score_err}", exc_info=True)

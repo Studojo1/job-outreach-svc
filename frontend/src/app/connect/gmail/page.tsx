@@ -136,7 +136,7 @@ function GmailConnectContent() {
               </div>
             )}
 
-            <Button size="lg" onClick={handleConnect} fullWidth>Connect Gmail Account</Button>
+            <Button size="lg" onClick={handleConnect} className="w-full">Connect Gmail Account</Button>
           </div>
         )}
       </Container>

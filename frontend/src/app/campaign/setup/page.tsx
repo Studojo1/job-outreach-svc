@@ -196,7 +196,7 @@ export default function CampaignSetupPage() {
             </p>
 
             {testEmails.length === 0 ? (
-              <Button variant="secondary" onClick={loadTestEmails} loading={testEmailsLoading} className="w-full">
+              <Button variant="outline" onClick={loadTestEmails} loading={testEmailsLoading} className="w-full">
                 <FlaskConical className="w-4 h-4 mr-2 inline" /> Load Test Emails
               </Button>
             ) : (
@@ -227,7 +227,7 @@ export default function CampaignSetupPage() {
                   ))}
                 </div>
 
-                <Button variant="secondary" onClick={handleTestLaunch} loading={testLaunching} className="w-full">
+                <Button variant="outline" onClick={handleTestLaunch} loading={testLaunching} className="w-full">
                   <FlaskConical className="w-4 h-4 mr-2 inline" /> Send Test Emails
                 </Button>
                 {testLaunching && <p className="text-xs text-muted text-center mt-2 font-satoshi">Redirecting to launch screen...</p>}
