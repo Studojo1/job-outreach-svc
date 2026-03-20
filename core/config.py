@@ -22,9 +22,9 @@ class Settings(BaseSettings):
 
     # AZURE OPENAI
     AZURE_OPENAI_ENDPOINT: str
-    AZURE_OPENAI_API_VERSION: str
-    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str
-    AZURE_OPENAI_LLM_DEPLOYMENT: str
+    AZURE_OPENAI_API_VERSION: str = "2025-04-01-preview"
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "text-embedding-ada-002"
+    AZURE_OPENAI_LLM_DEPLOYMENT: str = "gpt-5-mini"
     AZURE_OPENAI_KEY: str
 
     # RAZORPAY
