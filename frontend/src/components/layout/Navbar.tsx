@@ -104,7 +104,7 @@ export function Navbar() {
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-ink bg-white">
-      <div className="mx-auto flex h-16 max-w-[80rem] items-center justify-between px-4 md:h-24 md:px-8">
+      <div className="mx-auto flex h-16 max-w-[80rem] items-center justify-between px-4 pt-4 pb-px md:h-24 md:px-8 md:pt-0 md:pb-0">
         {/* Brand */}
         <a
           href="/"
