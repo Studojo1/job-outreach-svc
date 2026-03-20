@@ -69,6 +69,16 @@ def _run_enrichment_in_background(
         )
 
         if not all_unenriched:
+            # All leads already enriched — still update order status
+            if order_id:
+                order = db.query(OutreachOrder).filter_by(id=order_id).first()
+                if order and order.status in ("leads_ready", "enriching"):
+                    order.status = "enrichment_complete"
+                    log = list(order.action_log or [])
+                    log.append({"ts": datetime.utcnow().isoformat(), "msg": "All leads already enriched"})
+                    order.action_log = log
+                    order.updated_at = datetime.utcnow()
+                    db.commit()
             job["status"] = "completed"
             job["progress"] = "No leads found needing enrichment"
             return

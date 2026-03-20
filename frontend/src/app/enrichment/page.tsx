@@ -44,7 +44,7 @@ interface CouponResult {
 export default function EnrichmentPage() {
   const router = useRouter();
   const { loading } = useAuth();
-  const { candidateId, selectedTier, setSelectedTier, user } = useAppStore();
+  const { candidateId, selectedTier, setSelectedTier, user, orderId } = useAppStore();
   const { updateOrder } = useOrder();
 
   // Pricing
@@ -150,7 +150,7 @@ export default function EnrichmentPage() {
     setEnrichProgress({ enriched: 0, failed: 0, total: limit, progress: 'Starting enrichment...' });
     setError('');
     try {
-      const res = await api.post('/enrichment/enrich', { candidate_id: candidateId, limit });
+      const res = await api.post('/enrichment/enrich', { candidate_id: candidateId, limit, order_id: orderId });
       if (res.data.job_id) {
         // Background job started — poll for progress
         pollEnrichmentJob(res.data.job_id, res.data.total || limit);

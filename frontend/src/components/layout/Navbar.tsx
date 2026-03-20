@@ -3,13 +3,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useAppStore } from '@/store/useAppStore';
-import api from '@/lib/api';
+import api, { ensureAuthToken } from '@/lib/api';
 
 /**
  * Navbar — mirrors the Studojo platform Header component.
  *
  * Automatically detects auth state via a silent /auth/me check so that
- * users who logged in on studojo.com see their profile on /outreach too.
+ * users who logged in on the platform see their profile on /outreach too.
  *
  * Logged-in users see a settings-icon dropdown with:
  *   My Resumes, My Applications, My Orders, Settings, Sign out
@@ -19,10 +19,10 @@ import api from '@/lib/api';
  * rather than staying within the /outreach Next.js sub-app.
  */
 
-const STUDOJO_BASE = 'https://studojo.com';
+const STUDOJO_BASE = process.env.NEXT_PUBLIC_PLATFORM_URL || '';
 
 const NAV_LINKS = [
-  { href: STUDOJO_BASE, label: 'Home', internal: false },
+  { href: '/', label: 'Home', internal: false },
   { href: `${STUDOJO_BASE}/blog`, label: 'Blog', internal: false },
   { href: '/', label: 'Outreach', internal: true },
   { href: `${STUDOJO_BASE}/dojos`, label: 'Dojos', internal: false },
@@ -74,10 +74,11 @@ export function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
-  // Silent auth check — detect BetterAuth session cookie from main site
+  // Silent auth check — exchange BetterAuth cookie for JWT, then fetch user
   useEffect(() => {
     if (user) return;
-    api.get('/auth/me')
+    ensureAuthToken()
+      .then(() => api.get('/auth/me'))
       .then((res) => {
         const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         setUser({ ...res.data, timezone: res.data.timezone || browserTz });
@@ -87,7 +88,7 @@ export function Navbar() {
 
   const handleSignOut = () => {
     setUser(null);
-    window.location.href = STUDOJO_BASE;
+    window.location.href = '/';
   };
 
   // Close dropdown when clicking outside
@@ -106,7 +107,7 @@ export function Navbar() {
       <div className="mx-auto flex h-16 max-w-container items-center justify-between px-4 md:h-20 md:px-6">
         {/* Brand */}
         <a
-          href={STUDOJO_BASE}
+          href="/"
           className="font-satoshi text-2xl font-black leading-9 text-ink"
         >
           studojo

@@ -49,8 +49,9 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
           build-args: |
-            NEXT_PUBLIC_API_URL=https://api.studojo.com/v1/outreach
-            NEXT_PUBLIC_AUTH_URL=https://api.studojo.com/v1
+            NEXT_PUBLIC_API_URL=https://studojo.com/api/v1/outreach
+            NEXT_PUBLIC_AUTH_URL=https://studojo.com/api/v1
+            NEXT_PUBLIC_PLATFORM_URL=https://studojo.com
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
 

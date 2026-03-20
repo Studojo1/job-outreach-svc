@@ -7,7 +7,7 @@ import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Upload, Search, Mail, ArrowRight, ClipboardList } from 'lucide-react';
 
-const STUDOJO_BASE = 'https://studojo.com';
+const STUDOJO_BASE = process.env.NEXT_PUBLIC_PLATFORM_URL || '';
 
 const DOJO_LINKS = [
   { href: `${STUDOJO_BASE}/dojos/assignment`, label: 'Assignment Dojo', desc: 'Master your assignments', color: 'bg-violet-500', internal: false },
@@ -121,7 +121,7 @@ export default function LandingPage() {
           <div className="flex flex-col gap-8 md:grid md:grid-cols-2 md:gap-16">
             {/* Left: branding + Join the Dojo + contact */}
             <div className="flex flex-col gap-8 md:gap-12">
-              <a href={STUDOJO_BASE} className="font-satoshi text-2xl font-black tracking-tight text-ink md:text-3xl">
+              <a href="/" className="font-satoshi text-2xl font-black tracking-tight text-ink md:text-3xl">
                 studojo
               </a>
 

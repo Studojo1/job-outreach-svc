@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import api from '@/lib/api';
+import api, { ensureAuthToken } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
 
 export function useAuth(requireAuth = true) {
@@ -14,21 +14,29 @@ export function useAuth(requireAuth = true) {
       return;
     }
 
-    api.get('/auth/me')
+    // First exchange BetterAuth session cookie for a JWT (if not already cached),
+    // then call the outreach backend /auth/me through the control-plane.
+    ensureAuthToken()
+      .then(() => api.get('/auth/me'))
       .then((res) => {
         const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         setUser({ ...res.data, timezone: res.data.timezone || browserTz });
-        setLoading(false);
       })
       .catch(() => {
+        // Auth failed — user stays null
+      })
+      .finally(() => {
         setLoading(false);
-        // Auth check finished — user is not authenticated.
-        // Redirect to Studojo login only after loading is complete.
-        if (requireAuth && typeof window !== 'undefined') {
-          window.location.href = 'https://studojo.com/auth?mode=signin&redirect=/outreach';
-        }
       });
-  }, [requireAuth, user, setUser]);
+  }, [user, setUser]);
+
+  // Only redirect after loading completes with no authenticated user
+  useEffect(() => {
+    if (!loading && !user && requireAuth && typeof window !== 'undefined') {
+      const platform = process.env.NEXT_PUBLIC_PLATFORM_URL || '';
+      window.location.href = `${platform}/auth?mode=signin&redirect=/outreach`;
+    }
+  }, [loading, user, requireAuth]);
 
   return { user, loading };
 }

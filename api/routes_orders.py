@@ -9,7 +9,7 @@ from typing import Optional
 
 from database.session import get_db
 from database.models import (
-    User, OutreachOrder, Candidate, Campaign, EmailAccount,
+    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead,
 )
 from api.dependencies import get_current_user
 
@@ -195,7 +195,20 @@ async def resume_order(
         else:
             redirect = "/onboarding/upload"
     elif status == "leads_ready":
-        redirect = "/leads/results"
+        # Auto-correct: if enriched leads already exist, the order status
+        # was missed during enrichment (frontend didn't pass order_id).
+        enriched_count = db.query(Lead).filter(
+            Lead.candidate_id == order.candidate_id,
+            Lead.email_verified == True,
+        ).count()
+        if enriched_count > 0:
+            order.status = "enrichment_complete"
+            order.updated_at = datetime.utcnow()
+            _append_log(order, f"Auto-corrected: leads_ready → enrichment_complete ({enriched_count} enriched leads found)")
+            db.commit()
+            redirect = "/connect/gmail"
+        else:
+            redirect = "/leads/results"
     elif status == "enriching":
         redirect = "/enrichment"
     elif status == "enrichment_complete":
