@@ -59,38 +59,38 @@ export default function LandingPage() {
     <div className="min-h-screen bg-surface-muted flex flex-col">
       <Navbar />
 
-      {/* Hero — dark purple background */}
-      <section className="border-b border-ink bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
-        <Container className="py-16 md:py-24 text-center md:text-left">
-          <h1 className="font-clash text-4xl md:text-5xl lg:text-6xl font-medium leading-tight tracking-tight text-white max-w-3xl">
-            Find Hiring Managers for Your Dream Job
-          </h1>
-          <p className="text-base md:text-lg text-purple-200 mt-5 md:mt-7 max-w-xl font-satoshi">
-            OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
-          </p>
-          <div className="mt-8 flex flex-col gap-4 md:flex-row md:flex-wrap">
-            <Button
-              onClick={() => router.push('/onboarding/upload')}
-              size="lg"
-              variant="accent"
-            >
-              Get Started <ArrowRight className="w-5 h-5 ml-2 inline" />
-            </Button>
-            <Button
-              onClick={() => router.push('/orders')}
-              size="lg"
-              variant="ghost"
-              className="border-2 border-white/40 text-white hover:bg-white/10"
-            >
-              <ClipboardList className="w-5 h-5 mr-2 inline" /> View Campaigns
-            </Button>
+      <main className="max-w-container mx-auto w-full px-6 pt-8 pb-16 flex-1 flex flex-col gap-8">
+        {/* Hero — dark purple background, rounded container */}
+        <section className="rounded-2xl overflow-hidden bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
+          <div className="px-6 py-16 md:px-12 md:py-24 text-center md:text-left">
+            <h1 className="font-clash text-4xl md:text-5xl lg:text-6xl font-medium leading-tight tracking-tight text-white max-w-3xl">
+              Find Hiring Managers for Your Dream Job
+            </h1>
+            <p className="text-base md:text-lg text-purple-200 mt-5 md:mt-7 max-w-xl font-satoshi">
+              OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
+            </p>
+            <div className="mt-8 flex flex-col gap-4 md:flex-row md:flex-wrap">
+              <Button
+                onClick={() => router.push('/onboarding/upload')}
+                size="lg"
+                variant="accent"
+              >
+                Get Started <ArrowRight className="w-5 h-5 ml-2 inline" />
+              </Button>
+              <Button
+                onClick={() => router.push('/orders')}
+                size="lg"
+                variant="ghost"
+                className="border-2 border-white/40 text-white hover:bg-white/10"
+              >
+                <ClipboardList className="w-5 h-5 mr-2 inline" /> View Campaigns
+              </Button>
+            </div>
           </div>
-        </Container>
-      </section>
+        </section>
 
-      {/* Features */}
-      <section className="py-16 md:py-24 flex-1">
-        <Container>
+        {/* Features */}
+        <section className="py-8 md:py-16">
           <h2 className="font-clash text-3xl font-bold text-center mb-12">How It Works</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {features.map((f, i) => (
@@ -103,21 +103,21 @@ export default function LandingPage() {
               </Card>
             ))}
           </div>
-        </Container>
-      </section>
+        </section>
 
-      {/* CTA — darker purple gradient */}
-      <section className="bg-gradient-to-br from-purple-100 via-violet-100 to-purple-50 border-t border-ink py-16 md:py-24">
-        <Container className="text-center">
-          <h2 className="font-clash text-3xl font-bold mb-4">Ready to find your next opportunity?</h2>
-          <p className="text-lg text-muted mb-10 font-satoshi">
-            Upload your resume and let AI do the outreach.
-          </p>
-          <Button onClick={() => router.push('/onboarding/upload')} size="lg">
-            Start Now <ArrowRight className="w-4 h-4 ml-2 inline" />
-          </Button>
-        </Container>
-      </section>
+        {/* CTA — rounded container */}
+        <section className="rounded-2xl overflow-hidden bg-gradient-to-br from-purple-100 via-violet-100 to-purple-50">
+          <div className="px-6 py-16 md:px-12 md:py-24 text-center">
+            <h2 className="font-clash text-3xl font-bold mb-4">Ready to find your next opportunity?</h2>
+            <p className="text-lg text-muted mb-10 font-satoshi">
+              Upload your resume and let AI do the outreach.
+            </p>
+            <Button onClick={() => router.push('/onboarding/upload')} size="lg">
+              Start Now <ArrowRight className="w-4 h-4 ml-2 inline" />
+            </Button>
+          </div>
+        </section>
+      </main>
 
       {/* Footer — mirrors Studojo Footer structure */}
       <footer className="relative border-b border-ink bg-white">
