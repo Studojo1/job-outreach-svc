@@ -135,13 +135,13 @@ export default function ChatPage() {
 
   if (!candidateId) {
     return (
-      <div className="min-h-screen bg-page">
+      <div className="min-h-screen bg-surface-muted">
         <Navbar />
-        <Container className="max-w-onboarding py-xl text-center">
-          <p className="text-body-lg text-text-secondary mt-xl">
+        <Container className="max-w-onboarding py-8 text-center">
+          <p className="text-base text-muted mt-8 font-satoshi">
             Please upload your resume first.
           </p>
-          <Button onClick={() => router.push('/onboarding/upload')} className="mt-l">
+          <Button onClick={() => router.push('/onboarding/upload')} className="mt-6">
             Go to Upload
           </Button>
         </Container>
@@ -150,21 +150,21 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-surface-muted">
       <Navbar />
-      <Container className="max-w-onboarding py-xl">
+      <Container className="max-w-onboarding py-8">
         <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={2} />
 
-        <div className="mt-xl">
-          <h1 className="text-h2 mb-s">Career Intelligence Chat</h1>
-          <p className="text-body-sm text-text-secondary mb-l">
+        <div className="mt-8">
+          <h1 className="font-clash text-2xl font-bold mb-2">Career Intelligence Chat</h1>
+          <p className="text-sm text-muted font-satoshi mb-6">
             Our AI will ask you a few questions to understand your career goals.
           </p>
 
           <ChatInterface messages={chatHistory} loading={loading}>
             {currentResponse?.is_complete ? (
-              <div className="text-center p-m">
-                <p className="text-body-sm text-secondary font-semibold">
+              <div className="text-center p-4">
+                <p className="text-sm text-secondary font-semibold font-satoshi">
                   Profile complete! Redirecting...
                 </p>
               </div>
@@ -177,7 +177,7 @@ export default function ChatPage() {
                 loading={loading}
               />
             ) : currentResponse?.text_input || (!currentResponse?.mcq && started) ? (
-              <div className="flex gap-s">
+              <div className="flex gap-2">
                 <Input
                   value={textInput}
                   onChange={(e) => setTextInput(e.target.value)}

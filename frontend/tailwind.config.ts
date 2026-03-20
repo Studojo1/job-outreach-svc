@@ -7,10 +7,17 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        primary: '#7C3AED',
-        'primary-dark': '#6D28D9',
+        primary: '#8B5CF6',
+        'primary-dark': '#7C3AED',
         secondary: '#10B981',
         accent: '#F97316',
+        ink: '#171717',
+        muted: '#525252',
+        'surface-muted': '#F5F5F5',
+        'studojo-yellow': '#EAB308',
+        'brand-purple-bg': '#FAF5FE',
+        'studojo-green-bg': '#D0FAE4',
+        'studojo-orange-bg': '#FEF3C6',
         page: '#F9FAFB',
         card: '#FFFFFF',
         'text-primary': '#111827',
@@ -21,7 +28,9 @@ const config: Config = {
         warning: '#F59E0B',
       },
       fontFamily: {
-        sans: ['Inter', 'Montserrat', 'system-ui', 'sans-serif'],
+        sans: ['Satoshi', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        satoshi: ['Satoshi', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        clash: ['Clash Display', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
       fontSize: {
         h1: ['42px', { lineHeight: '1.2', fontWeight: '700' }],
@@ -39,15 +48,13 @@ const config: Config = {
         xl: '32px',
         xxl: '48px',
       },
-      borderRadius: {
-        sm: '4px',
-        md: '8px',
-        lg: '12px',
-        xl: '16px',
-      },
+      borderRadius: {},
       boxShadow: {
         soft: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
         elevated: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)',
+        brutal: '4px 4px 0px 0px #191a23',
+        'brutal-active': '2px 2px 0px 0px #191a23',
+        'brutal-xl': '8px 8px 0px 0px #191a23',
       },
       maxWidth: {
         container: '1280px',

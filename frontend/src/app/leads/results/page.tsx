@@ -47,14 +47,14 @@ export default function ResultsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-surface-muted">
       <Navbar />
       <Container className="py-8">
         {/* Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
           <div>
-            <h1 className="text-h2">Lead Results</h1>
-            <p className="text-body-sm text-text-secondary mt-1">
+            <h1 className="font-clash text-2xl font-bold">Lead Results</h1>
+            <p className="text-sm text-muted font-satoshi mt-1">
               {leads.length} decision makers found. Click cards to see scoring details.
             </p>
           </div>
@@ -63,11 +63,11 @@ export default function ResultsPage() {
               <Mail className="w-4 h-4 mr-1.5" /> Enrich Leads
             </Button>
             <div className="flex items-center gap-2">
-              <Filter className="w-4 h-4 text-text-secondary" />
+              <Filter className="w-4 h-4 text-muted" />
               <select
                 value={sortBy}
                 onChange={(e) => { setSortBy(e.target.value as 'score' | 'name'); setPage(1); }}
-                className="text-body-sm border border-border-light rounded-md px-3 py-1.5 bg-card focus:outline-none focus:ring-2 focus:ring-primary"
+                className="text-sm border-2 border-ink/20 rounded-xl px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-primary font-satoshi"
               >
                 <option value="score">Highest Score</option>
                 <option value="name">Name (A-Z)</option>
@@ -79,8 +79,8 @@ export default function ResultsPage() {
         {loading ? (
           <div className="flex justify-center py-20"><Spinner /></div>
         ) : error ? (
-          <div className="card p-xl text-center">
-            <p className="text-error">{error}</p>
+          <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center">
+            <p className="text-error font-satoshi">{error}</p>
           </div>
         ) : (
           <>
@@ -97,7 +97,7 @@ export default function ResultsPage() {
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page === 1}
-                  className="p-2 rounded-lg border border-border-light hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="p-2 rounded-xl border-2 border-ink/20 hover:bg-surface-muted disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   <ArrowLeft className="w-4 h-4" />
                 </button>
@@ -116,10 +116,10 @@ export default function ResultsPage() {
                     <button
                       key={pageNum}
                       onClick={() => setPage(pageNum)}
-                      className={`w-9 h-9 rounded-lg text-sm font-medium transition-colors ${
+                      className={`w-9 h-9 rounded-xl text-sm font-bold font-satoshi transition-colors ${
                         page === pageNum
-                          ? 'bg-primary text-white'
-                          : 'border border-border-light hover:bg-gray-50 text-text-secondary'
+                          ? 'bg-primary text-white border-2 border-ink'
+                          : 'border-2 border-ink/20 hover:bg-surface-muted text-muted'
                       }`}
                     >
                       {pageNum}
@@ -129,7 +129,7 @@ export default function ResultsPage() {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
-                  className="p-2 rounded-lg border border-border-light hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                  className="p-2 rounded-xl border-2 border-ink/20 hover:bg-surface-muted disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   <ArrowRight className="w-4 h-4" />
                 </button>

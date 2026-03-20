@@ -104,11 +104,11 @@ export function Navbar() {
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-ink bg-white">
-      <div className="mx-auto flex h-16 max-w-container items-center justify-between px-4 md:h-20 md:px-6">
+      <div className="mx-auto flex h-16 max-w-[80rem] items-center justify-between px-4 md:h-24 md:px-8">
         {/* Brand */}
         <a
           href="/"
-          className="font-satoshi text-2xl font-black leading-9 text-ink"
+          className="font-satoshi text-2xl font-black leading-9 text-ink md:text-4xl md:leading-7"
         >
           studojo
         </a>
@@ -218,7 +218,7 @@ export function Navbar() {
               </a>
               <a
                 href={`${STUDOJO_BASE}/auth?mode=signup`}
-                className="inline-flex h-12 items-center justify-center rounded-2xl bg-ink px-4 font-satoshi text-sm font-medium leading-6 text-white shadow-brutal transition-transform hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active border-2 border-ink"
+                className="flex h-12 items-center justify-center rounded-2xl bg-ink px-4 font-satoshi text-sm font-medium leading-6 text-white transition-transform hover:translate-x-[2px] hover:translate-y-[2px] max-w-[120px] flex-shrink-0 md:w-32 md:text-base md:max-w-none"
               >
                 Get Started
               </a>
@@ -248,7 +248,7 @@ export function Navbar() {
 
       {/* Mobile menu */}
       {mobileOpen && (
-        <nav className="border-t border-ink/10 bg-white px-6 py-4 md:hidden" aria-label="Mobile menu">
+        <nav className="border-t border-ink/10 bg-white px-8 py-4 md:hidden" aria-label="Mobile menu">
           <ul className="flex flex-col gap-2">
             {NAV_LINKS.map(({ href, label, internal }) => (
               <li key={label}>

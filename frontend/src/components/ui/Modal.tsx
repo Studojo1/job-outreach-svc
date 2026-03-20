@@ -25,11 +25,11 @@ export function Modal({ isOpen, onClose, title, children }: ModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-card rounded-xl shadow-elevated p-xxl max-w-lg w-full mx-m animate-fade-in">
+      <div className="relative rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 max-w-lg w-full mx-4 animate-fade-in">
         {title && (
-          <div className="flex items-center justify-between mb-l">
-            <h3 className="text-h3">{title}</h3>
-            <button onClick={onClose} className="text-text-secondary hover:text-text-primary transition-colors">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="font-clash text-lg font-bold">{title}</h3>
+            <button onClick={onClose} className="text-muted hover:text-ink transition-colors">
               <X className="w-5 h-5" />
             </button>
           </div>

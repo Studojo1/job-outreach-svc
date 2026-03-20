@@ -57,21 +57,21 @@ export default function TemplatesPage() {
   };
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-surface-muted">
       <Navbar />
-      <Container className="max-w-onboarding py-xl">
-        <div className="mb-xl">
-          <h1 className="text-h2">Choose an Email Template</h1>
-          <p className="text-body-sm text-text-secondary mt-s">
+      <Container className="max-w-onboarding py-8">
+        <div className="mb-8">
+          <h1 className="font-clash text-2xl font-bold">Choose an Email Template</h1>
+          <p className="text-sm text-muted font-satoshi mt-2">
             Select a template for your outreach emails. You can customize it before sending.
           </p>
         </div>
 
         {loading ? (
-          <div className="flex justify-center py-xxl"><Spinner /></div>
+          <div className="flex justify-center py-12"><Spinner /></div>
         ) : (
           <>
-            <div className="space-y-m">
+            <div className="space-y-4">
               {templates.map((template) => (
                 <TemplateEditor
                   key={template.id}
@@ -83,7 +83,7 @@ export default function TemplatesPage() {
               ))}
             </div>
 
-            <div className="text-center mt-xl">
+            <div className="text-center mt-8">
               <Button size="lg" onClick={handleContinue} disabled={!selectedId}>
                 Continue to Campaign Setup
               </Button>

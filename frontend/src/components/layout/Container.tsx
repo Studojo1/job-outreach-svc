@@ -7,9 +7,9 @@ interface ContainerProps {
 }
 
 export function Container({ children, narrow = false, className = '' }: ContainerProps) {
-  const maxW = narrow ? 'max-w-onboarding' : 'max-w-container';
+  const maxW = narrow ? 'max-w-onboarding' : 'max-w-[80rem]';
   return (
-    <div className={`${maxW} mx-auto px-l py-xl ${className}`}>
+    <div className={`${maxW} mx-auto px-4 py-8 md:px-8 ${className}`}>
       {children}
     </div>
   );

@@ -32,7 +32,7 @@ export function ScoreGauge({ score, size = 64, className = '' }: ScoreGaugeProps
           className="transition-all duration-500"
         />
       </svg>
-      <span className="absolute text-label font-bold" style={{ color }}>
+      <span className="absolute text-xs font-bold font-satoshi" style={{ color }}>
         {score}
       </span>
     </div>

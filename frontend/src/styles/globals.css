@@ -2,33 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=satoshi@400,500,700,900&display=swap');
 
 @layer base {
   body {
-    @apply bg-page text-text-primary font-sans;
-  }
-}
-
-@layer components {
-  .btn-primary {
-    @apply bg-primary text-white px-6 py-3 rounded-xl font-semibold
-           transition-all duration-200 hover:-translate-y-0.5 hover:shadow-elevated
-           hover:bg-primary-dark active:translate-y-0;
-  }
-
-  .btn-outline {
-    @apply bg-transparent border-2 border-primary text-primary px-6 py-3 rounded-xl font-semibold
-           transition-all duration-200 hover:-translate-y-0.5 hover:shadow-elevated
-           hover:bg-primary hover:text-white active:translate-y-0;
-  }
-
-  .card {
-    @apply bg-card border border-border-light rounded-xl shadow-soft p-l;
-  }
-
-  .card-hover {
-    @apply card transition-all duration-200 hover:border-primary hover:shadow-elevated;
+    @apply bg-white text-ink font-satoshi;
   }
 }
 
