@@ -15,7 +15,7 @@ env:
   REGISTRY: acrstudojo-dhfsdrfhf6a6bbg2.azurecr.io
   ACR_NAME: acrstudojo
   SERVICE_NAME: job-outreach-frontend
-  IMAGE_TAG: staging
+  IMAGE_TAG: staging-${{ github.sha }}
   NAMESPACE: staging
 
 jobs:
@@ -47,8 +47,7 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
           build-args: |
             NEXT_PUBLIC_API_URL=/api/v1/outreach
             NEXT_PUBLIC_AUTH_URL=/api/v1
@@ -85,7 +84,7 @@ jobs:
       - name: Deploy to Kubernetes (staging)
         run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} \
-            ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging \
+            ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {

@@ -12,7 +12,7 @@ env:
   REGISTRY: acrstudojo-dhfsdrfhf6a6bbg2.azurecr.io
   ACR_NAME: acrstudojo
   SERVICE_NAME: job-outreach-svc
-  IMAGE_TAG: staging
+  IMAGE_TAG: staging-${{ github.sha }}
   NAMESPACE: staging
 
 jobs:
@@ -43,8 +43,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging
-            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache,mode=max
 
@@ -77,7 +76,7 @@ jobs:
       - name: Deploy to Kubernetes (staging)
         run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} \
-            ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging \
+            ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
