@@ -53,6 +53,7 @@ export default function OrdersPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (authLoading) return;
     api.get('/orders/list')
       .then((res) => {
         setOrders(res.data.orders?.map((o: any) => o.order || o) || []);
@@ -61,7 +62,7 @@ export default function OrdersPage() {
         setError(err.response?.data?.detail || 'Failed to load orders');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [authLoading]);
 
   const handleResume = async (oid: number) => {
     try {

@@ -19,13 +19,13 @@ const stages = [
 
 export default function DiscoveryPage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId } = useAppStore();
   const [currentStage, setCurrentStage] = useState(0);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!candidateId) return;
+    if (authLoading || !candidateId) return;
 
     // Simulate progress stages while the actual API call runs
     const timers: NodeJS.Timeout[] = [];

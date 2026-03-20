@@ -17,7 +17,7 @@ const PAGE_SIZE = 20;
 
 export default function ResultsPage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId } = useAppStore();
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,12 +26,12 @@ export default function ResultsPage() {
   const [page, setPage] = useState(1);
 
   useEffect(() => {
-    if (!candidateId) return;
+    if (authLoading || !candidateId) return;
     api.get(`/candidate/${candidateId}/leads`)
       .then((res) => setLeads(res.data.leads || res.data))
       .catch((err) => setError(err.response?.data?.detail || 'Failed to load leads'))
       .finally(() => setLoading(false));
-  }, [candidateId]);
+  }, [authLoading, candidateId]);
 
   const sorted = [...leads].sort((a, b) => {
     if (sortBy === 'score') return (b.score?.overall || 0) - (a.score?.overall || 0);

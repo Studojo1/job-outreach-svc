@@ -14,13 +14,14 @@ import type { EmailTemplate } from '@/lib/types/campaign';
 
 export default function TemplatesPage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { selectedTemplate, setSelectedTemplate } = useAppStore();
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(selectedTemplate?.id || null);
 
   useEffect(() => {
+    if (authLoading) return;
     api.get('/campaign/templates')
       .then((res) => {
         setTemplates(res.data.templates);
@@ -30,7 +31,7 @@ export default function TemplatesPage() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [selectedId]);
+  }, [authLoading, selectedId]);
 
   const handleSelect = (id: number) => {
     setSelectedId(id);

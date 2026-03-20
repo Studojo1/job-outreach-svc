@@ -15,14 +15,14 @@ import api from '@/lib/api';
 
 export default function ProfilePage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId } = useAppStore();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!candidateId) return;
+    if (authLoading || !candidateId) return;
 
     let retries = 0;
     const maxRetries = 3;

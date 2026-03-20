@@ -21,14 +21,14 @@ const stages = [
 
 export default function CampaignLaunchingPage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId, emailAccountId, campaignId, setCampaignId } = useAppStore();
   const [currentStage, setCurrentStage] = useState(0);
   const [error, setError] = useState('');
   const launched = useRef(false);
 
   useEffect(() => {
-    if (!candidateId || !emailAccountId || launched.current) return;
+    if (authLoading || !candidateId || !emailAccountId || launched.current) return;
     launched.current = true;
 
     // Read launch params from sessionStorage (set by setup page)
