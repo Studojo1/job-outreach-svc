@@ -47,7 +47,7 @@ function StatusIcon({ status }: { status: string }) {
 export default function OrdersPage() {
   const router = useRouter();
   const { loading: authLoading } = useAuth();
-  const { setCampaignId, setCandidateId, setEmailAccountId } = useAppStore();
+  const { setOrderId, setCampaignId, setCandidateId, setEmailAccountId } = useAppStore();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -63,10 +63,11 @@ export default function OrdersPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleResume = async (orderId: number) => {
+  const handleResume = async (oid: number) => {
     try {
-      const res = await api.get(`/orders/${orderId}/resume`);
+      const res = await api.get(`/orders/${oid}/resume`);
       const data = res.data;
+      setOrderId(data.order_id);
       if (data.candidate_id) setCandidateId(data.candidate_id);
       if (data.campaign_id) setCampaignId(data.campaign_id);
       if (data.email_account_id) setEmailAccountId(data.email_account_id);
