@@ -26,7 +26,7 @@ export function Button({
   const variants = {
     primary: 'bg-primary text-white shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none',
     secondary: 'bg-white text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none',
-    accent: 'bg-studojo-yellow text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none',
+    accent: 'bg-gradient-to-r from-purple-300 via-violet-300 to-purple-200 text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none',
     outline: 'bg-transparent text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none',
     ghost: 'border-transparent bg-transparent text-ink hover:bg-neutral-100',
   };

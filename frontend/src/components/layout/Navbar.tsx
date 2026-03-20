@@ -72,7 +72,14 @@ export function Navbar() {
   const { user, setUser } = useAppStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  // Smooth entrance animation
+  useEffect(() => {
+    const timer = setTimeout(() => setMounted(true), 50);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Silent auth check — exchange BetterAuth cookie for JWT, then fetch user
   useEffect(() => {
@@ -103,7 +110,7 @@ export function Navbar() {
   }, [userMenuOpen]);
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-ink bg-white">
+    <header className={`sticky top-0 z-50 w-full border-b border-ink bg-white transition-all duration-500 ease-out ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full'}`}>
       <div className="mx-auto flex h-16 max-w-[80rem] items-center justify-between px-4 pt-4 pb-px md:h-24 md:px-8 md:pt-0 md:pb-0">
         {/* Brand */}
         <a
