@@ -50,9 +50,9 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging
             ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-${{ github.sha }}
           build-args: |
-            NEXT_PUBLIC_API_URL=https://studojo.pro/api/v1/outreach
-            NEXT_PUBLIC_AUTH_URL=https://studojo.pro/api/v1
-            NEXT_PUBLIC_PLATFORM_URL=https://studojo.pro
+            NEXT_PUBLIC_API_URL=/api/v1/outreach
+            NEXT_PUBLIC_AUTH_URL=/api/v1
+            NEXT_PUBLIC_PLATFORM_URL=
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:staging-buildcache,mode=max
 

@@ -47,7 +47,6 @@ jobs:
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:buildcache,mode=max
 
   deploy:
-    if: false  # SAFETY LOCK — remove to enable deployment
     needs: build
     runs-on: ubuntu-latest
     steps:
