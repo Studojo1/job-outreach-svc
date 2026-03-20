@@ -99,7 +99,7 @@ export default function CampaignLaunchingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         <div className="text-center mb-12">

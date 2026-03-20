@@ -58,7 +58,7 @@ export default function ProfilePage() {
 
   if (!candidateId) {
     return (
-      <div className="min-h-screen bg-surface-muted">
+      <div className="min-h-screen bg-white">
         <Navbar />
         <Container className="max-w-onboarding py-8 text-center">
           <p className="text-base text-muted mt-8 font-satoshi">Please complete the chat first.</p>
@@ -74,7 +74,7 @@ export default function ProfilePage() {
   const career = parsed.career_analysis || {};
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={3} />

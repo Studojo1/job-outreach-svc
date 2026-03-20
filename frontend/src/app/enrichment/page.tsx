@@ -243,7 +243,7 @@ export default function EnrichmentPage() {
     }
   };
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>;
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>;
   if (!candidateId) { router.push('/onboarding/upload'); return null; }
 
   const selectedPricing = pricing.find((p) => p.tier === selectedTier);
@@ -254,7 +254,7 @@ export default function EnrichmentPage() {
   const hasEnoughCredits = credits ? credits.available_credits >= selectedTier : false;
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Script src="https://checkout.razorpay.com/v1/checkout.js" strategy="lazyOnload" />
       <Container className="max-w-onboarding py-8">

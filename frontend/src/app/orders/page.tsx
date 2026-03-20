@@ -78,14 +78,14 @@ export default function OrdersPage() {
 
   if (authLoading || loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-muted">
+      <div className="min-h-screen flex items-center justify-center bg-white">
         <Spinner />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="py-8">
         <div className="space-y-6 animate-fade-in">

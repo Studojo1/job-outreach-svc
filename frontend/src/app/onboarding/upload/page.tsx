@@ -68,7 +68,7 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={1} />

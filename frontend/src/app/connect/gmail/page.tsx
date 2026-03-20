@@ -79,10 +79,10 @@ function GmailConnectContent() {
     { icon: <Shield className="w-5 h-5" />, label: 'Your Email Address', desc: 'Identify which Gmail account to use' },
   ];
 
-  if (loading || connecting) return <div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>;
+  if (loading || connecting) return <div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>;
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         {connected ? (
@@ -146,7 +146,7 @@ function GmailConnectContent() {
 
 export default function GmailConnectPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>}>
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>}>
       <GmailConnectContent />
     </Suspense>
   );

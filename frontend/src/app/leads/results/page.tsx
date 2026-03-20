@@ -47,7 +47,7 @@ export default function ResultsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="py-8">
         {/* Header */}
