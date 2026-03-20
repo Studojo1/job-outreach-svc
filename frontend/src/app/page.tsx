@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Upload, Search, Mail, ArrowRight, ClipboardList } from 'lucide-react';
@@ -68,18 +69,21 @@ export default function LandingPage() {
             OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
           </p>
           <div className="mt-8 flex flex-col gap-4 md:flex-row md:flex-wrap">
-            <button
+            <Button
               onClick={() => router.push('/onboarding/upload')}
-              className="inline-flex items-center justify-center font-satoshi font-medium rounded-2xl border-2 border-ink h-14 px-10 text-lg bg-gradient-to-r from-purple-300 via-violet-300 to-purple-200 text-ink shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active active:translate-x-[4px] active:translate-y-[4px] active:shadow-none transition-all"
+              size="lg"
+              variant="accent"
             >
               Get Started <ArrowRight className="w-5 h-5 ml-2 inline" />
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={() => router.push('/orders')}
-              className="inline-flex items-center justify-center font-satoshi font-medium rounded-2xl border-2 border-white/40 h-14 px-10 text-lg text-white hover:bg-white/10 transition-all"
+              size="lg"
+              variant="ghost"
+              className="border-2 border-white/40 text-white hover:bg-white/10"
             >
               <ClipboardList className="w-5 h-5 mr-2 inline" /> View Campaigns
-            </button>
+            </Button>
           </div>
         </Container>
       </section>
@@ -90,13 +94,13 @@ export default function LandingPage() {
           <h2 className="font-clash text-3xl font-bold text-center mb-12">How It Works</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {features.map((f, i) => (
-              <div key={i} className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active transition-all">
+              <Card key={i} hoverable className="p-8 text-center">
                 <div className="w-14 h-14 rounded-xl bg-purple-100 border-2 border-ink flex items-center justify-center mx-auto text-primary mb-6">
                   {f.icon}
                 </div>
                 <h3 className="font-clash text-xl font-bold mb-2">{f.title}</h3>
                 <p className="text-sm text-muted font-satoshi">{f.desc}</p>
-              </div>
+              </Card>
             ))}
           </div>
         </Container>
