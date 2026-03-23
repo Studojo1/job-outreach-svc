@@ -67,27 +67,14 @@ app.include_router(payment_router, prefix="/api/v1")
 
 @app.on_event("startup")
 def on_startup():
-    """Start the background email sender loop on pod startup."""
-    try:
-        from services.email_campaign.campaign_worker import start_sender_loop
-        start_sender_loop()
-        logger.info("Email sender loop started successfully")
-    except Exception as e:
-        logger.error("Failed to start email sender loop: %s", e)
+    """App startup hook. Email sending is now handled by job-outreach-worker."""
+    logger.info("Job outreach service started (email sender managed by external worker)")
 
 
 @app.on_event("shutdown")
 def on_shutdown():
-    """Signal the campaign worker to stop gracefully on SIGTERM."""
-    import time
-    try:
-        from services.email_campaign.campaign_worker import stop_sender_loop
-        logger.info("Shutdown signal received — stopping campaign sender loop...")
-        stop_sender_loop()
-        time.sleep(5)
-        logger.info("Campaign sender loop stopped.")
-    except Exception as e:
-        logger.error("Failed to stop email sender loop: %s", e)
+    """App shutdown hook."""
+    logger.info("Job outreach service shutting down")
 
 
 @app.get("/health")

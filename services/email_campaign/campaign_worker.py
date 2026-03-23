@@ -183,8 +183,13 @@ def _sender_loop():
 
 
 def _process_ready_emails():
-    """Find and send all emails where scheduled_at <= now and status = queued."""
+    """Find and send all emails where scheduled_at <= now and status = queued.
+
+    Returns (sent_count, failed_count) tuple.
+    """
     db = SessionLocal()
+    sent_count = 0
+    failed_count = 0
     try:
         now = datetime.utcnow()
 
@@ -204,7 +209,7 @@ def _process_ready_emails():
         )
 
         if not ready_emails:
-            return
+            return sent_count, failed_count
 
         logger.info("[SENDER] Found %d emails ready to send", len(ready_emails))
 
@@ -221,6 +226,7 @@ def _process_ready_emails():
                 email.status = "failed"
                 email.error_message = "Email account not found"
                 db.commit()
+                failed_count += 1
                 continue
 
             # Get/refresh access token
@@ -233,6 +239,7 @@ def _process_ready_emails():
                     email.status = "failed"
                     email.error_message = f"Token refresh failed: {str(e)[:200]}"
                     db.commit()
+                    failed_count += 1
                     continue
 
             access_token = token_cache[acct_id]
@@ -254,6 +261,7 @@ def _process_ready_emails():
                 email.sent_at = datetime.utcnow()
                 email.message_id = result.get("id")
                 db.commit()
+                sent_count += 1
 
                 logger.info("[SENDER] Email %d sent successfully (gmail_id=%s)", email.id, result.get("id"))
 
@@ -262,12 +270,15 @@ def _process_ready_emails():
                 email.status = "failed"
                 email.error_message = str(e)[:500]
                 db.commit()
+                failed_count += 1
 
         # Check if any campaigns are now complete
         _check_campaign_completion(db)
 
     finally:
         db.close()
+
+    return sent_count, failed_count
 
 
 def _check_campaign_completion(db):

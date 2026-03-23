@@ -646,3 +646,22 @@ async def get_campaign_emails(
         })
 
     return {"emails": result}
+
+
+# ── Internal Worker Endpoints (no auth — cluster-only) ─────────────────────
+
+@router.post("/worker/send-ready")
+async def worker_send_ready():
+    """Internal endpoint called by job-outreach-worker goroutine every 30s.
+
+    Processes all scheduled emails that are ready to send. No auth required
+    because this is only accessible within the k8s cluster.
+    """
+    from services.email_campaign.campaign_worker import _process_ready_emails
+
+    try:
+        sent, failed = _process_ready_emails()
+        return {"sent": sent, "failed": failed}
+    except Exception as e:
+        logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
