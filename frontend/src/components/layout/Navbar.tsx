@@ -73,6 +73,7 @@ export function Navbar() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [authChecked, setAuthChecked] = useState(!!user);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
   // Smooth entrance animation
@@ -83,14 +84,15 @@ export function Navbar() {
 
   // Silent auth check — exchange BetterAuth cookie for JWT, then fetch user
   useEffect(() => {
-    if (user) return;
+    if (user) { setAuthChecked(true); return; }
     ensureAuthToken()
       .then(() => api.get('/auth/me'))
       .then((res) => {
         const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         setUser({ ...res.data, timezone: res.data.timezone || browserTz });
       })
-      .catch(() => { /* not logged in — ignore */ });
+      .catch(() => { /* not logged in — ignore */ })
+      .finally(() => setAuthChecked(true));
   }, []);
 
   const handleSignOut = () => {
@@ -144,7 +146,9 @@ export function Navbar() {
         </nav>
 
         <div className="flex items-center gap-4">
-          {user ? (
+          {!authChecked ? (
+            <div className="h-10 w-32" />
+          ) : user ? (
             <>
               {/* User dropdown — mirrors Studojo Header */}
               <div className="relative hidden sm:block" ref={userMenuRef}>
@@ -278,7 +282,7 @@ export function Navbar() {
                 )}
               </li>
             ))}
-            {user ? (
+            {!authChecked ? null : user ? (
               <>
                 {USER_MENU_LINKS.map((item) => (
                   <li key={item.label}>
