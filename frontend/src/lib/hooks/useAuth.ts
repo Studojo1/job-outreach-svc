@@ -5,7 +5,7 @@ import api, { ensureAuthToken } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
 
 export function useAuth(requireAuth = true) {
-  const { user, setUser } = useAppStore();
+  const { user, setUser, orderId, setOrderId, setCandidateId, setCampaignId, setEmailAccountId } = useAppStore();
   const [loading, setLoading] = useState(!user);
 
   useEffect(() => {
@@ -18,9 +18,25 @@ export function useAuth(requireAuth = true) {
     // then call the outreach backend /auth/me through the control-plane.
     ensureAuthToken()
       .then(() => api.get('/auth/me'))
-      .then((res) => {
+      .then(async (res) => {
         const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         setUser({ ...res.data, timezone: res.data.timezone || browserTz });
+
+        // Auto-recover active order if Zustand lost it
+        if (!orderId) {
+          try {
+            const orderRes = await api.get('/orders/active');
+            const order = orderRes.data?.order;
+            if (order) {
+              setOrderId(order.id);
+              if (order.candidate_id) setCandidateId(order.candidate_id);
+              if (order.campaign_id) setCampaignId(order.campaign_id);
+              if (order.email_account_id) setEmailAccountId(order.email_account_id);
+            }
+          } catch {
+            // No active order — that's fine
+          }
+        }
       })
       .catch(() => {
         // Auth failed — user stays null

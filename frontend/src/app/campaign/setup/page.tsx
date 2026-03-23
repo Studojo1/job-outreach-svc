@@ -126,10 +126,10 @@ export default function CampaignSetupPage() {
     router.push('/campaign/launching');
   };
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>;
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>;
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         <h1 className="font-clash text-2xl font-bold mb-2">Campaign Setup</h1>

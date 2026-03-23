@@ -77,6 +77,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
 }), {
   name: 'internreach-app-store',
   partialize: (state) => ({
+    user: state.user,
     candidateId: state.candidateId,
     currentStep: state.currentStep,
     selectedTier: state.selectedTier,

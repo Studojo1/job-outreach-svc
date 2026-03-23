@@ -32,6 +32,14 @@ def gmail_oauth_connect(current_user: User = Depends(get_current_user)):
     return RedirectResponse(url=url)
 
 
+@router.get("/connect-url")
+def gmail_oauth_connect_url(current_user: User = Depends(get_current_user)):
+    """Return the Google OAuth URL as JSON (for authenticated frontend calls)."""
+    logger.info(f"[GmailOAuth] OAuth URL requested for user_id={current_user.id}")
+    url = generate_gmail_auth_url(str(current_user.id))
+    return {"url": url}
+
+
 @router.get("/callback")
 async def gmail_oauth_callback(
     code: str,

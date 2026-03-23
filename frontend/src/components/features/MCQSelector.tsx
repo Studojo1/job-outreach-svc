@@ -50,14 +50,14 @@ export function MCQSelector({ question, options, allowMultiple, onSubmit, loadin
             <button
               key={opt.label}
               onClick={() => toggle(opt.label)}
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-left text-[13px] border transition-all duration-150
+              className={`flex items-center gap-2 px-3 py-2 rounded-xl text-left text-[13px] font-satoshi border-2 transition-all duration-150
                 ${isSelected
-                  ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
-                  : 'border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50'
+                  ? 'border-primary bg-purple-50 text-primary shadow-sm'
+                  : 'border-ink/20 text-ink hover:border-ink/40 hover:bg-surface-muted'
                 }`}
             >
               <span className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 text-[11px] font-semibold ${
-                isSelected ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-500'
+                isSelected ? 'bg-primary text-white' : 'bg-surface-muted text-muted'
               }`}>
                 {isSelected ? <Check className="w-3 h-3" /> : opt.label}
               </span>
@@ -71,7 +71,7 @@ export function MCQSelector({ question, options, allowMultiple, onSubmit, loadin
           Continue
         </Button>
         {allowMultiple && (
-          <span className="text-xs text-gray-400">Select multiple</span>
+          <span className="text-xs text-muted font-satoshi">Select multiple</span>
         )}
       </div>
     </div>

@@ -47,12 +47,13 @@ function StatusIcon({ status }: { status: string }) {
 export default function OrdersPage() {
   const router = useRouter();
   const { loading: authLoading } = useAuth();
-  const { setCampaignId, setCandidateId, setEmailAccountId } = useAppStore();
+  const { setOrderId, setCampaignId, setCandidateId, setEmailAccountId } = useAppStore();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (authLoading) return;
     api.get('/orders/list')
       .then((res) => {
         setOrders(res.data.orders?.map((o: any) => o.order || o) || []);
@@ -61,12 +62,13 @@ export default function OrdersPage() {
         setError(err.response?.data?.detail || 'Failed to load orders');
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [authLoading]);
 
-  const handleResume = async (orderId: number) => {
+  const handleResume = async (oid: number) => {
     try {
-      const res = await api.get(`/orders/${orderId}/resume`);
+      const res = await api.get(`/orders/${oid}/resume`);
       const data = res.data;
+      setOrderId(data.order_id);
       if (data.candidate_id) setCandidateId(data.candidate_id);
       if (data.campaign_id) setCampaignId(data.campaign_id);
       if (data.email_account_id) setEmailAccountId(data.email_account_id);
@@ -78,14 +80,14 @@ export default function OrdersPage() {
 
   if (authLoading || loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-muted">
+      <div className="min-h-screen flex items-center justify-center bg-white">
         <Spinner />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="py-8">
         <div className="space-y-6 animate-fade-in">

@@ -72,18 +72,27 @@ export function Navbar() {
   const { user, setUser } = useAppStore();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [authChecked, setAuthChecked] = useState(!!user);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  // Smooth entrance animation
+  useEffect(() => {
+    const timer = setTimeout(() => setMounted(true), 50);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Silent auth check — exchange BetterAuth cookie for JWT, then fetch user
   useEffect(() => {
-    if (user) return;
+    if (user) { setAuthChecked(true); return; }
     ensureAuthToken()
       .then(() => api.get('/auth/me'))
       .then((res) => {
         const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         setUser({ ...res.data, timezone: res.data.timezone || browserTz });
       })
-      .catch(() => { /* not logged in — ignore */ });
+      .catch(() => { /* not logged in — ignore */ })
+      .finally(() => setAuthChecked(true));
   }, []);
 
   const handleSignOut = () => {
@@ -103,12 +112,12 @@ export function Navbar() {
   }, [userMenuOpen]);
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-ink bg-white">
-      <div className="mx-auto flex h-16 max-w-container items-center justify-between px-6 md:h-20">
+    <header className={`sticky top-0 z-50 w-full border-b border-ink bg-white transition-all duration-500 ease-out ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full'}`}>
+      <div className="mx-auto flex h-16 max-w-[80rem] items-center justify-between px-4 pt-4 pb-px md:h-24 md:px-8 md:pt-0 md:pb-0">
         {/* Brand */}
         <a
           href="/"
-          className="font-satoshi text-2xl font-black leading-9 text-ink"
+          className="font-satoshi text-2xl font-black leading-9 text-ink md:text-4xl md:leading-7"
         >
           studojo
         </a>
@@ -137,7 +146,9 @@ export function Navbar() {
         </nav>
 
         <div className="flex items-center gap-4">
-          {user ? (
+          {!authChecked ? (
+            <div className="h-10 w-32" />
+          ) : user ? (
             <>
               {/* User dropdown — mirrors Studojo Header */}
               <div className="relative hidden sm:block" ref={userMenuRef}>
@@ -218,7 +229,7 @@ export function Navbar() {
               </a>
               <a
                 href={`${STUDOJO_BASE}/auth?mode=signup`}
-                className="inline-flex h-12 items-center justify-center rounded-2xl bg-ink px-4 font-satoshi text-sm font-medium leading-6 text-white shadow-brutal transition-transform hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active border-2 border-ink"
+                className="flex h-12 items-center justify-center rounded-2xl bg-ink px-4 font-satoshi text-sm font-medium leading-6 text-white transition-transform hover:translate-x-[2px] hover:translate-y-[2px] max-w-[120px] flex-shrink-0 md:w-32 md:text-base md:max-w-none"
               >
                 Get Started
               </a>
@@ -248,7 +259,7 @@ export function Navbar() {
 
       {/* Mobile menu */}
       {mobileOpen && (
-        <nav className="border-t border-ink/10 bg-white px-6 py-4 md:hidden" aria-label="Mobile menu">
+        <nav className="border-t border-ink/10 bg-white px-8 py-4 md:hidden" aria-label="Mobile menu">
           <ul className="flex flex-col gap-2">
             {NAV_LINKS.map(({ href, label, internal }) => (
               <li key={label}>
@@ -271,7 +282,7 @@ export function Navbar() {
                 )}
               </li>
             ))}
-            {user ? (
+            {!authChecked ? null : user ? (
               <>
                 {USER_MENU_LINKS.map((item) => (
                   <li key={item.label}>

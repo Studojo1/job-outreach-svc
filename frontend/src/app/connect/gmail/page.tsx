@@ -8,7 +8,6 @@ import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
-import { API_BASE } from '@/lib/api';
 import api from '@/lib/api';
 import { useOrder } from '@/lib/hooks/useOrder';
 import { Mail, Shield, Eye, Send, CheckCircle } from 'lucide-react';
@@ -67,7 +66,16 @@ function GmailConnectContent() {
     }
   }, [searchParams, handled]);
 
-  const handleConnect = () => { window.location.href = `${API_BASE}/gmail/oauth/connect`; };
+  const handleConnect = async () => {
+    setConnecting(true);
+    try {
+      const res = await api.get('/gmail/oauth/connect-url');
+      window.location.href = res.data.url;
+    } catch {
+      setError('Failed to start Gmail connection. Please try again.');
+      setConnecting(false);
+    }
+  };
 
   const handleContinue = () => {
     router.push('/campaign/templates');
@@ -79,10 +87,10 @@ function GmailConnectContent() {
     { icon: <Shield className="w-5 h-5" />, label: 'Your Email Address', desc: 'Identify which Gmail account to use' },
   ];
 
-  if (loading || connecting) return <div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>;
+  if (loading || connecting) return <div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>;
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="max-w-onboarding py-8">
         {connected ? (
@@ -146,7 +154,7 @@ function GmailConnectContent() {
 
 export default function GmailConnectPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>}>
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>}>
       <GmailConnectContent />
     </Suspense>
   );

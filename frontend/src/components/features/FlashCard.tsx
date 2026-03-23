@@ -29,18 +29,18 @@ export function FlashCard({ lead }: FlashCardProps) {
       >
         {/* Front */}
         <div
-          className="absolute inset-0 bg-card border border-border-light rounded-xl shadow-soft px-4 py-3 flex flex-col justify-between"
+          className="absolute inset-0 bg-white border-2 border-ink rounded-2xl shadow-brutal px-4 py-3 flex flex-col justify-between"
           style={{ backfaceVisibility: 'hidden' }}
         >
           <div>
             <div className="flex items-start justify-between mb-2">
               <div className="min-w-0 flex-1 mr-2">
-                <h3 className="text-sm font-semibold text-text-primary truncate">{lead.name}</h3>
-                <p className="text-xs text-text-secondary mt-0.5 truncate">{lead.title}</p>
+                <h3 className="text-sm font-bold text-ink truncate font-satoshi">{lead.name}</h3>
+                <p className="text-xs text-muted mt-0.5 truncate font-satoshi">{lead.title}</p>
               </div>
               {lead.score && <ScoreGauge score={lead.score.overall} size={36} />}
             </div>
-            <div className="flex flex-col gap-1 text-xs text-text-secondary">
+            <div className="flex flex-col gap-1 text-xs text-muted font-satoshi">
               <div className="flex items-center gap-1.5">
                 <Building2 className="w-3 h-3 flex-shrink-0" />
                 <span className="truncate">{lead.company}</span>
@@ -63,17 +63,17 @@ export function FlashCard({ lead }: FlashCardProps) {
             <Badge variant={lead.email_verified ? 'success' : 'default'}>
               {lead.email_verified ? 'Verified' : lead.status}
             </Badge>
-            <span className="text-[10px] text-text-secondary">Hover to flip</span>
+            <span className="text-[10px] text-muted font-satoshi">Hover to flip</span>
           </div>
         </div>
 
         {/* Back */}
         <div
-          className="absolute inset-0 bg-card border border-primary rounded-xl shadow-elevated px-4 py-3 flex flex-col justify-between"
+          className="absolute inset-0 bg-white border-2 border-primary rounded-2xl shadow-brutal-active px-4 py-3 flex flex-col justify-between"
           style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
         >
           <div>
-            <h4 className="text-sm font-semibold text-primary mb-2">Score Breakdown</h4>
+            <h4 className="text-sm font-bold text-primary mb-2 font-satoshi">Score Breakdown</h4>
             {lead.score ? (
               <div className="space-y-1.5">
                 <ScoreBar label="Title" value={lead.score.title_relevance} max={35} />
@@ -83,10 +83,10 @@ export function FlashCard({ lead }: FlashCardProps) {
                 <ScoreBar label="Location" value={lead.score.location_relevance} max={10} />
               </div>
             ) : (
-              <p className="text-xs text-text-secondary">No score data</p>
+              <p className="text-xs text-muted font-satoshi">No score data</p>
             )}
             {lead.score?.explanation && (
-              <p className="text-xs text-text-secondary mt-2 line-clamp-2">{lead.score.explanation}</p>
+              <p className="text-xs text-muted font-satoshi mt-2 line-clamp-2">{lead.score.explanation}</p>
             )}
           </div>
           {lead.linkedin_url && (
@@ -94,7 +94,7 @@ export function FlashCard({ lead }: FlashCardProps) {
               href={lead.linkedin_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1 text-primary text-xs hover:underline mt-2"
+              className="flex items-center gap-1 text-primary text-xs hover:underline mt-2 font-satoshi"
               onClick={(e) => e.stopPropagation()}
             >
               <ExternalLink className="w-3 h-3" /> LinkedIn
@@ -110,9 +110,9 @@ function ScoreBar({ label, value, max }: { label: string; value: number; max: nu
   const pct = Math.min((value / max) * 100, 100);
   return (
     <div>
-      <div className="flex justify-between text-xs mb-0.5">
-        <span className="text-text-secondary">{label}</span>
-        <span className="text-text-primary font-medium">{value}/{max}</span>
+      <div className="flex justify-between text-xs mb-0.5 font-satoshi">
+        <span className="text-muted">{label}</span>
+        <span className="text-ink font-bold">{value}/{max}</span>
       </div>
       <div className="w-full h-1.5 bg-gray-100 rounded-full">
         <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />

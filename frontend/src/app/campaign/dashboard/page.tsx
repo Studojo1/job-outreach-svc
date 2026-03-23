@@ -199,7 +199,7 @@ export default function DashboardPage() {
     }
   };
 
-  if (authLoading || loading) return <div className="min-h-screen flex items-center justify-center bg-surface-muted"><Spinner /></div>;
+  if (authLoading || loading) return <div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>;
 
   // ─── Test Mode Dashboard ─────────────────────────────────────────────
   if (testJobId) {
@@ -212,7 +212,7 @@ export default function DashboardPage() {
     const isFailed = testJob?.status === 'failed' && testJob?.error;
 
     return (
-      <div className="min-h-screen bg-surface-muted">
+      <div className="min-h-screen bg-white">
         <Navbar />
         <Container className="py-8">
           <div className="space-y-8 animate-fade-in">
@@ -307,7 +307,7 @@ export default function DashboardPage() {
   // ─── Campaign Mode Dashboard ─────────────────────────────────────────
   if (!campaignId) {
     return (
-      <div className="min-h-screen bg-surface-muted">
+      <div className="min-h-screen bg-white">
         <Navbar />
         <Container className="max-w-onboarding py-8 text-center">
           <p className="text-base text-muted mt-10 font-satoshi">No active campaign.</p>
@@ -327,7 +327,7 @@ export default function DashboardPage() {
   const campaignToSend = metrics?.emails_queued || 0;
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="py-8">
         {error ? (

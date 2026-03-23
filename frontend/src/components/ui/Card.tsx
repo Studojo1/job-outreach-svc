@@ -8,8 +8,8 @@ interface CardProps {
 }
 
 export function Card({ children, hoverable = false, className = '', onClick }: CardProps) {
-  const base = 'bg-card border border-border-light rounded-xl shadow-soft p-l';
-  const hover = hoverable ? 'transition-all duration-200 hover:border-primary hover:shadow-elevated cursor-pointer' : '';
+  const base = 'rounded-2xl border-2 border-ink bg-white shadow-brutal p-6 md:p-8';
+  const hover = hoverable ? 'transition-all hover:-translate-y-1 hover:shadow-brutal-active cursor-pointer' : '';
 
   return (
     <div className={`${base} ${hover} ${className}`} onClick={onClick}>

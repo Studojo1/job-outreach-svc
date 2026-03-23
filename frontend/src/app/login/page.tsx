@@ -45,7 +45,7 @@ function LoginContent() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-muted">
+    <div className="min-h-screen flex items-center justify-center bg-white">
       <Container className="max-w-md">
         <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal text-center p-8">
           <div className="w-16 h-16 rounded-full bg-brand-purple-bg border-2 border-ink flex items-center justify-center mx-auto mb-6">
@@ -75,7 +75,7 @@ function LoginContent() {
 export default function LoginPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen flex items-center justify-center bg-surface-muted">
+      <div className="min-h-screen flex items-center justify-center bg-white">
         <Spinner />
       </div>
     }>

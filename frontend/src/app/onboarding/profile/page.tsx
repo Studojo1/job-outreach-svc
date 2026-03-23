@@ -15,14 +15,14 @@ import api from '@/lib/api';
 
 export default function ProfilePage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId } = useAppStore();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!candidateId) return;
+    if (authLoading || !candidateId) return;
 
     let retries = 0;
     const maxRetries = 3;
@@ -58,11 +58,11 @@ export default function ProfilePage() {
 
   if (!candidateId) {
     return (
-      <div className="min-h-screen bg-page">
+      <div className="min-h-screen bg-white">
         <Navbar />
-        <Container className="max-w-onboarding py-xl text-center">
-          <p className="text-body-lg text-text-secondary mt-xl">Please complete the chat first.</p>
-          <Button onClick={() => router.push('/onboarding/chat')} className="mt-l">Go to Chat</Button>
+        <Container className="max-w-onboarding py-8 text-center">
+          <p className="text-base text-muted mt-8 font-satoshi">Please complete the chat first.</p>
+          <Button onClick={() => router.push('/onboarding/chat')} className="mt-6">Go to Chat</Button>
         </Container>
       </div>
     );
@@ -74,45 +74,45 @@ export default function ProfilePage() {
   const career = parsed.career_analysis || {};
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-white">
       <Navbar />
-      <Container className="max-w-onboarding py-xl">
+      <Container className="max-w-onboarding py-8">
         <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={3} />
 
-        <div className="mt-xl">
-          <h1 className="text-h2 mb-s">Your Candidate Profile</h1>
-          <p className="text-body-sm text-text-secondary mb-l">
+        <div className="mt-8">
+          <h1 className="font-clash text-2xl font-bold mb-2">Your Candidate Profile</h1>
+          <p className="text-sm text-muted font-satoshi mb-6">
             Here's what we've learned about you. This powers your lead discovery.
           </p>
 
           {loading ? (
-            <div className="flex justify-center py-xxl"><Spinner /></div>
+            <div className="flex justify-center py-12"><Spinner /></div>
           ) : error ? (
-            <div className="card p-xl text-center">
-              <p className="text-error">{error}</p>
-              <Button onClick={() => window.location.reload()} className="mt-l">Retry</Button>
+            <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center">
+              <p className="text-error font-satoshi">{error}</p>
+              <Button onClick={() => window.location.reload()} className="mt-6">Retry</Button>
             </div>
           ) : (
-            <div className="space-y-l animate-fade-in">
+            <div className="space-y-6 animate-fade-in">
               {/* Summary */}
               {parsed.profile_summary && (
-                <div className="card p-l">
-                  <div className="flex items-center gap-m mb-m">
+                <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-6">
+                  <div className="flex items-center gap-4 mb-4">
                     <User className="w-5 h-5 text-primary" />
-                    <h3 className="text-h3">Summary</h3>
+                    <h3 className="font-clash text-lg font-bold">Summary</h3>
                   </div>
-                  <p className="text-body-sm text-text-secondary">{parsed.profile_summary}</p>
+                  <p className="text-sm text-muted font-satoshi">{parsed.profile_summary}</p>
                 </div>
               )}
 
               {/* Skills */}
               {personalInfo.skills_detected?.length > 0 && (
-                <div className="card p-l">
-                  <div className="flex items-center gap-m mb-m">
+                <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-6">
+                  <div className="flex items-center gap-4 mb-4">
                     <Target className="w-5 h-5 text-primary" />
-                    <h3 className="text-h3">Skills</h3>
+                    <h3 className="font-clash text-lg font-bold">Skills</h3>
                   </div>
-                  <div className="flex flex-wrap gap-s">
+                  <div className="flex flex-wrap gap-2">
                     {personalInfo.skills_detected.map((s: string) => (
                       <Badge key={s} variant="primary">{s}</Badge>
                     ))}
@@ -121,14 +121,14 @@ export default function ProfilePage() {
               )}
 
               {/* Preferences */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-l">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {preferences.locations?.length > 0 && (
-                  <div className="card p-l">
-                    <div className="flex items-center gap-m mb-m">
+                  <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-6">
+                    <div className="flex items-center gap-4 mb-4">
                       <MapPin className="w-5 h-5 text-primary" />
-                      <h3 className="text-h3">Locations</h3>
+                      <h3 className="font-clash text-lg font-bold">Locations</h3>
                     </div>
-                    <div className="flex flex-wrap gap-s">
+                    <div className="flex flex-wrap gap-2">
                       {preferences.locations.map((loc: string) => (
                         <Badge key={loc}>{loc}</Badge>
                       ))}
@@ -137,12 +137,12 @@ export default function ProfilePage() {
                 )}
 
                 {preferences.industry_interests?.length > 0 && (
-                  <div className="card p-l">
-                    <div className="flex items-center gap-m mb-m">
+                  <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-6">
+                    <div className="flex items-center gap-4 mb-4">
                       <Building2 className="w-5 h-5 text-primary" />
-                      <h3 className="text-h3">Industries</h3>
+                      <h3 className="font-clash text-lg font-bold">Industries</h3>
                     </div>
-                    <div className="flex flex-wrap gap-s">
+                    <div className="flex flex-wrap gap-2">
                       {preferences.industry_interests.map((ind: string) => (
                         <Badge key={ind}>{ind}</Badge>
                       ))}
@@ -153,26 +153,26 @@ export default function ProfilePage() {
 
               {/* Recommended Roles */}
               {career.recommended_roles?.length > 0 && (
-                <div className="card p-l">
-                  <div className="flex items-center gap-m mb-m">
+                <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-6">
+                  <div className="flex items-center gap-4 mb-4">
                     <Briefcase className="w-5 h-5 text-primary" />
-                    <h3 className="text-h3">Recommended Roles</h3>
+                    <h3 className="font-clash text-lg font-bold">Recommended Roles</h3>
                   </div>
-                  <div className="space-y-m">
+                  <div className="space-y-4">
                     {career.recommended_roles.map((role: any, i: number) => (
-                      <div key={i} className="flex items-center justify-between p-m bg-gray-50 rounded-lg">
+                      <div key={i} className="flex items-center justify-between p-4 bg-surface-muted rounded-xl border-2 border-ink/20">
                         <div>
-                          <p className="text-body-sm font-semibold">{role.title}</p>
+                          <p className="text-sm font-bold font-satoshi">{role.title}</p>
                           {role.reasoning && (
-                            <p className="text-body-sm text-text-secondary mt-xs">{role.reasoning}</p>
+                            <p className="text-sm text-muted font-satoshi mt-1">{role.reasoning}</p>
                           )}
                         </div>
                         {role.fit_score != null && (
                           <div className="text-right">
-                            <span className="text-h3 text-primary">
+                            <span className="font-clash text-lg font-bold text-primary">
                               {Math.round(role.fit_score * 100)}%
                             </span>
-                            <span className="text-label text-text-secondary block">fit</span>
+                            <span className="text-xs font-bold text-muted uppercase font-satoshi block">fit</span>
                           </div>
                         )}
                       </div>
@@ -182,7 +182,7 @@ export default function ProfilePage() {
               )}
 
               {/* CTA */}
-              <div className="text-center pt-l">
+              <div className="text-center pt-6">
                 <Button size="lg" onClick={() => router.push('/leads/discovery')}>
                   Find Decision Makers
                 </Button>

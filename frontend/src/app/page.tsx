@@ -4,7 +4,6 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Upload, Search, Mail, ArrowRight, ClipboardList } from 'lucide-react';
 
@@ -56,20 +55,20 @@ export default function LandingPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-surface-muted flex flex-col">
+    <div className="w-full bg-white">
       <Navbar />
 
-      <main className="max-w-container mx-auto w-full px-6 pt-8 pb-16 flex-1 flex flex-col gap-8">
-        {/* Hero — dark purple background, rounded container */}
-        <section className="rounded-2xl overflow-hidden bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
-          <div className="px-6 py-16 md:px-12 md:py-24 text-center md:text-left">
-            <h1 className="font-clash text-4xl md:text-5xl lg:text-6xl font-medium leading-tight tracking-tight text-white max-w-3xl">
+      {/* Hero */}
+      <section className="border-b border-ink bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
+        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:py-20">
+          <div className="flex flex-col gap-6 text-center md:gap-8 md:text-left">
+            <h1 className="max-w-3xl font-clash text-3xl font-semibold leading-tight tracking-tight text-white md:text-4xl lg:text-5xl">
               Find Hiring Managers for Your Dream Job
             </h1>
-            <p className="text-base md:text-lg text-purple-200 mt-5 md:mt-7 max-w-xl font-satoshi">
+            <p className="max-w-xl font-satoshi text-sm font-normal leading-6 text-white/90 md:text-base md:leading-7">
               OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
             </p>
-            <div className="mt-8 flex flex-col gap-4 md:flex-row md:flex-wrap">
+            <div className="flex flex-col gap-4 md:flex-row md:flex-wrap">
               <Button
                 onClick={() => router.push('/onboarding/upload')}
                 size="lg"
@@ -87,14 +86,16 @@ export default function LandingPage() {
               </Button>
             </div>
           </div>
-        </section>
+        </div>
+      </section>
 
-        {/* Features */}
-        <section className="py-8 md:py-16">
+      {/* Features */}
+      <section className="border-b border-ink bg-white">
+        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:pt-24 md:pb-16">
           <h2 className="font-clash text-3xl font-bold text-center mb-12">How It Works</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {features.map((f, i) => (
-              <Card key={i} hoverable className="p-8 text-center">
+              <Card key={i} hoverable className="text-center">
                 <div className="w-14 h-14 rounded-xl bg-purple-100 border-2 border-ink flex items-center justify-center mx-auto text-primary mb-6">
                   {f.icon}
                 </div>
@@ -103,25 +104,25 @@ export default function LandingPage() {
               </Card>
             ))}
           </div>
-        </section>
+        </div>
+      </section>
 
-        {/* CTA — rounded container */}
-        <section className="rounded-2xl overflow-hidden bg-gradient-to-br from-purple-100 via-violet-100 to-purple-50">
-          <div className="px-6 py-16 md:px-12 md:py-24 text-center">
-            <h2 className="font-clash text-3xl font-bold mb-4">Ready to find your next opportunity?</h2>
-            <p className="text-lg text-muted mb-10 font-satoshi">
-              Upload your resume and let AI do the outreach.
-            </p>
-            <Button onClick={() => router.push('/onboarding/upload')} size="lg">
-              Start Now <ArrowRight className="w-4 h-4 ml-2 inline" />
-            </Button>
-          </div>
-        </section>
-      </main>
+      {/* CTA */}
+      <section className="border-b border-ink bg-gradient-to-br from-purple-100 via-violet-100 to-purple-50">
+        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:py-24 text-center">
+          <h2 className="font-clash text-3xl font-bold mb-4">Ready to find your next opportunity?</h2>
+          <p className="text-lg text-muted mb-10 font-satoshi">
+            Upload your resume and let AI do the outreach.
+          </p>
+          <Button onClick={() => router.push('/onboarding/upload')} size="lg">
+            Start Now <ArrowRight className="w-4 h-4 ml-2 inline" />
+          </Button>
+        </div>
+      </section>
 
-      {/* Footer — mirrors Studojo Footer structure */}
+      {/* Footer */}
       <footer className="relative border-b border-ink bg-white">
-        <Container className="pt-8 md:py-24">
+        <div className="mx-auto max-w-[80rem] px-4 pt-8 py-8 md:px-8 md:py-24">
           <div className="flex flex-col gap-8 md:grid md:grid-cols-2 md:gap-16">
             {/* Left: branding + Join the Dojo + contact */}
             <div className="flex flex-col gap-8 md:gap-12">
@@ -223,7 +224,7 @@ export default function LandingPage() {
               <a href={`${STUDOJO_BASE}/refund-policy`} className="font-satoshi text-xs text-muted md:text-lg hover:underline">Refund Policy</a>
             </div>
           </div>
-        </Container>
+        </div>
 
         {/* Giant studojo text — matches platform footer */}
         <div className="relative flex w-full items-center justify-center overflow-hidden px-2 pb-4 pt-8 md:px-0 md:pb-8 md:pt-16">

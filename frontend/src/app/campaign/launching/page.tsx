@@ -21,14 +21,14 @@ const stages = [
 
 export default function CampaignLaunchingPage() {
   const router = useRouter();
-  useAuth();
+  const { loading: authLoading } = useAuth();
   const { candidateId, emailAccountId, campaignId, setCampaignId } = useAppStore();
   const [currentStage, setCurrentStage] = useState(0);
   const [error, setError] = useState('');
   const launched = useRef(false);
 
   useEffect(() => {
-    if (!candidateId || !emailAccountId || launched.current) return;
+    if (authLoading || !candidateId || !emailAccountId || launched.current) return;
     launched.current = true;
 
     // Read launch params from sessionStorage (set by setup page)
@@ -99,29 +99,29 @@ export default function CampaignLaunchingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-white">
       <Navbar />
-      <Container className="max-w-onboarding py-xl">
-        <div className="text-center mb-xxl">
-          <h1 className="text-h2">Preparing Your Campaign</h1>
-          <p className="text-body-sm text-text-secondary mt-s">
+      <Container className="max-w-onboarding py-8">
+        <div className="text-center mb-12">
+          <h1 className="font-clash text-2xl font-bold">Preparing Your Campaign</h1>
+          <p className="text-sm text-muted font-satoshi mt-2">
             Setting up your outreach. This takes about 15 seconds.
           </p>
         </div>
 
         {error ? (
-          <div className="card p-xl text-center">
-            <AlertCircle className="w-10 h-10 text-error mx-auto mb-m" />
-            <p className="text-error text-body-lg mb-l">{error}</p>
+          <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center">
+            <AlertCircle className="w-10 h-10 text-error mx-auto mb-4" />
+            <p className="text-error text-base font-satoshi mb-6">{error}</p>
             <button
               onClick={() => router.push('/campaign/setup')}
-              className="btn-primary"
+              className="inline-flex items-center justify-center font-satoshi font-medium rounded-2xl border-2 border-ink bg-primary text-white shadow-brutal hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-brutal-active h-12 px-6 text-base"
             >
               Back to Setup
             </button>
           </div>
         ) : (
-          <div className="max-w-md mx-auto space-y-l">
+          <div className="max-w-md mx-auto space-y-6">
             {stages.map((stage, i) => {
               const done = currentStage > i;
               const active = currentStage === i;
@@ -130,20 +130,20 @@ export default function CampaignLaunchingPage() {
               return (
                 <div
                   key={i}
-                  className={`flex items-center gap-l p-l rounded-xl border transition-all duration-500 ${
+                  className={`flex items-center gap-6 p-6 rounded-2xl border-2 transition-all duration-500 ${
                     done
                       ? 'border-secondary bg-secondary/5'
                       : active
-                      ? 'border-primary bg-primary/5 shadow-elevated'
-                      : 'border-border-light bg-card'
+                      ? 'border-primary bg-primary/5 shadow-brutal-active'
+                      : 'border-ink/20 bg-white'
                   }`}
                 >
                   <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                    done ? 'bg-secondary text-white' : active ? 'bg-primary/10 text-primary' : 'bg-gray-100 text-text-secondary'
+                    done ? 'bg-secondary text-white' : active ? 'bg-primary/10 text-primary' : 'bg-gray-100 text-muted'
                   }`}>
                     {done ? <CheckCircle className="w-5 h-5" /> : active ? <Spinner size="sm" /> : <Icon className="w-5 h-5" />}
                   </div>
-                  <span className={`text-body-sm ${done ? 'text-secondary font-semibold' : active ? 'text-text-primary font-semibold' : 'text-text-secondary'}`}>
+                  <span className={`text-sm font-satoshi ${done ? 'text-secondary font-semibold' : active ? 'text-ink font-semibold' : 'text-muted'}`}>
                     {stage.label}
                   </span>
                 </div>

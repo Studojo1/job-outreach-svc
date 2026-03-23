@@ -8,15 +8,15 @@ interface BadgeProps {
 
 export function Badge({ children, variant = 'default', className = '' }: BadgeProps) {
   const variants = {
-    default: 'bg-gray-100 text-text-secondary',
-    success: 'bg-emerald-100 text-emerald-700',
-    warning: 'bg-amber-100 text-amber-700',
-    error: 'bg-red-100 text-red-700',
-    primary: 'bg-purple-100 text-primary',
+    default: 'bg-surface-muted text-muted border-ink',
+    success: 'bg-studojo-green-bg text-emerald-800 border-ink',
+    warning: 'bg-studojo-orange-bg text-amber-800 border-ink',
+    error: 'bg-red-100 text-red-800 border-ink',
+    primary: 'bg-brand-purple-bg text-primary border-ink',
   };
 
   return (
-    <span className={`inline-flex items-center px-3 py-1 rounded-full text-label uppercase ${variants[variant]} ${className}`}>
+    <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase border-2 ${variants[variant]} ${className}`}>
       {children}
     </span>
   );

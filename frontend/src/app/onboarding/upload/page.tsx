@@ -68,30 +68,30 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="min-h-screen bg-page">
+    <div className="min-h-screen bg-white">
       <Navbar />
-      <Container className="max-w-onboarding py-xl">
+      <Container className="max-w-onboarding py-8">
         <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={1} />
 
-        <div className="mt-xl">
+        <div className="mt-8">
           {!preview ? (
-            <div className="card p-xl">
-              <h1 className="text-h2 mb-s">Upload Your Resume</h1>
-              <p className="text-body-sm text-text-secondary mb-xl">
+            <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8">
+              <h1 className="font-clash text-2xl font-bold mb-2">Upload Your Resume</h1>
+              <p className="text-sm text-muted font-satoshi mb-8">
                 We'll analyze your background to find the right decision makers.
               </p>
 
               <div
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={handleDrop}
-                className="border-2 border-dashed border-border-light rounded-xl p-xxl text-center hover:border-primary transition-colors cursor-pointer"
+                className="border-2 border-dashed border-ink/30 rounded-2xl p-12 text-center hover:border-primary hover:bg-brand-purple-bg/50 transition-all cursor-pointer"
                 onClick={() => document.getElementById('file-input')?.click()}
               >
-                <Upload className="w-12 h-12 text-text-secondary mx-auto mb-m" />
-                <p className="text-body-lg text-text-primary mb-s">
+                <Upload className="w-12 h-12 text-muted mx-auto mb-4" />
+                <p className="text-base text-ink font-satoshi mb-2">
                   {file ? file.name : 'Drop your resume here, or click to browse'}
                 </p>
-                <p className="text-body-sm text-text-secondary">PDF or DOCX, up to 10MB</p>
+                <p className="text-sm text-muted font-satoshi">PDF or DOCX, up to 10MB</p>
                 <input
                   id="file-input"
                   type="file"
@@ -102,63 +102,63 @@ export default function UploadPage() {
               </div>
 
               {file && (
-                <div className="flex items-center gap-m mt-l p-m bg-gray-50 rounded-lg">
+                <div className="flex items-center gap-4 mt-6 p-4 bg-surface-muted rounded-xl border-2 border-ink/20">
                   <FileText className="w-5 h-5 text-primary" />
-                  <span className="text-body-sm flex-1">{file.name}</span>
-                  <span className="text-label text-text-secondary">
+                  <span className="text-sm flex-1 font-satoshi">{file.name}</span>
+                  <span className="text-xs font-bold text-muted uppercase font-satoshi">
                     {(file.size / 1024).toFixed(0)} KB
                   </span>
                 </div>
               )}
 
               {error && (
-                <p className="text-body-sm text-error mt-m">{error}</p>
+                <p className="text-sm text-error mt-4 font-satoshi">{error}</p>
               )}
 
-              <div className="mt-l">
+              <div className="mt-6">
                 <Button onClick={handleUpload} loading={uploading} disabled={!file}>
                   Upload & Analyze
                 </Button>
               </div>
             </div>
           ) : (
-            <div className="card p-xl animate-fade-in">
-              <div className="flex items-center gap-m mb-l">
+            <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 animate-fade-in">
+              <div className="flex items-center gap-4 mb-6">
                 <CheckCircle className="w-6 h-6 text-secondary" />
-                <h2 className="text-h2">Resume Analyzed</h2>
+                <h2 className="font-clash text-2xl font-bold">Resume Analyzed</h2>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-l">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {preview.name && (
                   <div>
-                    <span className="text-label text-text-secondary">Name</span>
-                    <p className="text-body-lg mt-xs">{preview.name}</p>
+                    <span className="text-xs font-bold text-muted uppercase font-satoshi">Name</span>
+                    <p className="text-base mt-1 font-satoshi">{preview.name}</p>
                   </div>
                 )}
                 {preview.email && (
                   <div>
-                    <span className="text-label text-text-secondary">Email</span>
-                    <p className="text-body-lg mt-xs">{preview.email}</p>
+                    <span className="text-xs font-bold text-muted uppercase font-satoshi">Email</span>
+                    <p className="text-base mt-1 font-satoshi">{preview.email}</p>
                   </div>
                 )}
                 {preview.experience_years != null && (
                   <div>
-                    <span className="text-label text-text-secondary">Experience</span>
-                    <p className="text-body-lg mt-xs">{preview.experience_years} years</p>
+                    <span className="text-xs font-bold text-muted uppercase font-satoshi">Experience</span>
+                    <p className="text-base mt-1 font-satoshi">{preview.experience_years} years</p>
                   </div>
                 )}
                 {preview.char_count != null && (
                   <div>
-                    <span className="text-label text-text-secondary">Resume Length</span>
-                    <p className="text-body-lg mt-xs">{preview.char_count.toLocaleString()} characters</p>
+                    <span className="text-xs font-bold text-muted uppercase font-satoshi">Resume Length</span>
+                    <p className="text-base mt-1 font-satoshi">{preview.char_count.toLocaleString()} characters</p>
                   </div>
                 )}
               </div>
 
               {preview.skills && preview.skills.length > 0 && (
-                <div className="mt-l">
-                  <span className="text-label text-text-secondary">Skills Detected</span>
-                  <div className="flex flex-wrap gap-s mt-s">
+                <div className="mt-6">
+                  <span className="text-xs font-bold text-muted uppercase font-satoshi">Skills Detected</span>
+                  <div className="flex flex-wrap gap-2 mt-2">
                     {preview.skills.map((s) => (
                       <Badge key={s} variant="primary">{s}</Badge>
                     ))}
@@ -167,9 +167,9 @@ export default function UploadPage() {
               )}
 
               {preview.education && preview.education.length > 0 && (
-                <div className="mt-l">
-                  <span className="text-label text-text-secondary">Education</span>
-                  <div className="flex flex-wrap gap-s mt-s">
+                <div className="mt-6">
+                  <span className="text-xs font-bold text-muted uppercase font-satoshi">Education</span>
+                  <div className="flex flex-wrap gap-2 mt-2">
                     {preview.education.map((e) => (
                       <Badge key={e}>{e}</Badge>
                     ))}
@@ -177,7 +177,7 @@ export default function UploadPage() {
                 </div>
               )}
 
-              <div className="mt-xl">
+              <div className="mt-8">
                 <Button onClick={handleContinue}>
                   Continue to AI Chat
                 </Button>
