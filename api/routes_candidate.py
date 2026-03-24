@@ -27,8 +27,8 @@ class ChatRequest(BaseModel):
 
 @router.post("/upload")
 async def upload_resume(
-    file: UploadFile = File(...),
     background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
