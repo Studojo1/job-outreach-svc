@@ -12,6 +12,7 @@ class User(Base):
     email = Column(Text, unique=True, index=True, nullable=False)
     name = Column(Text, nullable=False)
     image = Column(Text)
+    role = Column(String(50))
     email_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
