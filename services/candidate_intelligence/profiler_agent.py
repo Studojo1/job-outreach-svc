@@ -511,3 +511,146 @@ def generate_final_payload(
     except Exception as e:
         logger.error(f"Payload generation error: {e}")
         raise
+
+
+# ============================================================================
+# Fast Streaming Mode — compact context, 2 LLM questions (Q6 + Q7)
+# ============================================================================
+
+SYSTEM_PROMPT_FAST = """You are StudojoProfiler. You are asking the FINAL 2 profiling questions.
+
+The candidate already answered: career stage, job type, location, work style, company preference.
+Their answers and background are shown below.
+
+YOUR TASK:
+- If this is Q6 (first LLM question): Ask ONE open descriptive question about what kind of work excites them. Set text_input: true, mcq: null. Keep it short and specific to their background.
+  Example style: "What kind of problems do you love solving day-to-day — building things, analyzing data, convincing people, or something else?"
+- If this is Q7 (you just received their Q6 answer): Ask ONE MCQ about industries or specific skills they want to develop. Generate 7-8 tailored options based on their profile and domain. Set allow_multiple: true.
+- After Q7 answer is received: set is_complete: true, message: "Perfect, that's everything I need. Generating your profile now..."
+
+RULES:
+- Warm 1-sentence acknowledgment, then the question. Use ||| as separator: "Great answer.|||Next question?"
+- For MCQ: generate options specific to their domain. Always include "Other" as the last option.
+- Do NOT repeat any questions already asked. Do NOT give advice.
+
+JSON RESPONSE (strict schema):
+{"message":"ack|||question","current_state":"MCQ or TEXT","mcq":{"question":"...","options":[{"label":"A","text":"..."}],"allow_multiple":true} or null,"text_input":true or false,"is_complete":false,"questions_asked_so_far":6}
+"""
+
+
+def _detect_career_domain(skills: list) -> str:
+    """Simple keyword matching to detect career domain from skills list."""
+    skill_text = " ".join(str(s).lower() for s in skills)
+    domains = {
+        "tech/engineering": ["python", "javascript", "java", "react", "node", "aws", "sql", "backend", "frontend", "devops", "docker", "typescript", "golang", "c++", "kotlin", "swift"],
+        "data/analytics": ["machine learning", "data science", "pandas", "tensorflow", "analytics", "tableau", "statistics", "r programming", "power bi", "excel", "numpy"],
+        "marketing/growth": ["seo", "sem", "content marketing", "social media", "google analytics", "hubspot", "email marketing", "copywriting", "brand", "growth hacking", "ads"],
+        "finance/consulting": ["financial modeling", "accounting", "cfa", "equity", "valuation", "financial analysis", "consulting", "excel", "bloomberg", "investment"],
+        "design/ux": ["figma", "ui/ux", "adobe", "user research", "wireframe", "sketch", "illustrator", "photoshop", "prototyping"],
+        "product": ["product management", "agile", "scrum", "roadmap", "user stories", "jira", "product strategy", "okrs"],
+        "sales/bd": ["crm", "salesforce", "b2b", "lead generation", "account management", "business development", "cold outreach"],
+    }
+    best, best_score = "general", 0
+    for domain, keywords in domains.items():
+        score = sum(1 for kw in keywords if kw in skill_text)
+        if score > best_score:
+            best, best_score = domain, score
+    return best
+
+
+def build_messages_fast(
+    chat_history: list[ChatMessage],
+    resume_summary: dict | None = None,
+) -> list[dict]:
+    """Compact message builder — small context window for fast LLM inference."""
+    system = SYSTEM_PROMPT_FAST
+
+    # Compact resume profile (~250 chars max)
+    if resume_summary and isinstance(resume_summary, dict):
+        parts = []
+        if resume_summary.get("name"):
+            parts.append(f"Name: {resume_summary['name']}")
+        skills = resume_summary.get("skills", [])
+        if skills:
+            parts.append(f"Skills: {', '.join(str(s) for s in skills[:10])}")
+            domain = _detect_career_domain(skills)
+            parts.append(f"Domain: {domain}")
+        exp = resume_summary.get("experience_years")
+        if exp is not None:
+            parts.append(f"Exp: {exp}y")
+        edu = resume_summary.get("education", [])
+        if edu:
+            edu_str = str(edu[0])[:50] if isinstance(edu, list) and edu else str(edu)[:50]
+            parts.append(f"Education: {edu_str}")
+        if parts:
+            system += f"\n\nCANDIDATE PROFILE: {' | '.join(parts)}"
+
+    # Compact summary of static question answers (Q1–Q5)
+    user_msgs = [m for m in chat_history if m.role == "user" and m.content not in ("__start__",)]
+    labels = ["Career stage", "Job type", "Location", "Work style", "Company preference", "Career goal"]
+    prior = [f"{labels[i]}: {user_msgs[i].content[:100]}" for i in range(min(6, len(user_msgs)))]
+    if prior:
+        system += "\n\nPREVIOUS ANSWERS:\n" + "\n".join(prior)
+
+    messages = [{"role": "system", "content": system}]
+
+    # Include only the LLM-phase turns (after the static Q&A block)
+    # Static questions generate ~12 messages (6 Q&A pairs). Take only what's after.
+    static_qa_count = min(len(user_msgs), 6) * 2
+    llm_turns = chat_history[static_qa_count:] if len(chat_history) > static_qa_count else []
+    recent = llm_turns[-4:] if len(llm_turns) > 4 else llm_turns
+
+    if recent:
+        for msg in recent:
+            messages.append({"role": msg.role, "content": msg.content})
+    else:
+        messages.append({"role": "user", "content": "Please ask the next profiling question."})
+
+    return messages
+
+
+def stream_agent_response(
+    chat_history: list[ChatMessage],
+    resume_summary: dict | None = None,
+):
+    """
+    Stream the final 2 LLM profiling questions with reduced context.
+    Yields: ('chunk', str) for text tokens | ('done', AgentResponse) | ('error', str)
+    """
+    t_start = time.perf_counter()
+    client = _get_client()
+    model = _get_model()
+    messages = build_messages_fast(chat_history, resume_summary)
+
+    accumulated = ""
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_completion_tokens=600,
+            stream=True,
+        )
+
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                delta = chunk.choices[0].delta.content
+                accumulated += delta
+                yield "chunk", delta
+
+        t_llm = time.perf_counter()
+        logger.info(f"[STREAM] LLM done: {(t_llm - t_start)*1000:.0f}ms, {len(accumulated)} chars")
+
+        response = _parse_llm_json(accumulated, chat_history)
+
+        # Guard: don't allow completion before Q7 answer
+        user_answer_count = len([m for m in chat_history if m.role == "user" and m.content not in ("__start__",)])
+        if response.is_complete and user_answer_count < 7:
+            logger.warning(f"[STREAM] Premature completion at {user_answer_count} answers — forcing continuation")
+            response.is_complete = False
+
+        yield "done", response
+
+    except Exception as e:
+        logger.error(f"[STREAM] Error: {e}", exc_info=True)
+        yield "error", str(e)

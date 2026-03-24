@@ -1,7 +1,11 @@
 """Candidate Routes — Resume upload, profiling chat, and profile retrieval."""
 
 import asyncio
+import json as _json
+import queue
+import threading
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
@@ -190,6 +194,292 @@ async def candidate_chat_fast(
     except Exception as e:
         logger.error(f"[CHAT-V2] Error for candidate {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Static question definitions for /chat/stream hybrid endpoint
+# ============================================================================
+
+_STATIC_QUESTIONS = [
+    {   # Q1 — career stage
+        "key": "stage",
+        "ack": None,
+        "message": "Let's map out your career goals! Which of these best describes where you are right now?",
+        "mcq": {
+            "question": "Which best describes you right now?",
+            "options": [
+                {"label": "A", "text": "Student — not graduating soon"},
+                {"label": "B", "text": "Student — graduating within 6 months"},
+                {"label": "C", "text": "Recent graduate (0–2 years exp.)"},
+                {"label": "D", "text": "Experienced professional (3+ years)"},
+                {"label": "E", "text": "Switching careers / exploring new fields"},
+                {"label": "F", "text": "Other"},
+            ],
+            "allow_multiple": False,
+        },
+        "text_input": False,
+    },
+    {   # Q2 — job type (skipped for experienced/switching)
+        "key": "job_type",
+        "ack": "Got it!",
+        "message": "Are you targeting an internship or a full-time role?",
+        "mcq": {
+            "question": "What type of opportunity are you looking for?",
+            "options": [
+                {"label": "A", "text": "Full-time job"},
+                {"label": "B", "text": "Internship (3–6 months)"},
+                {"label": "C", "text": "Part-time / freelance"},
+                {"label": "D", "text": "Open to all options"},
+                {"label": "E", "text": "Other"},
+            ],
+            "allow_multiple": False,
+        },
+        "text_input": False,
+    },
+    {   # Q3 — location (NLP-personalized with detected city)
+        "key": "location",
+        "ack": "Interesting!",
+        "message": "Which cities or regions would you prefer to work in?",
+        "mcq": {
+            "question": "Preferred work locations?",
+            "options": [
+                {"label": "A", "text": "Bengaluru"},
+                {"label": "B", "text": "Mumbai"},
+                {"label": "C", "text": "Delhi NCR"},
+                {"label": "D", "text": "Hyderabad"},
+                {"label": "E", "text": "Pune"},
+                {"label": "F", "text": "Remote"},
+                {"label": "G", "text": "International / Open to relocate"},
+                {"label": "H", "text": "Other"},
+            ],
+            "allow_multiple": True,
+        },
+        "text_input": False,
+    },
+    {   # Q4 — company stage
+        "key": "company_stage",
+        "ack": "Makes sense.",
+        "message": "What kind of company environment appeals to you most?",
+        "mcq": {
+            "question": "Company type?",
+            "options": [
+                {"label": "A", "text": "Early-stage startup (seed / under 50 people)"},
+                {"label": "B", "text": "Growth-stage startup (50–500 people)"},
+                {"label": "C", "text": "Mid-size company (500–2000)"},
+                {"label": "D", "text": "Large enterprise or MNC (2000+)"},
+                {"label": "E", "text": "No strong preference"},
+                {"label": "F", "text": "Other"},
+            ],
+            "allow_multiple": False,
+        },
+        "text_input": False,
+    },
+    {   # Q5 — descriptive (NLP-based, no LLM needed — open text)
+        "key": "career_goal",
+        "ack": "Good to know.",
+        "message": "What's the single most important thing you want from your next role? (be specific — e.g. learn X, work on Y, earn Z)",
+        "mcq": None,
+        "text_input": True,
+    },
+]
+
+# City keywords → display name for NLP location personalization
+_CITY_KEYWORDS: dict[str, str] = {
+    "chennai": "Chennai", "madras": "Chennai",
+    "kolkata": "Kolkata", "calcutta": "Kolkata",
+    "ahmedabad": "Ahmedabad", "chandigarh": "Chandigarh",
+    "kochi": "Kochi", "cochin": "Kochi", "jaipur": "Jaipur",
+    "new york": "New York", "nyc": "New York",
+    "san francisco": "San Francisco", "bay area": "San Francisco",
+    "london": "London", "singapore": "Singapore",
+    "dubai": "Dubai", "toronto": "Toronto",
+    "sydney": "Sydney", "amsterdam": "Amsterdam",
+    "berlin": "Berlin", "tokyo": "Tokyo",
+}
+
+
+def _personalize_location_options(options: list[dict], resume_text: str | None) -> list[dict]:
+    """Insert detected city into location options if not already present."""
+    if not resume_text:
+        return options
+    text_lower = resume_text[:800].lower()
+    existing = {opt["text"] for opt in options}
+    for keyword, city in _CITY_KEYWORDS.items():
+        if keyword in text_lower and city not in existing:
+            new_opts = list(options)
+            insert_pos = len(new_opts) - 2  # before Remote and Other
+            new_opts.insert(insert_pos, {"label": "", "text": city})
+            # Re-label A, B, C...
+            for i, opt in enumerate(new_opts):
+                new_opts[i] = {**opt, "label": chr(65 + i)}
+            return new_opts
+    return options
+
+
+def _build_effective_question_list(user_answers: list[str]) -> list[dict]:
+    """
+    Build the active static question list, skipping job_type for
+    experienced professionals and career switchers.
+    """
+    questions = list(_STATIC_QUESTIONS)
+    if user_answers:
+        stage = user_answers[0].lower()
+        if any(kw in stage for kw in ("experienced", "3+", "switching", "career switcher")):
+            questions = [q for q in questions if q["key"] != "job_type"]
+    return questions
+
+
+@router.post("/{candidate_id}/chat/stream")
+async def candidate_chat_stream(
+    candidate_id: int,
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Hybrid streaming chat endpoint:
+    - Q1–Q5: served instantly from static definitions (NLP-personalized where useful)
+    - Q6–Q7: LLM with compact context + SSE streaming
+    Returns text/event-stream with 'chunk' and 'complete' events.
+    """
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # Collect user answers from chat history (excludes __start__)
+    user_answers = [
+        m["content"] for m in request.chat_history
+        if m["role"] == "user" and m["content"] != "__start__"
+    ]
+
+    effective_qs = _build_effective_question_list(user_answers)
+    q_index = len(user_answers)  # which question slot to serve next
+
+    # ── Static question phase ──────────────────────────────────────────
+    if q_index < len(effective_qs):
+        q_def = dict(effective_qs[q_index])
+        mcq = q_def.get("mcq")
+
+        # NLP: personalize location options with city detected from resume
+        if q_def["key"] == "location" and mcq and candidate.resume_text:
+            mcq = dict(mcq)
+            mcq["options"] = _personalize_location_options(mcq["options"], candidate.resume_text)
+
+        # Build message: ack for previous answer + this question
+        if request.message == "__start__":
+            msg_text = q_def["message"]
+        else:
+            ack = (effective_qs[q_index - 1].get("ack") or "Got it.") if q_index > 0 else "Got it."
+            msg_text = f"{ack}|||{q_def['message']}"
+
+        payload = {
+            "type": "complete",
+            "message": msg_text,
+            "current_state": "MCQ" if mcq else "TEXT",
+            "mcq": mcq,
+            "text_input": q_def.get("text_input", False),
+            "is_complete": False,
+            "questions_asked_so_far": q_index + 1,
+        }
+        logger.info(f"[STREAM] Static Q{q_index + 1} ({q_def['key']}) served instantly")
+
+        async def static_sse():
+            yield f"data: {_json.dumps(payload)}\n\n"
+
+        return StreamingResponse(
+            static_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── LLM question phase (Q6, Q7) — reduced context + SSE stream ────
+    llm_q_index = q_index - len(effective_qs)  # 0 = Q6, 1 = Q7
+
+    # After 2 LLM questions answered → complete
+    if llm_q_index >= 2:
+        payload = {
+            "type": "complete",
+            "message": "That's everything I need — generating your profile now...",
+            "current_state": "PAYLOAD_READY",
+            "mcq": None,
+            "text_input": False,
+            "is_complete": True,
+            "questions_asked_so_far": q_index + 1,
+        }
+
+        async def done_sse():
+            yield f"data: {_json.dumps(payload)}\n\n"
+
+        return StreamingResponse(
+            done_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    from services.candidate_intelligence.profiler_agent import stream_agent_response
+    from services.candidate_intelligence.models import ChatMessage as ProfChatMessage
+
+    # Compact resume summary for fast context
+    raw_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+    resume_summary = {
+        "name": raw_json.get("name"),
+        "skills": raw_json.get("skills", []),
+        "experience_years": raw_json.get("experience_years"),
+        "education": raw_json.get("education", []),
+    }
+
+    chat_history = [
+        ProfChatMessage(role=m["role"], content=m["content"])
+        for m in request.chat_history
+    ]
+    chat_history.append(ProfChatMessage(role="user", content=request.message))
+
+    # Bridge blocking OpenAI stream to async SSE via thread queue
+    chunk_q: queue.Queue = queue.Queue(maxsize=200)
+
+    def producer():
+        try:
+            for event_type, data in stream_agent_response(chat_history, resume_summary):
+                chunk_q.put((event_type, data))
+        except Exception as exc:
+            chunk_q.put(("error", str(exc)))
+        finally:
+            chunk_q.put(None)  # sentinel
+
+    threading.Thread(target=producer, daemon=True).start()
+
+    loop = asyncio.get_running_loop()
+
+    async def llm_sse():
+        while True:
+            item = await loop.run_in_executor(None, chunk_q.get)
+            if item is None:
+                break
+            event_type, data = item
+            if event_type == "chunk":
+                yield f"data: {_json.dumps({'type': 'chunk', 'text': data})}\n\n"
+            elif event_type == "done":
+                mcq_dict = None
+                if data.mcq:
+                    mcq_dict = data.mcq.model_dump() if hasattr(data.mcq, "model_dump") else data.mcq.dict()
+                out = {
+                    "type": "complete",
+                    "message": data.message,
+                    "current_state": data.current_state,
+                    "mcq": mcq_dict,
+                    "text_input": data.text_input,
+                    "is_complete": data.is_complete,
+                    "questions_asked_so_far": data.questions_asked_so_far,
+                }
+                yield f"data: {_json.dumps(out)}\n\n"
+            elif event_type == "error":
+                yield f"data: {_json.dumps({'type': 'error', 'message': str(data)})}\n\n"
+
+    return StreamingResponse(
+        llm_sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/{candidate_id}/generate-payload")
