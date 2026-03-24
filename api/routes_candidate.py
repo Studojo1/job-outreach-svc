@@ -108,6 +108,90 @@ async def candidate_chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/{candidate_id}/chat/v2")
+async def candidate_chat_fast(
+    candidate_id: int,
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fast profiling chat using pre-defined static questions — zero LLM calls per turn."""
+    t_start = time.perf_counter()
+    logger.info(f"[CHAT-V2] POST /candidate/{candidate_id}/chat/v2 — message='{request.message[:50]}'")
+
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    try:
+        from services.candidate_intelligence._question_flow import get_active_questions, get_question
+
+        # Collect user answers from chat history (frontend includes current msg in chat_history)
+        user_answers = [
+            m["content"] for m in request.chat_history
+            if m["role"] == "user" and m["content"] != "__start__"
+        ]
+
+        # Build session by replaying answers to determine conditional question branching
+        parsed_summary = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+        resume_skills = (
+            parsed_summary.get("personal_info", {}).get("skills_detected", [])
+            or parsed_summary.get("skills", [])
+        )
+        session = {
+            "resume_uploaded": bool(candidate.resume_text),
+            "resume_summary": {"skills": resume_skills},
+            "answers": {},
+        }
+        for i, answer in enumerate(user_answers):
+            active_qs = get_active_questions(session)
+            if i < len(active_qs):
+                session["answers"][active_qs[i]] = answer
+
+        # Determine next question index
+        active_qs = get_active_questions(session)
+        q_index = len(user_answers)
+
+        if q_index >= len(active_qs):
+            t_end = time.perf_counter()
+            logger.info(f"[CHAT-V2] Complete after {q_index} answers in {(t_end - t_start)*1000:.0f}ms")
+            return {
+                "message": "Got it! Generating your profile now...",
+                "current_state": "PAYLOAD_READY",
+                "mcq": None,
+                "text_input": False,
+                "is_complete": True,
+                "questions_asked_so_far": q_index,
+            }
+
+        q_id = active_qs[q_index]
+        q_def = get_question(q_id, session)
+
+        # Build message: ack for previous answer + new question
+        if request.message == "__start__":
+            msg = q_def["message"]
+        else:
+            prev_q_id = active_qs[q_index - 1] if q_index > 0 else None
+            ack = get_question(prev_q_id, session).get("ack") or "Got it." if prev_q_id else "Got it."
+            msg = f"{ack}|||{q_def['message']}"
+
+        t_end = time.perf_counter()
+        logger.info(f"[CHAT-V2] Q{q_index + 1}/{len(active_qs)} ({q_id}) served in {(t_end - t_start)*1000:.0f}ms")
+
+        return {
+            "message": msg,
+            "current_state": "MCQ" if q_def.get("mcq") else "TEXT",
+            "mcq": q_def.get("mcq"),
+            "text_input": q_def.get("text_input", False),
+            "is_complete": False,
+            "questions_asked_so_far": q_index + 1,
+        }
+
+    except Exception as e:
+        logger.error(f"[CHAT-V2] Error for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{candidate_id}/generate-payload")
 async def generate_payload(
     candidate_id: int,
