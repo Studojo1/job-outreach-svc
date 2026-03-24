@@ -16,24 +16,36 @@ Output ONLY valid JSON — no markdown, no prose, no code fences.
 
 Required JSON schema:
 {
-  "domain": "<primary field, e.g. software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | other>",
-  "subdomain": "<specific niche, e.g. backend | growth_marketing | investment_banking | data_science>",
+  "domain": "<primary field: software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
+  "subdomain": "<specific niche, e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design>",
   "seniority": "<student | junior | mid | senior>",
   "experience_years": <number or null>,
-  "top_skills": ["<skill1>", "<skill2>", "<skill3>"],
+  "top_skills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
   "geography": {
-    "city": "<current city or null>",
-    "country": "<country name or null>",
-    "country_code": "<ISO 3166-1 alpha-2 or null>"
+    "city": "<candidate's CURRENT city from contact/header section only — NOT company locations>",
+    "country": "<candidate's CURRENT country — NOT countries of companies they worked at>",
+    "country_code": "<ISO 3166-1 alpha-2 of candidate's current location, or null>"
   },
-  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>"],
+  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>", "<role title 4>"],
   "education_level": "<high_school | bachelors | masters | phd | other | unknown>",
   "target_industries": ["<industry1>", "<industry2>"]
 }
 
+Use these career clusters to pick likely_roles — choose specific role titles that match the candidate's actual skills:
+- Technology & Engineering: Software Engineer, Backend Developer, Frontend Developer, Full-Stack Developer, Mobile Developer, DevOps Engineer, Cloud Engineer, Security Analyst, QA Engineer
+- Data & Analytics: Data Analyst, Data Scientist, ML Engineer, Analytics Engineer, BI Analyst, Product Analyst
+- Marketing & Growth: Growth Marketing Manager, Performance Marketer, Content Marketing Specialist, Product Marketing Manager, SEO Specialist, Marketing Analyst
+- Sales & Business Development: SDR, Account Executive, Business Development Representative, Enterprise Sales Associate, Partnerships Manager
+- Product: Product Manager, Associate PM, Product Analyst, Go-to-Market Analyst
+- Design & Creative: UX Designer, Product Designer, UI Designer, Visual Designer, UX Researcher
+- Finance & Accounting: Financial Analyst, IB Analyst, FP&A Analyst, Equity Research Analyst, VC Analyst
+- Operations & Supply Chain: Operations Analyst, Project Manager, Supply Chain Analyst, Business Operations Associate
+- Consulting & Strategy: Management Consultant (Analyst), Strategy Analyst, Associate Consultant
+
 Rules:
-- likely_roles: 3-5 specific, realistic role titles suited to this candidate (e.g. "Backend Engineer", "Growth Marketing Manager")
-- top_skills: top 5 most marketable skills from the resume
+- likely_roles: 3-5 realistic roles for THIS candidate based on their actual experience and skills
+- geography: only use the candidate's own location (from phone number, address, header) — ignore company office locations
+- top_skills: the 5 most marketable skills demonstrated in the resume
 - seniority: infer from years of experience and education stage
 - Use null for fields you cannot determine
 - Respond with JSON only"""

@@ -143,20 +143,105 @@ def get_cities_for_country(country_code: str, limit: int = 6) -> list[str]:
 
 def detect_country_from_text(text: str) -> str | None:
     """
-    Detect country code from resume text by scanning for city/country names.
+    Detect country code from resume text using location-context patterns only.
     Returns ISO 3166-1 alpha-2 code or None.
-    Checks first 1500 characters for speed.
+
+    Strategy:
+    1. Look for explicit location labels in the first 400 chars (header section)
+       e.g. "Location: Bengaluru", "Bangalore, India", "Based in: Mumbai"
+    2. Match country names/phone codes that appear anywhere in first 800 chars
+    3. Only match bare city names if they appear in the first 200 chars (header)
+    Avoids false positives from company names like "San Francisco-based startup"
     """
-    lower = text[:1500].lower()
+    import re
 
-    # City match first (more specific)
+    header = text[:400].lower()
+    contact_section = text[:800].lower()
+
+    # --- Pass 1: explicit location label patterns (highest confidence) ---
+    # e.g. "location: bengaluru", "address: mumbai, india", "based in: london"
+    location_pattern = re.compile(
+        r'(?:location|address|based in|residing in|city|current location)\s*[:\-|]\s*([\w\s,]+)',
+        re.IGNORECASE
+    )
+    for m in location_pattern.finditer(contact_section):
+        fragment = m.group(1).lower()
+        for city, code in CITY_TO_COUNTRY.items():
+            if city in fragment:
+                return code
+        for name, code in COUNTRY_NAME_TO_CODE.items():
+            if name in fragment:
+                return code
+
+    # --- Pass 2: phone number country codes in header (+91 = India, +1 = US/CA, etc.) ---
+    phone_codes = {
+        "+91": "IN", "91-": "IN",
+        "+44": "GB",
+        "+65": "SG",
+        "+971": "AE",
+        "+61": "AU",
+        "+1": "US",   # lowest priority — US/CA ambiguous
+        "+49": "DE",
+        "+31": "NL",
+        "+33": "FR",
+        "+81": "JP",
+        "+852": "HK",
+        "+64": "NZ",
+        "+353": "IE",
+        "+41": "CH",
+    }
+    for code_str, country in phone_codes.items():
+        if code_str in header and code_str != "+1":  # skip ambiguous +1
+            return country
+
+    # --- Pass 3: country names anywhere in contact section ---
+    # ordered by specificity (longer names first to avoid partial matches)
+    for name, code in sorted(COUNTRY_NAME_TO_CODE.items(), key=lambda x: -len(x[0])):
+        if name in contact_section:
+            return code
+
+    # --- Pass 4: city names ONLY in header (first 200 chars = name/contact block) ---
+    very_header = text[:200].lower()
     for city, code in CITY_TO_COUNTRY.items():
-        if city in lower:
+        if city in very_header:
             return code
 
-    # Country name fallback
-    for name, code in COUNTRY_NAME_TO_CODE.items():
-        if name in lower:
-            return code
+    # --- Pass 5: +1 phone (US/CA — last resort) ---
+    if "+1" in header or "(+1)" in header:
+        return "US"
 
+    return None
+
+
+def detect_country_from_parsed_json(parsed_json: dict) -> str | None:
+    """
+    Extract country from the structured parsed_json preview returned by parse_resume().
+    Checks personal_info.location, personal_info.address, personal_info.phone fields.
+    """
+    if not parsed_json:
+        return None
+    personal = parsed_json.get("personal_info") or {}
+    # Common keys the parser might use
+    for field in ("location", "address", "city", "country", "phone", "contact"):
+        val = personal.get(field)
+        if not val or not isinstance(val, str):
+            continue
+        lower = val.lower()
+        for city, code in CITY_TO_COUNTRY.items():
+            if city in lower:
+                return code
+        for name, code in COUNTRY_NAME_TO_CODE.items():
+            if name in lower:
+                return code
+        # Phone code in this field
+        if "+91" in lower:
+            return "IN"
+        if "+44" in lower:
+            return "GB"
+        if "+65" in lower:
+            return "SG"
+        if "+971" in lower:
+            return "AE"
+        if "+61" in lower:
+            return "AU"
     return None

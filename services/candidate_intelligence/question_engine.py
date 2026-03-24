@@ -21,7 +21,11 @@ State passed to get_next_question():
 """
 
 from __future__ import annotations
-from .city_data import get_cities_for_country, detect_country_from_text
+from .city_data import (
+    get_cities_for_country,
+    detect_country_from_text,
+    detect_country_from_parsed_json,
+)
 
 # ---------------------------------------------------------------------------
 # Static question definitions
@@ -135,6 +139,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     answers = state.get("answers", {})
     resume_profile = state.get("resume_profile") or {}
     resume_text = state.get("resume_text") or ""
+    parsed_json = state.get("parsed_json") or {}
 
     stage = answers.get("career_stage", "").lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
@@ -142,10 +147,10 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence = [_Q1_CAREER_STAGE]
     if not skip_job_type:
         sequence.append(_Q2_JOB_TYPE)
-    sequence.append(_build_location_question(resume_profile, resume_text))
+    sequence.append(_build_location_question(resume_profile, resume_text, parsed_json))
     sequence.append(_Q4_COMPANY_STAGE)
     sequence.append(_Q5_CAREER_GOAL)
-    sequence.append(_build_target_role_question(resume_profile))
+    sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q7_WORK_MOTIVATION)
 
     return sequence
@@ -193,30 +198,44 @@ def build_message(q_def: dict, prev_q_key: str | None, is_first: bool) -> str:
 # Adaptive question builders
 # ---------------------------------------------------------------------------
 
-def _build_location_question(resume_profile: dict, resume_text: str) -> dict:
+def _build_location_question(resume_profile: dict, resume_text: str, parsed_json: dict) -> dict:
     """
     Build Q3 location question with city options tailored to candidate's geography.
-    Falls back to India cities if no geography detected.
+
+    Detection priority:
+    1. resume_profile.geography.country_code  (LLM-extracted, most accurate)
+    2. parsed_json personal_info fields        (structured parser output)
+    3. detect_country_from_text()              (header + phone code patterns only)
+    4. Default to "IN"
     """
-    # Try resume_profile.geography first, then scan resume text
-    geo = resume_profile.get("geography") or {}
-    country_code = geo.get("country_code") or detect_country_from_text(resume_text) or "IN"
+    country_code = None
+
+    # 1. resume_profile from background LLM extraction
+    geo = (resume_profile or {}).get("geography") or {}
+    if geo.get("country_code"):
+        country_code = geo["country_code"]
+
+    # 2. parsed_json personal_info (structured data from parser)
+    if not country_code:
+        country_code = detect_country_from_parsed_json(parsed_json)
+
+    # 3. Smart text heuristics (location labels, phone codes — NOT bare city mentions)
+    if not country_code:
+        country_code = detect_country_from_text(resume_text)
+
+    # 4. Default
+    if not country_code:
+        country_code = "IN"
 
     cities = get_cities_for_country(country_code, limit=6)
 
     if not cities:
-        # Absolute fallback — global options
-        options = [
-            {"label": "A", "text": "Bengaluru"},
-            {"label": "B", "text": "Mumbai"},
-            {"label": "C", "text": "Delhi NCR"},
-            {"label": "D", "text": "Remote"},
-            {"label": "E", "text": "Open to relocate / International"},
-            {"label": "F", "text": "Other"},
-        ]
+        # Unknown country — show global hubs
+        raw_cities = ["Remote", "Open to relocate / International", "Other"]
     else:
-        raw_options = list(cities) + ["Remote", "Open to relocate / International", "Other"]
-        options = [{"label": chr(65 + i), "text": city} for i, city in enumerate(raw_options)]
+        raw_cities = list(cities) + ["Remote", "Open to relocate / International", "Other"]
+
+    options = [{"label": chr(65 + i), "text": city} for i, city in enumerate(raw_cities)]
 
     return {
         "key": "location",
@@ -231,81 +250,107 @@ def _build_location_question(resume_profile: dict, resume_text: str) -> dict:
     }
 
 
-def _build_target_role_question(resume_profile: dict) -> dict:
+def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict:
     """
-    Build Q6 target role question.
-    If resume_profile has likely_roles, use those as MCQ options.
-    Otherwise use a domain-based default list or ask as open text.
+    Build Q6 target role question using career ontology for grounded, relevant options.
+
+    Priority:
+    1. resume_profile.likely_roles → match/enrich each against ontology
+    2. resume_profile.domain + subdomain → pull ontology roles for those clusters
+    3. parsed_json.career_analysis.recommended_roles (previously generated profile)
+    4. Broad cross-domain defaults
     """
-    likely_roles: list[str] = resume_profile.get("likely_roles") or []
-    domain = (resume_profile.get("domain") or "").lower()
+    from .career_ontology import CAREER_ONTOLOGY, search_ontology
 
-    if likely_roles:
-        # Use LLM-extracted roles + "Other" option
-        roles = likely_roles[:5]
-        options = [{"label": chr(65 + i), "text": r} for i, r in enumerate(roles)]
-        options.append({"label": chr(65 + len(roles)), "text": "Something else (tell us below)"})
-        return {
-            "key": "target_role",
-            "ack": "That helps a lot.",
-            "message": "Based on your background, which of these roles are you aiming for?",
-            "mcq": {
-                "question": "Which role fits best?",
-                "options": options,
-                "allow_multiple": True,
-            },
-            "text_input": False,
-        }
+    profile = resume_profile or {}
+    likely_roles: list[str] = profile.get("likely_roles") or []
+    domain = (profile.get("domain") or "").lower()
+    subdomain = (profile.get("subdomain") or "").lower()
 
-    # Domain-based fallback options
-    domain_options: dict[str, list[str]] = {
-        "software_engineering": [
-            "Software Engineer (Backend)", "Software Engineer (Frontend)",
-            "Full Stack Developer", "DevOps / SRE", "Mobile Developer", "Other",
-        ],
-        "data": [
-            "Data Analyst", "Data Scientist", "ML Engineer",
-            "Business Analyst", "Data Engineer", "Other",
-        ],
-        "marketing": [
-            "Growth Marketer", "Content Marketer", "Performance Marketer",
-            "Brand Manager", "Product Marketer", "Other",
-        ],
-        "product": [
-            "Product Manager", "Associate PM", "Product Analyst",
-            "Technical PM", "Product Strategy", "Other",
-        ],
-        "design": [
-            "Product Designer (UX/UI)", "Visual Designer",
-            "UX Researcher", "Brand Designer", "Motion Designer", "Other",
-        ],
-        "finance": [
-            "Investment Banking Analyst", "Financial Analyst",
-            "Equity Research", "VC / PE Analyst", "Corporate Finance", "Other",
-        ],
-        "sales": [
-            "Sales Development Rep (SDR)", "Account Executive",
-            "Business Development", "Enterprise Sales", "Partnerships", "Other",
-        ],
-        "operations": [
-            "Operations Manager", "Program Manager", "Management Consultant",
-            "Business Analyst", "Strategy & Ops", "Other",
-        ],
+    # --- domain → ontology cluster mapping ---
+    DOMAIN_TO_CLUSTER = {
+        "software_engineering": "Technology & Engineering",
+        "data": "Data & Analytics",
+        "marketing": "Marketing & Growth",
+        "product": "Consulting & Strategy",  # PM sits between tech/consulting
+        "design": "Design & Creative",
+        "finance": "Finance & Accounting",
+        "sales": "Sales & Business Development",
+        "operations": "Operations & Supply Chain",
+        "hr_people": "Human Resources & People Ops",
+        "legal": "Legal & Compliance",
+        "consulting": "Consulting & Strategy",
+        "healthcare": "Healthcare & Life Sciences",
+        "media": "Media & Communications",
+        "education": "Education & Training",
+        "manufacturing": "Manufacturing & Production",
     }
 
-    role_list = domain_options.get(domain, [
-        "Software Engineer", "Product Manager", "Marketing Specialist",
-        "Business Analyst", "Operations", "Other",
-    ])
+    ontology_roles: list[str] = []
 
-    options = [{"label": chr(65 + i), "text": r} for i, r in enumerate(role_list)]
+    # 1. Map likely_roles through ontology (exact + substring match)
+    if likely_roles:
+        for role in likely_roles:
+            results = search_ontology(role)
+            # If exact match found in ontology, prefer it
+            if results["roles"]:
+                ontology_roles.append(results["roles"][0]["role"])
+            else:
+                # Use the LLM role as-is if no ontology match (still better than nothing)
+                ontology_roles.append(role)
+
+    # 2. Fill from domain cluster if we don't have enough
+    if len(ontology_roles) < 4 and domain in DOMAIN_TO_CLUSTER:
+        cluster_name = DOMAIN_TO_CLUSTER[domain]
+        cluster = CAREER_ONTOLOGY.get(cluster_name, {})
+        # Pick the most relevant specialization based on subdomain
+        best_spec_roles: list[str] = []
+        for spec_name, spec_roles in cluster.items():
+            if subdomain and any(w in spec_name.lower() for w in subdomain.split("_")):
+                best_spec_roles = spec_roles[:3]
+                break
+        if not best_spec_roles:
+            # First specialization in the cluster
+            first_spec = next(iter(cluster.values()), [])
+            best_spec_roles = first_spec[:3]
+        for r in best_spec_roles:
+            if r not in ontology_roles:
+                ontology_roles.append(r)
+
+    # 3. Fallback: previously generated recommended_roles from career_analysis
+    if len(ontology_roles) < 3:
+        career = (parsed_json or {}).get("career_analysis") or {}
+        rec_roles = career.get("recommended_roles") or []
+        for r in rec_roles:
+            title = r.get("title") if isinstance(r, dict) else str(r)
+            if title and title not in ontology_roles:
+                ontology_roles.append(title)
+
+    # 4. Absolute fallback
+    if not ontology_roles:
+        ontology_roles = [
+            "Software Engineer", "Data Analyst", "Product Manager",
+            "Business Analyst", "Operations Analyst",
+        ]
+
+    # Deduplicate, cap at 5, add "Something else"
+    seen, final_roles = set(), []
+    for r in ontology_roles:
+        if r not in seen:
+            seen.add(r)
+            final_roles.append(r)
+        if len(final_roles) == 5:
+            break
+
+    options = [{"label": chr(65 + i), "text": r} for i, r in enumerate(final_roles)]
+    options.append({"label": chr(65 + len(final_roles)), "text": "Something else"})
 
     return {
         "key": "target_role",
         "ack": "That helps a lot.",
-        "message": "Which of these roles are you targeting?",
+        "message": "Based on your background, which of these roles are you aiming for?",
         "mcq": {
-            "question": "Target role?",
+            "question": "Which role fits best?",
             "options": options,
             "allow_multiple": True,
         },

@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
 @router.post("/upload")
 async def upload_resume(
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -234,16 +234,24 @@ async def candidate_chat_stream(
     answers: dict[str, str] = {}
     resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
     resume_text = candidate.resume_text or ""
+    parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+
+    def _make_state() -> dict:
+        return {
+            "answers": answers,
+            "resume_profile": resume_profile,
+            "resume_text": resume_text,
+            "parsed_json": parsed_json,
+        }
 
     for answer in raw_user_msgs:
-        state = {"answers": answers, "resume_profile": resume_profile, "resume_text": resume_text}
-        seq = build_question_sequence(state)
+        seq = build_question_sequence(_make_state())
         answered_count = len(answers)
         if answered_count < len(seq):
             answers[seq[answered_count]["key"]] = answer
 
     # Build state for the *current* turn (current message not yet in answers)
-    state = {"answers": answers, "resume_profile": resume_profile, "resume_text": resume_text}
+    state = _make_state()
     sequence = build_question_sequence(state)
     q_index = len(answers)  # index of next question to serve
 
@@ -297,69 +305,90 @@ async def candidate_chat_stream(
     )
 
 
+def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
+    """
+    Background worker: generate final payload and store it.
+    Opens its own DB session (request session is already closed).
+    """
+    import traceback
+    t_start = time.perf_counter()
+    try:
+        db = SessionLocal()
+        try:
+            from services.candidate_intelligence.profiler_agent import generate_final_payload
+            from services.candidate_intelligence.models import ChatMessage
+
+            candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+            if not candidate:
+                logger.error(f"[PAYLOAD-BG] Candidate {candidate_id} not found")
+                return
+
+            chat_history = [ChatMessage(role=m["role"], content=m["content"]) for m in chat_history_dicts]
+
+            payload = generate_final_payload(
+                chat_history=chat_history,
+                resume_summary=candidate.parsed_json,
+                resume_raw_text=candidate.resume_text,
+                resume_uploaded=True,
+            )
+
+            payload_dict = payload.dict() if hasattr(payload, "dict") else payload.model_dump()
+            candidate.parsed_json = payload_dict
+            if payload.career_analysis and payload.career_analysis.recommended_roles:
+                candidate.target_roles = [r.title for r in payload.career_analysis.recommended_roles]
+            if payload.preferences and payload.preferences.industry_interests:
+                candidate.target_industries = payload.preferences.industry_interests
+            db.commit()
+
+            logger.info(f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error(f"[PAYLOAD-BG] FAILED for candidate {candidate_id}: {type(exc).__name__}: {exc}")
+        logger.error(traceback.format_exc())
+
+
 @router.post("/{candidate_id}/generate-payload")
 async def generate_payload(
     candidate_id: int,
     request: ChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate the final candidate profile payload after chat completion."""
-    t_start = time.perf_counter()
-    logger.info(f"[PAYLOAD] POST /candidate/{candidate_id}/generate-payload")
-
+    """
+    Kick off profile generation as a background task — returns immediately.
+    Frontend should poll GET /{candidate_id}/profile-status until ready=true.
+    """
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    try:
-        from services.candidate_intelligence.profiler_agent import generate_final_payload
-        from services.candidate_intelligence.models import ChatMessage
+    logger.info(f"[PAYLOAD] Starting background generation for candidate {candidate_id}")
+    background_tasks.add_task(
+        _run_generate_payload_background,
+        candidate_id=candidate_id,
+        chat_history_dicts=request.chat_history,
+    )
+    return {"status": "processing"}
 
-        logger.info(f"[PAYLOAD] chat_history length: {len(request.chat_history)}, resume_text length: {len(candidate.resume_text or '')}, parsed_json keys: {list(candidate.parsed_json.keys()) if isinstance(candidate.parsed_json, dict) else type(candidate.parsed_json)}")
 
-        chat_history = [
-            ChatMessage(role=msg["role"], content=msg["content"])
-            for msg in request.chat_history
-        ]
+@router.get("/{candidate_id}/profile-status")
+async def get_profile_status(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Poll endpoint — returns ready=true once target_roles is populated.
+    Frontend polls this after calling /generate-payload.
+    """
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
 
-        logger.info(f"[PAYLOAD] Calling generate_final_payload with {len(chat_history)} messages")
-        # Run blocking LLM call in a thread to avoid blocking the event loop
-        payload = await asyncio.to_thread(
-            generate_final_payload,
-            chat_history=chat_history,
-            resume_summary=candidate.parsed_json,
-            resume_raw_text=candidate.resume_text,
-            resume_uploaded=True,
-        )
-
-        t_llm = time.perf_counter()
-        logger.info(f"[TIMING] Payload generation LLM: {(t_llm - t_start)*1000:.0f}ms")
-
-        # Store profile in candidate record
-        payload_dict = payload.dict() if hasattr(payload, 'dict') else payload.model_dump()
-        logger.info(f"[PAYLOAD] Generated payload keys: {list(payload_dict.keys())}")
-        candidate.parsed_json = payload_dict
-        if payload.career_analysis and payload.career_analysis.recommended_roles:
-            candidate.target_roles = [r.title for r in payload.career_analysis.recommended_roles]
-            logger.info(f"[PAYLOAD] target_roles: {candidate.target_roles}")
-        if payload.preferences and payload.preferences.industry_interests:
-            candidate.target_industries = payload.preferences.industry_interests
-            logger.info(f"[PAYLOAD] target_industries: {candidate.target_industries}")
-        db.commit()
-
-        t_end = time.perf_counter()
-        logger.info(f"[TIMING] Total payload request: {(t_end - t_start)*1000:.0f}ms — SUCCESS")
-
-        return {
-            "status": "success",
-            "payload": payload_dict,
-        }
-    except Exception as e:
-        import traceback
-        logger.error(f"[PAYLOAD] FAILED for candidate {candidate_id} after {(time.perf_counter() - t_start)*1000:.0f}ms: {type(e).__name__}: {e}")
-        logger.error(f"[PAYLOAD] Traceback:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Profile generation failed: {type(e).__name__}: {str(e)}")
+    ready = bool(candidate.target_roles)
+    return {"ready": ready}
 
 
 @router.get("/{candidate_id}/profile")
