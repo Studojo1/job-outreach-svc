@@ -241,7 +241,8 @@ async def candidate_chat_stream(
             "answers": answers,
             "resume_profile": resume_profile,
             "resume_text": resume_text,
-            "parsed_json": parsed_json,
+            # _resume_text is a private key used by question_engine for NLP role detection
+            "parsed_json": {**parsed_json, "_resume_text": resume_text},
         }
 
     for answer in raw_user_msgs:

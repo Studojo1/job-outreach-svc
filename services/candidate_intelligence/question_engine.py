@@ -90,7 +90,7 @@ _Q4_COMPANY_STAGE = {
 _Q5_CAREER_GOAL = {
     "key": "career_goal",
     "ack": "Good to know.",
-    "message": "What's the one thing you really want from your next role? e.g. 'Learn to close enterprise deals', 'Build something people actually use', 'Hit 15-20 LPA fast'",
+    "message": "Describe what you'd actually be doing day-to-day in your ideal role. One sentence is fine. e.g. 'Running GTM strategy for an early-stage startup', 'Closing enterprise deals in SaaS', 'Analyzing data to improve a product'",
     "mcq": None,
     "text_input": True,
 }
@@ -250,15 +250,97 @@ def _build_location_question(resume_profile: dict, resume_text: str, parsed_json
     }
 
 
+def _detect_primary_domains(text: str) -> list[str]:
+    """
+    Frequency-weighted domain detection from resume text.
+    Counts how many times each domain's keywords appear — returns top domains.
+    Much more reliable than presence-only matching for noisy resume text.
+    """
+    # Each domain maps to (keywords, weight) — multi-word phrases score higher
+    DOMAIN_KEYWORDS: dict[str, list[tuple[str, int]]] = {
+        "marketing": [
+            ("gtm", 3), ("go-to-market", 3), ("push-pull", 3), ("marketing strategy", 3),
+            ("digital marketing", 2), ("content marketing", 2), ("performance marketing", 2),
+            ("growth marketing", 2), ("seo", 2), ("paid ads", 2), ("campaigns", 2),
+            ("brand", 1), ("marketing", 1), ("growth", 1),
+        ],
+        "consulting_strategy": [
+            ("business generalist", 4), ("strategy consultant", 4), ("management consultant", 4),
+            ("associate consultant", 4), ("strategy analyst", 3), ("end-to-end strategy", 3),
+            ("bba", 3), ("mba", 3), ("stakeholder", 2), ("consulting", 2),
+            ("strategic", 2), ("advisory", 2), ("strategy", 1), ("generalist", 1),
+        ],
+        "sales_bd": [
+            ("business development", 3), ("revenue growth", 3), ("enterprise sales", 3),
+            ("account executive", 3), ("deal", 2), ("sales strategy", 2),
+            ("pipeline", 2), ("closing", 2), ("client acquisition", 2),
+            ("sales", 1), ("revenue", 1), ("accounts", 1),
+        ],
+        "operations": [
+            ("operations manager", 3), ("supply chain", 3), ("process improvement", 3),
+            ("program manager", 3), ("project management", 3), ("scrum", 2),
+            ("execution", 2), ("process", 1), ("operations", 1), ("logistics", 1),
+        ],
+        "finance": [
+            ("investment banking", 4), ("private equity", 4), ("venture capital", 4),
+            ("financial modelling", 4), ("financial modeling", 4), ("equity research", 3),
+            ("mergers and acquisitions", 3), ("m&a", 3), ("cfa", 3), ("accounting", 2),
+            ("valuation", 2), ("financial analysis", 2), ("finance", 1), ("investment", 1),
+        ],
+        "product_management": [
+            ("product manager", 4), ("product management", 4), ("product roadmap", 4),
+            ("product strategy", 3), ("product owner", 3), ("sprint planning", 3),
+            ("user stories", 3), ("feature prioritization", 3), ("user research", 2),
+            ("product", 1),
+        ],
+        "software_engineering": [
+            ("software engineer", 4), ("full stack", 4), ("backend developer", 4),
+            ("frontend developer", 4), ("software development", 3), ("devops", 3),
+            ("python developer", 3), ("javascript", 2), ("react", 2), ("api development", 2),
+            ("coding", 2), ("programming", 2), ("git", 1), ("developer", 1),
+        ],
+        "data_analytics": [
+            ("data scientist", 4), ("data analyst", 4), ("machine learning engineer", 4),
+            ("data science", 3), ("sql queries", 3), ("tableau", 3), ("power bi", 3),
+            ("python for data", 3), ("statistical analysis", 3), ("analytics", 2),
+            ("data analysis", 2), ("data-driven", 2), ("dashboard", 2), ("sql", 1),
+        ],
+        "design": [
+            ("ux designer", 4), ("product designer", 4), ("ui/ux", 4),
+            ("user experience design", 4), ("figma", 3), ("wireframe", 3),
+            ("interaction design", 3), ("ux research", 2), ("prototyping", 2),
+            ("user interface", 2), ("ux", 1), ("ui", 1),
+        ],
+        "hr_people": [
+            ("talent acquisition", 4), ("human resources", 3), ("people operations", 3),
+            ("technical recruiter", 3), ("hr manager", 3), ("employee engagement", 2),
+            ("performance management", 2), ("recruiting", 2), ("hr", 1),
+        ],
+    }
+
+    lower = text[:3000].lower()
+    scores: dict[str, int] = {}
+    for domain, keyword_weights in DOMAIN_KEYWORDS.items():
+        total = sum(count * weight for kw, weight in keyword_weights
+                    if (count := lower.count(kw)) > 0)
+        if total > 0:
+            scores[domain] = total
+
+    # Return top domains sorted by score, minimum score threshold = 2
+    ranked = [d for d, s in sorted(scores.items(), key=lambda x: -x[1]) if s >= 2]
+    return ranked[:3] if ranked else []
+
+
 def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict:
     """
     Build Q6 target role question using career ontology for grounded, relevant options.
 
     Priority:
     1. resume_profile.likely_roles → match/enrich each against ontology
-    2. resume_profile.domain + subdomain → pull ontology roles for those clusters
-    3. parsed_json.career_analysis.recommended_roles (previously generated profile)
-    4. Broad cross-domain defaults
+    2. resume_profile.domain + subdomain → pull ontology roles
+    3. Frequency-weighted NLP from resume_text (via state passed down as parsed_json["_resume_text"])
+    4. previously generated career_analysis.recommended_roles
+    5. Absolute fallback (business-oriented, not tech)
     """
     from .career_ontology import CAREER_ONTOLOGY, search_ontology
 
@@ -267,57 +349,68 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     domain = (profile.get("domain") or "").lower()
     subdomain = (profile.get("subdomain") or "").lower()
 
-    # --- domain → ontology cluster mapping ---
-    DOMAIN_TO_CLUSTER = {
-        "software_engineering": "Technology & Engineering",
-        "data": "Data & Analytics",
-        "marketing": "Marketing & Growth",
-        "product": "Consulting & Strategy",  # PM sits between tech/consulting
-        "design": "Design & Creative",
-        "finance": "Finance & Accounting",
-        "sales": "Sales & Business Development",
-        "operations": "Operations & Supply Chain",
-        "hr_people": "Human Resources & People Ops",
-        "legal": "Legal & Compliance",
-        "consulting": "Consulting & Strategy",
-        "healthcare": "Healthcare & Life Sciences",
-        "media": "Media & Communications",
-        "education": "Education & Training",
-        "manufacturing": "Manufacturing & Production",
+    # domain key → (ontology cluster, preferred spec keywords)
+    DOMAIN_TO_CLUSTER: dict[str, tuple[str, list[str]]] = {
+        "software_engineering": ("Technology & Engineering", ["software", "development"]),
+        "data": ("Data & Analytics", ["data science", "analysis"]),
+        "data_analytics": ("Data & Analytics", ["data analysis", "bi"]),
+        "marketing": ("Marketing & Growth", ["growth", "digital", "content"]),
+        "product": ("Consulting & Strategy", ["research", "strategy"]),
+        "product_management": ("Consulting & Strategy", ["research", "strategy"]),
+        "design": ("Design & Creative", ["ux", "visual"]),
+        "finance": ("Finance & Accounting", ["investment", "fp&a"]),
+        "sales": ("Sales & Business Development", ["inside sales", "account"]),
+        "sales_bd": ("Sales & Business Development", ["business development", "inside sales"]),
+        "operations": ("Operations & Supply Chain", ["business operations", "project"]),
+        "hr_people": ("Human Resources & People Ops", ["talent", "generalist"]),
+        "legal": ("Legal & Compliance", ["corporate", "regulatory"]),
+        "consulting": ("Consulting & Strategy", ["management", "strategy"]),
+        "consulting_strategy": ("Consulting & Strategy", ["management", "strategy"]),
+        "healthcare": ("Healthcare & Life Sciences", ["clinical", "healthcare"]),
+        "media": ("Media & Communications", ["digital media", "communications"]),
+        "education": ("Education & Training", ["teaching", "edtech"]),
+        "manufacturing": ("Manufacturing & Production", ["industrial", "production"]),
     }
 
     ontology_roles: list[str] = []
 
-    # 1. Map likely_roles through ontology (exact + substring match)
+    def _pick_roles_from_cluster(cluster_name: str, spec_hints: list[str], limit: int = 3) -> list[str]:
+        cluster = CAREER_ONTOLOGY.get(cluster_name, {})
+        # Try to find specialization matching hints
+        for spec_name, spec_roles in cluster.items():
+            if any(h in spec_name.lower() for h in spec_hints):
+                return [r for r in spec_roles[:limit] if r not in ontology_roles]
+        # Fallback: first spec in cluster
+        first = next(iter(cluster.values()), [])
+        return [r for r in first[:limit] if r not in ontology_roles]
+
+    # 1. LLM-extracted likely_roles → match against ontology
     if likely_roles:
         for role in likely_roles:
             results = search_ontology(role)
-            # If exact match found in ontology, prefer it
             if results["roles"]:
                 ontology_roles.append(results["roles"][0]["role"])
             else:
-                # Use the LLM role as-is if no ontology match (still better than nothing)
                 ontology_roles.append(role)
 
-    # 2. Fill from domain cluster if we don't have enough
+    # 2. resume_profile.domain → cluster roles
     if len(ontology_roles) < 4 and domain in DOMAIN_TO_CLUSTER:
-        cluster_name = DOMAIN_TO_CLUSTER[domain]
-        cluster = CAREER_ONTOLOGY.get(cluster_name, {})
-        # Pick the most relevant specialization based on subdomain
-        best_spec_roles: list[str] = []
-        for spec_name, spec_roles in cluster.items():
-            if subdomain and any(w in spec_name.lower() for w in subdomain.split("_")):
-                best_spec_roles = spec_roles[:3]
-                break
-        if not best_spec_roles:
-            # First specialization in the cluster
-            first_spec = next(iter(cluster.values()), [])
-            best_spec_roles = first_spec[:3]
-        for r in best_spec_roles:
-            if r not in ontology_roles:
-                ontology_roles.append(r)
+        cluster_name, spec_hints = DOMAIN_TO_CLUSTER[domain]
+        for r in _pick_roles_from_cluster(cluster_name, spec_hints, limit=3):
+            ontology_roles.append(r)
 
-    # 3. Fallback: previously generated recommended_roles from career_analysis
+    # 3. Frequency-weighted NLP from resume text (stored in state via parsed_json special key)
+    if len(ontology_roles) < 3:
+        resume_text = (parsed_json or {}).get("_resume_text") or ""
+        if resume_text:
+            detected = _detect_primary_domains(resume_text)
+            for nlp_domain in detected[:2]:
+                if nlp_domain in DOMAIN_TO_CLUSTER and len(ontology_roles) < 5:
+                    cluster_name, spec_hints = DOMAIN_TO_CLUSTER[nlp_domain]
+                    for r in _pick_roles_from_cluster(cluster_name, spec_hints, limit=2):
+                        ontology_roles.append(r)
+
+    # 4. previously generated career_analysis.recommended_roles
     if len(ontology_roles) < 3:
         career = (parsed_json or {}).get("career_analysis") or {}
         rec_roles = career.get("recommended_roles") or []
@@ -326,11 +419,14 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
             if title and title not in ontology_roles:
                 ontology_roles.append(title)
 
-    # 4. Absolute fallback
+    # 5. Business-oriented absolute fallback (not tech — covers BBA/MBA profiles)
     if not ontology_roles:
         ontology_roles = [
-            "Software Engineer", "Data Analyst", "Product Manager",
-            "Business Analyst", "Operations Analyst",
+            "Strategy Analyst",
+            "Growth Marketing Manager",
+            "Sales Development Representative (SDR)",
+            "Business Operations Associate",
+            "Management Consultant (Analyst)",
         ]
 
     # Deduplicate, cap at 5, add "Something else"
