@@ -229,12 +229,25 @@ def _parse_llm_json(raw_text: str, chat_history: list[ChatMessage]) -> AgentResp
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown code blocks
         import re
+        data = None
+        # Attempt 1: JSON in markdown code block
         match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
         if match:
-            data = json.loads(match.group(1))
-        else:
+            try:
+                data = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Attempt 2: bare JSON object anywhere in the text (model prepended/appended prose)
+        if data is None:
+            start = raw_text.find('{')
+            end = raw_text.rfind('}')
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(raw_text[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+        if data is None:
             logger.error(f"[QUIZ] Could not parse LLM response as JSON: {raw_text[:300]}")
             return AgentResponse(
                 message="Could you repeat that? I had trouble processing.",
@@ -517,24 +530,24 @@ def generate_final_payload(
 # Fast Streaming Mode — compact context, 2 LLM questions (Q6 + Q7)
 # ============================================================================
 
-SYSTEM_PROMPT_FAST = """You are StudojoProfiler. You are asking the FINAL 2 profiling questions.
+SYSTEM_PROMPT_FAST = """You are StudojoProfiler. Ask the candidate exactly 2 more questions to complete their profile.
 
-The candidate already answered: career stage, job type, location, work style, company preference.
-Their answers and background are shown below.
+QUESTION 6: Ask ONE open text question about what kind of work gets them excited day-to-day.
+  Set: current_state=TEXT, text_input=true, mcq=null, questions_asked_so_far=6
 
-YOUR TASK:
-- If this is Q6 (first LLM question): Ask ONE open descriptive question about what kind of work excites them. Set text_input: true, mcq: null. Keep it short and specific to their background.
-  Example style: "What kind of problems do you love solving day-to-day — building things, analyzing data, convincing people, or something else?"
-- If this is Q7 (you just received their Q6 answer): Ask ONE MCQ about industries or specific skills they want to develop. Generate 7-8 tailored options based on their profile and domain. Set allow_multiple: true.
-- After Q7 answer is received: set is_complete: true, message: "Perfect, that's everything I need. Generating your profile now..."
+QUESTION 7 (after Q6 answer arrives): Ask ONE MCQ about industries or skill areas they want.
+  Generate 7-8 options tailored to their background. Set allow_multiple=true, questions_asked_so_far=7
 
-RULES:
-- Warm 1-sentence acknowledgment, then the question. Use ||| as separator: "Great answer.|||Next question?"
-- For MCQ: generate options specific to their domain. Always include "Other" as the last option.
-- Do NOT repeat any questions already asked. Do NOT give advice.
+AFTER Q7 ANSWER: Set is_complete=true, message="Perfect, that's everything I need. Generating your profile now..."
 
-JSON RESPONSE (strict schema):
-{"message":"ack|||question","current_state":"MCQ or TEXT","mcq":{"question":"...","options":[{"label":"A","text":"..."}],"allow_multiple":true} or null,"text_input":true or false,"is_complete":false,"questions_asked_so_far":6}
+FORMAT RULES:
+- Output ONLY valid JSON. Nothing before or after the JSON object.
+- The "message" field MUST be the first field in the JSON.
+- Message value format: "warm 1-sentence ack|||question text"
+- MCQ options: always end with "Other"
+
+EXAMPLE (Q6 output):
+{"message":"Got it!|||What kind of work gets you most excited day-to-day? For example: closing a deal, shipping a product feature, cracking a data problem, or something else entirely?","current_state":"TEXT","mcq":null,"text_input":true,"is_complete":false,"questions_asked_so_far":6}
 """
 
 
@@ -561,6 +574,7 @@ def _detect_career_domain(skills: list) -> str:
 def build_messages_fast(
     chat_history: list[ChatMessage],
     resume_summary: dict | None = None,
+    llm_phase_start: int = 5,
 ) -> list[dict]:
     """Compact message builder — small context window for fast LLM inference."""
     system = SYSTEM_PROMPT_FAST
@@ -585,18 +599,18 @@ def build_messages_fast(
         if parts:
             system += f"\n\nCANDIDATE PROFILE: {' | '.join(parts)}"
 
-    # Compact summary of static question answers (Q1–Q5)
+    # Compact summary of static question answers
+    # Labels aligned with _STATIC_QUESTIONS: stage, job_type, location, company_stage, career_goal
     user_msgs = [m for m in chat_history if m.role == "user" and m.content not in ("__start__",)]
-    labels = ["Career stage", "Job type", "Location", "Work style", "Company preference", "Career goal"]
-    prior = [f"{labels[i]}: {user_msgs[i].content[:100]}" for i in range(min(6, len(user_msgs)))]
+    labels = ["Career stage", "Job type", "Location", "Company preference", "Career goal"]
+    prior = [f"{labels[i]}: {user_msgs[i].content[:100]}" for i in range(min(llm_phase_start, len(user_msgs)))]
     if prior:
         system += "\n\nPREVIOUS ANSWERS:\n" + "\n".join(prior)
 
     messages = [{"role": "system", "content": system}]
 
-    # Include only the LLM-phase turns (after the static Q&A block)
-    # Static questions generate ~12 messages (6 Q&A pairs). Take only what's after.
-    static_qa_count = min(len(user_msgs), 6) * 2
+    # Include only LLM-phase turns (everything after the static Q&A block)
+    static_qa_count = llm_phase_start * 2
     llm_turns = chat_history[static_qa_count:] if len(chat_history) > static_qa_count else []
     recent = llm_turns[-4:] if len(llm_turns) > 4 else llm_turns
 
@@ -612,6 +626,7 @@ def build_messages_fast(
 def stream_agent_response(
     chat_history: list[ChatMessage],
     resume_summary: dict | None = None,
+    llm_phase_start: int = 5,
 ):
     """
     Stream the final 2 LLM profiling questions with reduced context.
@@ -620,14 +635,16 @@ def stream_agent_response(
     t_start = time.perf_counter()
     client = _get_client()
     model = _get_model()
-    messages = build_messages_fast(chat_history, resume_summary)
+    messages = build_messages_fast(chat_history, resume_summary, llm_phase_start=llm_phase_start)
 
     accumulated = ""
     try:
+        # Do NOT use response_format=json_object with stream=True — some Azure deployments
+        # buffer the entire response before streaming, producing empty chunk content.
+        # The prompt already instructs JSON-only output; _parse_llm_json handles cleanup.
         stream = client.chat.completions.create(
             model=model,
             messages=messages,
-            response_format={"type": "json_object"},
             max_completion_tokens=600,
             stream=True,
         )
@@ -641,12 +658,18 @@ def stream_agent_response(
         t_llm = time.perf_counter()
         logger.info(f"[STREAM] LLM done: {(t_llm - t_start)*1000:.0f}ms, {len(accumulated)} chars")
 
+        if not accumulated.strip():
+            logger.error("[STREAM] Empty response from LLM — yielding error")
+            yield "error", "Empty response from model"
+            return
+
         response = _parse_llm_json(accumulated, chat_history)
 
-        # Guard: don't allow completion before Q7 answer
+        # Guard: don't allow completion before enough answers
         user_answer_count = len([m for m in chat_history if m.role == "user" and m.content not in ("__start__",)])
-        if response.is_complete and user_answer_count < 7:
-            logger.warning(f"[STREAM] Premature completion at {user_answer_count} answers — forcing continuation")
+        min_answers = llm_phase_start + 2
+        if response.is_complete and user_answer_count < min_answers:
+            logger.warning(f"[STREAM] Premature completion at {user_answer_count} (need {min_answers}) — forcing continuation")
             response.is_complete = False
 
         yield "done", response

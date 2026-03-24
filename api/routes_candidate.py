@@ -201,16 +201,16 @@ async def candidate_chat_fast(
 # ============================================================================
 
 _STATIC_QUESTIONS = [
-    {   # Q1 — career stage
+    {   # Q1 — career stage (also served client-side in chat.tsx — keep options in sync)
         "key": "stage",
         "ack": None,
         "message": "Let's map out your career goals! Which of these best describes where you are right now?",
         "mcq": {
             "question": "Which best describes you right now?",
             "options": [
-                {"label": "A", "text": "Student — not graduating soon"},
-                {"label": "B", "text": "Student — graduating within 6 months"},
-                {"label": "C", "text": "Recent graduate (0–2 years exp.)"},
+                {"label": "A", "text": "Student, not graduating soon"},
+                {"label": "B", "text": "Student, graduating within 6 months"},
+                {"label": "C", "text": "Recent graduate (0-2 years exp.)"},
                 {"label": "D", "text": "Experienced professional (3+ years)"},
                 {"label": "E", "text": "Switching careers / exploring new fields"},
                 {"label": "F", "text": "Other"},
@@ -227,8 +227,8 @@ _STATIC_QUESTIONS = [
             "question": "What type of opportunity are you looking for?",
             "options": [
                 {"label": "A", "text": "Full-time job"},
-                {"label": "B", "text": "Internship (3–6 months)"},
-                {"label": "C", "text": "Part-time / freelance"},
+                {"label": "B", "text": "Internship (3-6 months)"},
+                {"label": "C", "text": "Part-time or freelance"},
                 {"label": "D", "text": "Open to all options"},
                 {"label": "E", "text": "Other"},
             ],
@@ -238,7 +238,7 @@ _STATIC_QUESTIONS = [
     },
     {   # Q3 — location (NLP-personalized with detected city)
         "key": "location",
-        "ack": "Interesting!",
+        "ack": "Got it!",
         "message": "Which cities or regions would you prefer to work in?",
         "mcq": {
             "question": "Preferred work locations?",
@@ -249,7 +249,7 @@ _STATIC_QUESTIONS = [
                 {"label": "D", "text": "Hyderabad"},
                 {"label": "E", "text": "Pune"},
                 {"label": "F", "text": "Remote"},
-                {"label": "G", "text": "International / Open to relocate"},
+                {"label": "G", "text": "Open to relocate / International"},
                 {"label": "H", "text": "Other"},
             ],
             "allow_multiple": True,
@@ -263,9 +263,9 @@ _STATIC_QUESTIONS = [
         "mcq": {
             "question": "Company type?",
             "options": [
-                {"label": "A", "text": "Early-stage startup (seed / under 50 people)"},
-                {"label": "B", "text": "Growth-stage startup (50–500 people)"},
-                {"label": "C", "text": "Mid-size company (500–2000)"},
+                {"label": "A", "text": "Early-stage startup (seed, under 50 people)"},
+                {"label": "B", "text": "Growth-stage startup (50-500 people)"},
+                {"label": "C", "text": "Mid-size company (500-2000)"},
                 {"label": "D", "text": "Large enterprise or MNC (2000+)"},
                 {"label": "E", "text": "No strong preference"},
                 {"label": "F", "text": "Other"},
@@ -274,10 +274,10 @@ _STATIC_QUESTIONS = [
         },
         "text_input": False,
     },
-    {   # Q5 — descriptive (NLP-based, no LLM needed — open text)
+    {   # Q5 — open text, no LLM needed
         "key": "career_goal",
         "ack": "Good to know.",
-        "message": "What's the single most important thing you want from your next role? (be specific — e.g. learn X, work on Y, earn Z)",
+        "message": "What's the one thing you really want from your next role? e.g. 'Learn to close enterprise deals', 'Build something people actually use', 'Hit 15-20 LPA fast'",
         "mcq": None,
         "text_input": True,
     },
@@ -324,7 +324,9 @@ def _build_effective_question_list(user_answers: list[str]) -> list[dict]:
     questions = list(_STATIC_QUESTIONS)
     if user_answers:
         stage = user_answers[0].lower()
-        if any(kw in stage for kw in ("experienced", "3+", "switching", "career switcher")):
+        # Match new option texts (no em dashes): "Experienced professional (3+ years)"
+        # and "Switching careers / exploring new fields"
+        if any(kw in stage for kw in ("experienced", "3+", "switching")):
             questions = [q for q in questions if q["key"] != "job_type"]
     return questions
 
@@ -439,7 +441,9 @@ async def candidate_chat_stream(
 
     def producer():
         try:
-            for event_type, data in stream_agent_response(chat_history, resume_summary):
+            for event_type, data in stream_agent_response(
+                    chat_history, resume_summary, llm_phase_start=len(effective_qs)
+                ):
                 chunk_q.put((event_type, data))
         except Exception as exc:
             chunk_q.put(("error", str(exc)))
