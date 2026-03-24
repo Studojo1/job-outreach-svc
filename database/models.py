@@ -60,6 +60,7 @@ class Candidate(Base):
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     resume_text = Column(Text)
     parsed_json = Column(JSONB)
+    resume_profile = Column(JSONB)  # pre-extracted intelligence for adaptive quiz
     target_roles = Column(JSONB)
     target_industries = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow)
