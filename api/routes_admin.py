@@ -58,6 +58,14 @@ async def outreach_overview(
         .scalar()
     ) or 0
 
+    # Paid payment orders
+    paid_orders = (
+        db.query(func.count())
+        .select_from(PaymentOrder)
+        .filter(PaymentOrder.status == "paid")
+        .scalar()
+    ) or 0
+
     # Revenue
     total_revenue_cents = (
         db.query(func.coalesce(func.sum(PaymentOrder.amount_cents), 0))
@@ -141,6 +149,7 @@ async def outreach_overview(
 
     return {
         "total_orders": total_orders,
+        "paid_orders": paid_orders,
         "active_orders": active_orders,
         "completed_orders": completed_orders,
         "stuck_orders": stuck_orders,
