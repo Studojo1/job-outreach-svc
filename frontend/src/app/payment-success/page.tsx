@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { Suspense, useState, useEffect, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/hooks/useAuth';
 import { Container } from '@/components/layout/Container';
@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/Button';
 import { CheckCircle, XCircle, Clock } from 'lucide-react';
 import api from '@/lib/api';
 
-export default function PaymentSuccessPage() {
+function PaymentSuccessContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { loading: authLoading } = useAuth();
@@ -64,7 +64,6 @@ export default function PaymentSuccessPage() {
   }, [authLoading, sessionId, pollPayment]);
 
   const handleContinue = () => {
-    // Clean up stored tier and redirect to enrichment page
     localStorage.removeItem('dodo_pending_tier');
     router.push('/enrichment');
   };
@@ -124,5 +123,13 @@ export default function PaymentSuccessPage() {
         </div>
       </Container>
     </div>
+  );
+}
+
+export default function PaymentSuccessPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center bg-white"><Spinner /></div>}>
+      <PaymentSuccessContent />
+    </Suspense>
   );
 }
