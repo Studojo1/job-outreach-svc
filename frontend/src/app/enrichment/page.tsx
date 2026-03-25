@@ -194,15 +194,18 @@ export default function EnrichmentPage() {
       }
 
       const provider = orderRes.data.provider || 'razorpay';
+      console.log('[PAYMENT-DEBUG] create-order response:', JSON.stringify(orderRes.data));
+      console.log('[PAYMENT-DEBUG] provider:', provider);
 
       // ── Dodo Payments (international) — redirect to checkout ──
       if (provider === 'dodo') {
-        // Store tier in localStorage so payment-success page knows what to enrich
+        console.log('[PAYMENT-DEBUG] Redirecting to Dodo:', orderRes.data.checkout_url);
         localStorage.setItem('dodo_pending_tier', String(selectedTier));
         window.location.href = orderRes.data.checkout_url;
         return;
       }
 
+      console.log('[PAYMENT-DEBUG] Using Razorpay path, key_id:', orderRes.data.key_id);
       // ── Razorpay (India) — modal checkout ──
       const options = {
         key: orderRes.data.key_id,
