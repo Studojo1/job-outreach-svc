@@ -1,9 +1,8 @@
 """
-Adaptive quiz question engine — all 8 questions served deterministically.
-Zero LLM calls during quiz. Resume profile (pre-extracted after upload) powers
-Q6/Q7 adaptivity.
+Adaptive quiz engine — onboarding (Q1-Q8) + psychometric profiling (5 adaptive Qs).
+Zero LLM calls during quiz. Resume profile (pre-extracted after upload) powers adaptivity.
 
-Question sequence:
+Onboarding phase (practical questions):
   Q1  career_stage      MCQ   always
   Q2  job_type          MCQ   skipped for experienced / career-switcher
   Q3  location          MCQ   options adapted to candidate's detected geography
@@ -12,6 +11,9 @@ Question sequence:
   Q6  dream_companies   TEXT  adaptive examples based on Q4 company_stage
   Q7  target_role       MCQ   options from resume_profile.likely_roles if available
   Q8  work_motivation   MCQ   always
+
+Psychometric phase (5 adaptive questions selected from pool of 8):
+  Q9-Q13  scenario MCQs   selected by adaptive engine based on signal gaps
 
 State passed to get_next_question():
   {
@@ -96,10 +98,10 @@ _Q5_CAREER_GOAL = {
     "text_input": True,
 }
 
-_Q7_WORK_MOTIVATION = {
+_Q8_WORK_MOTIVATION = {
     "key": "work_motivation",
     "ack": "That helps a lot.",
-    "message": "Last one — what drives you most at work right now?",
+    "message": "Almost done with the basics — what drives you most at work right now?",
     "mcq": {
         "question": "What drives you most at work?",
         "options": [
@@ -126,7 +128,19 @@ _ACKS: dict[str, str] = {
     "career_goal": "That helps a lot.",
     "dream_companies": "Great!",
     "target_role": "Noted.",
-    "work_motivation": None,  # last question, no ack needed
+    "work_motivation": "Nice. Now a few quick ones to understand how you think.",
+}
+
+# Acks for psychometric questions
+_PSYCH_ACKS: dict[str, str] = {
+    "psych_decision": "Interesting.",
+    "psych_teamwork": "Makes sense.",
+    "psych_frustration": "Fair enough.",
+    "psych_crisis": "Good instinct.",
+    "psych_energy": "Noted.",
+    "psych_learning": "Got it.",
+    "psych_success": "That's clear.",
+    "psych_feedback": None,  # could be last
 }
 
 # ---------------------------------------------------------------------------
@@ -146,6 +160,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     stage = answers.get("career_stage", "").lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
 
+    # ── Onboarding phase (Q1-Q8) ────────────────────────────────────────
     sequence = [_Q1_CAREER_STAGE]
     if not skip_job_type:
         sequence.append(_Q2_JOB_TYPE)
@@ -154,7 +169,14 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_Q5_CAREER_GOAL)
     sequence.append(_build_dream_companies_question(answers))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
-    sequence.append(_Q7_WORK_MOTIVATION)
+    sequence.append(_Q8_WORK_MOTIVATION)
+
+    # ── Psychometric phase (5 adaptive questions) ─────────────────────
+    # Only build once onboarding is far enough that we have signal
+    onboarding_keys = {q["key"] for q in sequence}
+    if onboarding_keys & set(answers.keys()):  # at least 1 onboarding Q answered
+        psych_qs = _build_psychometric_sequence(answers, resume_profile)
+        sequence.extend(psych_qs)
 
     return sequence
 
@@ -193,13 +215,45 @@ def build_message(q_def: dict, prev_q_key: str | None, is_first: bool) -> str:
     """
     if is_first or not prev_q_key:
         return q_def["message"]
-    ack = _ACKS.get(prev_q_key) or "Got it."
+    # Check both onboarding and psychometric acks
+    ack = _ACKS.get(prev_q_key) or _PSYCH_ACKS.get(prev_q_key) or "Got it."
     return f"{ack}|||{q_def['message']}"
 
 
 # ---------------------------------------------------------------------------
 # Adaptive question builders
 # ---------------------------------------------------------------------------
+
+def _build_psychometric_sequence(answers: dict, resume_profile: dict) -> list[dict]:
+    """Build the psychometric question sequence using the adaptive engine.
+
+    Converts psychometric question dicts to the format expected by the
+    quiz engine (key, message, mcq, text_input, ack).
+    """
+    from .psychometric.adaptive_engine import select_psychometric_questions
+
+    selected = select_psychometric_questions(
+        onboarding_answers=answers,
+        resume_data=resume_profile,
+    )
+
+    quiz_questions = []
+    for i, pq in enumerate(selected):
+        is_last = (i == len(selected) - 1)
+        quiz_questions.append({
+            "key": pq["key"],
+            "ack": _PSYCH_ACKS.get(pq["key"]) or "Got it.",
+            "message": ("Last one! " if is_last else "") + pq["text"],
+            "mcq": {
+                "question": pq["text"],
+                "options": [{"label": o["label"], "text": o["text"]} for o in pq["options"]],
+                "allow_multiple": False,
+            },
+            "text_input": False,
+        })
+
+    return quiz_questions
+
 
 def _build_dream_companies_question(answers: dict) -> dict:
     """
@@ -378,8 +432,6 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     profile = resume_profile or {}
     likely_roles: list[str] = profile.get("likely_roles") or []
     domain = (profile.get("domain") or "").lower()
-    subdomain = (profile.get("subdomain") or "").lower()
-
     # domain key → (ontology cluster, preferred spec keywords)
     DOMAIN_TO_CLUSTER: dict[str, tuple[str, list[str]]] = {
         "software_engineering": ("Technology & Engineering", ["software", "development"]),
