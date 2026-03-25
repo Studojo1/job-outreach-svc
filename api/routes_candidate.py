@@ -258,6 +258,16 @@ async def candidate_chat_stream(
 
     # ── Quiz complete ──────────────────────────────────────────────────
     if q_index >= len(sequence):
+        # Persist dream companies from quiz answers
+        raw_dream = answers.get("dream_companies", "")
+        if raw_dream and raw_dream.strip().lower() not in ("skip", "none", "n/a", "na", ""):
+            dream_list = [c.strip() for c in raw_dream.split(",") if c.strip() and c.strip().lower() not in ("skip", "none")]
+            candidate.dream_companies = dream_list[:10]  # cap at 10
+            logger.info(f"[STREAM] Stored dream_companies={candidate.dream_companies} for candidate {candidate_id}")
+        else:
+            candidate.dream_companies = []
+        db.commit()
+
         payload = {
             "type": "complete",
             "message": "That's everything I need. Generating your profile now...",

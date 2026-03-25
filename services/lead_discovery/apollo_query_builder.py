@@ -56,6 +56,10 @@ def build_apollo_query(filters: LeadFilter, page: int = 1) -> Dict[str, Any]:
     if filters.person_titles_exclude:
         payload["person_not_titles"] = filters.person_titles_exclude
 
+    # Add organization name filter (used for dream company searches)
+    if filters.q_organization_name:
+        payload["q_organization_name"] = filters.q_organization_name
+
     # ── Apollo query guardrails ──────────────────────────────────────────
     # Note: Do NOT trim person_titles here. The search_people_chunked()
     # function in apollo_service.py handles automatic chunking for large

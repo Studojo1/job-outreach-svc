@@ -358,3 +358,66 @@ def collect_leads(filters: LeadFilter, candidate_id: int, target_leads: int, db:
 
     logger.info("Lead collection finalised - Total: %d, Target: %d", leads_collected, target_leads)
     return leads_collected
+
+
+def collect_dream_company_leads(
+    base_filters: LeadFilter,
+    dream_companies: list[str],
+    candidate_id: int,
+    db: Session,
+) -> int:
+    """Secondary search pass — find leads at the candidate's dream companies.
+
+    For each company (capped at 5), clones the base filters with
+    q_organization_name set, and searches 1 page (up to 100 leads).
+    Deduplication is handled by _store_people() which checks apollo_id.
+
+    Returns total new leads added across all dream company searches.
+    """
+    total_added = 0
+    companies = [c.strip() for c in dream_companies if c.strip()][:5]
+
+    if not companies:
+        return 0
+
+    logger.info("[DREAM] Starting dream company search for %d companies: %s", len(companies), companies)
+
+    for company_name in companies:
+        try:
+            dream_filters = LeadFilter(
+                target_segments=base_filters.target_segments,
+                person_titles_exclude=base_filters.person_titles_exclude,
+                person_locations=base_filters.person_locations,
+                organization_locations=base_filters.organization_locations,
+                organization_industries=None,  # don't restrict industry for dream companies
+                q_organization_name=company_name,
+                email_status=["verified"],
+            )
+            apollo_payload = build_apollo_query(dream_filters, page=1)
+            people = _try_collect_page(apollo_payload)
+
+            if not people:
+                logger.info("[DREAM] No results for company '%s'", company_name)
+                continue
+
+            before = total_added
+            # Use a high target so we store all results from the single page
+            current_count = _store_people(people, candidate_id, 10000, db, 0)
+            total_added += current_count
+
+            try:
+                db.commit()
+            except Exception as e:
+                logger.error("[DREAM] Failed to commit leads for '%s': %s", company_name, e)
+                db.rollback()
+                continue
+
+            logger.info("[DREAM] Company '%s': found %d people, stored %d new leads",
+                       company_name, len(people), current_count)
+
+        except Exception as e:
+            logger.error("[DREAM] Error searching for company '%s': %s", company_name, e, exc_info=True)
+            continue
+
+    logger.info("[DREAM] Dream company search complete: %d new leads from %d companies", total_added, len(companies))
+    return total_added

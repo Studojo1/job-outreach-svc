@@ -15,4 +15,5 @@ class LeadFilter(BaseModel):
     person_locations: List[str]
     organization_locations: Optional[List[str]] = None
     organization_industries: Optional[List[str]] = None
+    q_organization_name: Optional[str] = None
     email_status: Optional[List[str]] = None

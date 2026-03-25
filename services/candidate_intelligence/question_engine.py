@@ -1,7 +1,7 @@
 """
-Adaptive quiz question engine — all 7 questions served deterministically.
+Adaptive quiz question engine — all 8 questions served deterministically.
 Zero LLM calls during quiz. Resume profile (pre-extracted after upload) powers
-Q6 adaptivity.
+Q6/Q7 adaptivity.
 
 Question sequence:
   Q1  career_stage      MCQ   always
@@ -9,8 +9,9 @@ Question sequence:
   Q3  location          MCQ   options adapted to candidate's detected geography
   Q4  company_stage     MCQ   always
   Q5  career_goal       TEXT  always
-  Q6  target_role       MCQ   options from resume_profile.likely_roles if available
-  Q7  work_motivation   MCQ   always
+  Q6  dream_companies   TEXT  adaptive examples based on Q4 company_stage
+  Q7  target_role       MCQ   options from resume_profile.likely_roles if available
+  Q8  work_motivation   MCQ   always
 
 State passed to get_next_question():
   {
@@ -123,6 +124,7 @@ _ACKS: dict[str, str] = {
     "location": "Makes sense.",
     "company_stage": "Good to know.",
     "career_goal": "That helps a lot.",
+    "dream_companies": "Great!",
     "target_role": "Noted.",
     "work_motivation": None,  # last question, no ack needed
 }
@@ -150,6 +152,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_build_location_question(resume_profile, resume_text, parsed_json))
     sequence.append(_Q4_COMPANY_STAGE)
     sequence.append(_Q5_CAREER_GOAL)
+    sequence.append(_build_dream_companies_question(answers))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q7_WORK_MOTIVATION)
 
@@ -197,6 +200,34 @@ def build_message(q_def: dict, prev_q_key: str | None, is_first: bool) -> str:
 # ---------------------------------------------------------------------------
 # Adaptive question builders
 # ---------------------------------------------------------------------------
+
+def _build_dream_companies_question(answers: dict) -> dict:
+    """
+    Build Q6 dream companies question — text input with adaptive examples
+    based on Q4 company_stage answer.
+    """
+    stage = (answers.get("company_stage") or "").lower()
+
+    if "early" in stage or "seed" in stage:
+        examples = "Stripe, Zerodha, Notion"
+    elif "growth" in stage:
+        examples = "Razorpay, Swiggy, Meesho"
+    elif "large" in stage or "mnc" in stage or "enterprise" in stage:
+        examples = "EY, Google, McKinsey"
+    else:
+        examples = "Google, Deloitte, Flipkart"
+
+    return {
+        "key": "dream_companies",
+        "ack": "Good to know.",
+        "message": (
+            f"Name a few companies you'd love to work at \u2014 even stretch goals count. "
+            f"Separate with commas. e.g. '{examples}' (or type 'skip' if no preference)"
+        ),
+        "mcq": None,
+        "text_input": True,
+    }
+
 
 def _build_location_question(resume_profile: dict, resume_text: str, parsed_json: dict) -> dict:
     """

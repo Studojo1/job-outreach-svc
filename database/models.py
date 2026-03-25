@@ -61,6 +61,7 @@ class Candidate(Base):
     resume_text = Column(Text)
     parsed_json = Column(JSONB)
     resume_profile = Column(JSONB)  # pre-extracted intelligence for adaptive quiz
+    dream_companies = Column(JSONB)  # user-specified target companies from quiz
     target_roles = Column(JSONB)
     target_industries = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow)
