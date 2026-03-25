@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     RAZORPAY_WEBHOOK_SECRET: str = ""
     RAZORPAY_TEST_MODE: bool = True
 
+    # DODO PAYMENTS
+    DODO_PAYMENTS_API_KEY: str = ""
+    DODO_TEST_MODE: bool = True
+    DODO_WEBHOOK_SECRET: str = ""
+    DODO_PRODUCT_OUTREACH_200: str = ""
+    DODO_PRODUCT_OUTREACH_350: str = ""
+    DODO_PRODUCT_OUTREACH_500: str = ""
+
     # REDIS
     REDIS_URL: str = "redis://localhost:6379/0"
 

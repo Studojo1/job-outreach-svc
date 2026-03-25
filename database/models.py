@@ -199,9 +199,13 @@ class PaymentOrder(Base):
     __tablename__ = "payment_orders"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String(20), default="razorpay", nullable=False)
     razorpay_order_id = Column(String(255), unique=True)
     razorpay_payment_id = Column(String(255))
     razorpay_signature = Column(String(512))
+    dodo_checkout_id = Column(String(255))
+    dodo_payment_id = Column(String(255))
+    geo_country = Column(String(5))
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)
