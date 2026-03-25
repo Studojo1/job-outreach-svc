@@ -71,15 +71,12 @@ export default function EnrichmentPage() {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const locale = navigator.language || 'en-US';
-        const detectedCurrency = locale.toLowerCase().includes('in') ? 'INR' : 'USD';
-        setCurrency(detectedCurrency);
-
         const [pricingRes, creditsRes] = await Promise.all([
-          api.get(`/payment/pricing?currency=${detectedCurrency}`),
+          api.get('/payment/pricing'),
           api.get('/payment/credits'),
         ]);
         setPricing(pricingRes.data.tiers || []);
+        setCurrency(pricingRes.data.currency || 'USD');
         setCredits(creditsRes.data);
       } catch {
         // pricing fetch failed — fallback tiers will show
@@ -196,11 +193,21 @@ export default function EnrichmentPage() {
         return;
       }
 
-      // Open Razorpay checkout
+      const provider = orderRes.data.provider || 'razorpay';
+
+      // ── Dodo Payments (international) — redirect to checkout ──
+      if (provider === 'dodo') {
+        // Store tier in localStorage so payment-success page knows what to enrich
+        localStorage.setItem('dodo_pending_tier', String(selectedTier));
+        window.location.href = orderRes.data.checkout_url;
+        return;
+      }
+
+      // ── Razorpay (India) — modal checkout ──
       const options = {
         key: orderRes.data.key_id,
         amount: orderRes.data.amount,
-        currency: orderRes.data.currency,
+        currency: orderRes.data.currency || 'INR',
         name: 'OpportunityApply',
         description: `${selectedTier} Email Enrichment Credits`,
         order_id: orderRes.data.order_id,
