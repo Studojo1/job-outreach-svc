@@ -268,12 +268,16 @@ async def candidate_chat_stream(
             candidate.dream_companies = []
 
         # ── Run psychometric profiling ────────────────────────────────
-        psych_profile = _build_psychometric_profile(answers, resume_profile)
-        candidate.psychometric_profile = psych_profile
-        logger.info(
-            f"[STREAM] Psychometric profile: strengths={psych_profile.get('result', {}).get('top_strengths')}, "
-            f"confidence={psych_profile.get('confidence', 0)}, traits={psych_profile.get('traits')}"
-        )
+        psych_profile = {}
+        try:
+            psych_profile = _build_psychometric_profile(answers, resume_profile)
+            candidate.psychometric_profile = psych_profile
+            logger.info(
+                f"[STREAM] Psychometric profile: strengths={psych_profile.get('result', {}).get('top_strengths')}, "
+                f"confidence={psych_profile.get('confidence', 0)}, traits={psych_profile.get('traits')}"
+            )
+        except Exception as psych_err:
+            logger.error(f"[STREAM] Psychometric profiling failed (non-fatal): {psych_err}", exc_info=True)
 
         db.commit()
 
