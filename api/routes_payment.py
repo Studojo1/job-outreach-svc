@@ -35,8 +35,15 @@ def _get_razorpay_client():
 @router.get("/pricing")
 async def get_pricing(req: Request, currency: Optional[str] = None):
     """Return tier pricing for the given currency (auto-detected from geo if omitted)."""
+    from core.geo import get_client_ip
+    xff = req.headers.get("X-Forwarded-For", "")
+    client_ip = get_client_ip(req)
+    country = detect_country(req)
+    india = is_india(req)
+    logger.info("[GEO-DEBUG] pricing: XFF=%r, client_ip=%s, country=%s, is_india=%s, req.client=%s",
+                xff, client_ip, country, india, req.client.host if req.client else "none")
     if currency is None:
-        currency = "INR" if is_india(req) else "USD"
+        currency = "INR" if india else "USD"
     currency = currency.upper()
 
     source = TEST_TIERS if settings.RAZORPAY_TEST_MODE else TIERS
@@ -122,8 +129,13 @@ async def create_order(
         raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
 
     # Detect geo for gateway routing
+    from core.geo import get_client_ip
+    xff = req.headers.get("X-Forwarded-For", "")
+    client_ip = get_client_ip(req)
     country = detect_country(req)
     use_razorpay = is_india(req)
+    logger.info("[GEO-DEBUG] create-order: XFF=%r, client_ip=%s, country=%s, is_india=%s, req.client=%s",
+                xff, client_ip, country, use_razorpay, req.client.host if req.client else "none")
 
     # Determine currency and amount based on gateway
     pricing = get_tier_pricing(body.tier, settings.RAZORPAY_TEST_MODE)
