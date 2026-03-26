@@ -348,7 +348,7 @@ async def verify_dodo_payment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Check if a Dodo payment has been confirmed (via webhook). Frontend polls this."""
+    """Check if a Dodo payment has been confirmed. Actively checks Dodo API if still pending."""
     order = db.query(PaymentOrder).filter_by(
         dodo_checkout_id=request.session_id,
         user_id=current_user.id,
@@ -361,6 +361,32 @@ async def verify_dodo_payment(
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
 
     if order.status == "failed":
+        return {"status": "failed"}
+
+    # Order still pending — actively check Dodo API instead of waiting for webhook
+    dodo_status = await dodo_svc.get_checkout_status(request.session_id)
+    logger.info("[PAYMENT] Dodo checkout %s status from API: %s", request.session_id, dodo_status)
+
+    if dodo_status["status"] in ("succeeded", "paid", "complete", "completed"):
+        # Payment confirmed — grant credits
+        order.dodo_payment_id = dodo_status.get("payment_id", "")
+        order.status = "paid"
+        order.credits_granted = order.tier
+        order.updated_at = datetime.utcnow()
+        _grant_credits(db, order.user_id, order.tier)
+
+        if order.coupon_id:
+            db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+
+        db.commit()
+        logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, granted %d credits",
+                    request.session_id, order.tier)
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
+
+    if dodo_status["status"] in ("failed", "expired", "cancelled"):
+        order.status = "failed"
+        order.updated_at = datetime.utcnow()
+        db.commit()
         return {"status": "failed"}
 
     return {"status": "pending"}

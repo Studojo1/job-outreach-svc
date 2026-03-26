@@ -64,3 +64,21 @@ async def create_checkout(
     except Exception as e:
         logger.error("[DODO] Checkout creation failed: %s", e)
         raise
+
+
+async def get_checkout_status(session_id: str) -> dict:
+    """Retrieve a checkout session from Dodo to check payment status.
+
+    Returns:
+        {"status": str, "payment_id": str | None}
+    """
+    client = _get_client()
+    try:
+        session = await client.checkout_sessions.retrieve(session_id)
+        return {
+            "status": getattr(session, "status", "unknown"),
+            "payment_id": getattr(session, "payment_id", None),
+        }
+    except Exception as e:
+        logger.error("[DODO] Failed to retrieve checkout session %s: %s", session_id, e)
+        return {"status": "unknown", "payment_id": None}
