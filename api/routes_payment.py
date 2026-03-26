@@ -227,6 +227,7 @@ async def create_order(
             "checkout_url": dodo_result["checkout_url"],
             "session_id": dodo_result["session_id"],
             "tier": body.tier,
+            "dodo_test_mode": settings.DODO_TEST_MODE,
         }
 
     # ── Razorpay (India) ──────────────────────────────────────────────────
