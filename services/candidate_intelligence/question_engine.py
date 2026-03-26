@@ -85,7 +85,7 @@ _Q4_COMPANY_STAGE = {
             {"label": "E", "text": "No strong preference"},
             {"label": "F", "text": "Other"},
         ],
-        "allow_multiple": False,
+        "allow_multiple": True,
     },
     "text_input": False,
 }
@@ -101,7 +101,7 @@ _Q5_CAREER_GOAL = {
 _Q8_WORK_MOTIVATION = {
     "key": "work_motivation",
     "ack": "That helps a lot.",
-    "message": "Almost done with the basics — what drives you most at work right now?",
+    "message": "Almost done with the basics - what drives you most at work right now?",
     "mcq": {
         "question": "What drives you most at work?",
         "options": [
@@ -275,7 +275,7 @@ def _build_dream_companies_question(answers: dict) -> dict:
         "key": "dream_companies",
         "ack": "Good to know.",
         "message": (
-            f"Name a few companies you'd love to work at \u2014 even stretch goals count. "
+            f"Name a few companies you'd love to work at - even stretch goals count. "
             f"Separate with commas. e.g. '{examples}' (or type 'skip' if no preference)"
         ),
         "mcq": None,
