@@ -191,16 +191,40 @@ def apply_resume_boost(profile: dict) -> dict:
 
 
 def normalize_scores(profile: dict) -> dict:
-    """Normalize scores to 0-100 scale. Prevents extreme skew."""
+    """Normalize scores to 0-100 scale with a minimum floor per dimension.
+
+    Two-pass: first normalize to 100, then clamp any dimension below the
+    floor up to MIN_FLOOR and re-normalize so all dims still sum to 100.
+    This prevents jarring 0-value spokes on the radar chart while keeping
+    the overall distribution honest.
+    """
     scores = profile["scores"]
     total = sum(scores.values())
     if total == 0:
         for dim in DIMENSIONS:
-            scores[dim] = 25.0  # uniform
+            scores[dim] = round(100.0 / len(DIMENSIONS), 1)
         return profile
 
+    # First pass — normalize to 100
     for dim in DIMENSIONS:
-        scores[dim] = round((scores[dim] / total) * 100, 1)
+        scores[dim] = (scores[dim] / total) * 100
+
+    # Second pass — apply minimum floor (3 pts) then re-normalize
+    MIN_FLOOR = 3.0
+    floored = False
+    for dim in DIMENSIONS:
+        if scores[dim] < MIN_FLOOR:
+            scores[dim] = MIN_FLOOR
+            floored = True
+
+    if floored:
+        new_total = sum(scores.values())
+        factor = 100.0 / new_total
+        for dim in DIMENSIONS:
+            scores[dim] = round(scores[dim] * factor, 1)
+    else:
+        for dim in DIMENSIONS:
+            scores[dim] = round(scores[dim], 1)
 
     return profile
 
