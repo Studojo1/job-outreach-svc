@@ -182,10 +182,9 @@ async def create_order(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        # Dodo appends payment_id, status, etc. as query params automatically.
-        # payment-success is a top-level route (not under /outreach basePath).
-        base_url = settings.FRONTEND_URL.replace("/outreach", "")
-        return_url = f"{base_url}/payment-success"
+        # Redirect back to enrichment page with dodo_return flag.
+        # The enrichment page handles verification inline (like Razorpay modal).
+        return_url = f"{settings.FRONTEND_URL}/enrichment?dodo_return=1"
 
         try:
             dodo_result = await dodo_svc.create_checkout(
