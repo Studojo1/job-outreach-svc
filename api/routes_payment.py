@@ -193,6 +193,7 @@ async def create_order(
                 customer_email=current_user.email,
                 customer_name=current_user.name or "Customer",
                 return_url=return_url,
+                amount_cents=amount,
                 metadata={
                     "user_id": str(current_user.id),
                     "tier": str(body.tier),

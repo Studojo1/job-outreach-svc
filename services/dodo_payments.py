@@ -23,18 +23,27 @@ async def create_checkout(
     customer_email: str,
     customer_name: str,
     return_url: str,
+    amount_cents: Optional[int] = None,
     metadata: Optional[dict] = None,
 ) -> dict:
     """Create a Dodo Payments checkout session.
+
+    Args:
+        amount_cents: Override product price (requires pay_what_you_want on Dodo dashboard).
+                      In lowest currency denomination (e.g. cents for USD).
 
     Returns:
         {"session_id": str, "checkout_url": str}
     """
     client = _get_client()
 
+    cart_item: dict = {"product_id": product_id, "quantity": 1}
+    if amount_cents is not None:
+        cart_item["amount"] = amount_cents
+
     try:
         response = await client.checkout_sessions.create(
-            product_cart=[{"product_id": product_id, "quantity": 1}],
+            product_cart=[cart_item],
             customer={"email": customer_email, "name": customer_name or "Customer"},
             return_url=return_url,
             metadata=metadata or {},
