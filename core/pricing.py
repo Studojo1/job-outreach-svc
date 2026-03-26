@@ -34,17 +34,11 @@ def get_tier_pricing(tier: int, test_mode: bool = False) -> TierPricing:
     return pricing
 
 
-def get_dodo_product_id(tier: int, settings) -> str:
-    """Map tier to Dodo product ID from settings."""
-    mapping = {
-        200: settings.DODO_PRODUCT_OUTREACH_200,
-        350: settings.DODO_PRODUCT_OUTREACH_350,
-        500: settings.DODO_PRODUCT_OUTREACH_500,
-    }
-    product_id = mapping.get(tier)
-    if not product_id:
-        raise ValueError(f"No Dodo product configured for tier {tier}")
-    return product_id
+def get_dodo_product_id(settings) -> str:
+    """Return the single Dodo product ID (pay_what_you_want, amount set at checkout)."""
+    if not settings.DODO_PRODUCT_OUTREACH:
+        raise ValueError("DODO_PRODUCT_OUTREACH not configured")
+    return settings.DODO_PRODUCT_OUTREACH
 
 
 def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -> int:

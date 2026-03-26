@@ -37,9 +37,7 @@ class Settings(BaseSettings):
     DODO_PAYMENTS_API_KEY: str = ""
     DODO_TEST_MODE: bool = True
     DODO_WEBHOOK_SECRET: str = ""
-    DODO_PRODUCT_OUTREACH_200: str = ""
-    DODO_PRODUCT_OUTREACH_350: str = ""
-    DODO_PRODUCT_OUTREACH_500: str = ""
+    DODO_PRODUCT_OUTREACH: str = ""  # Single product with pay_what_you_want enabled
 
     # REDIS
     REDIS_URL: str = "redis://localhost:6379/0"

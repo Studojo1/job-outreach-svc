@@ -178,7 +178,7 @@ async def create_order(
     # ── Dodo Payments (international) ──────────────────────────────────────
     if not use_razorpay:
         try:
-            product_id = get_dodo_product_id(body.tier, settings)
+            product_id = get_dodo_product_id(settings)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
