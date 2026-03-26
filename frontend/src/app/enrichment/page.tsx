@@ -60,6 +60,7 @@ export default function EnrichmentPage() {
 
   // Payment
   const [paying, setPaying] = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState('');
 
   // Enrichment
   const [enriching, setEnriching] = useState(false);
@@ -198,9 +199,11 @@ export default function EnrichmentPage() {
 
       // ── External checkout (Dodo / any gateway with checkout_url) ──
       if (orderRes.data.checkout_url) {
-        console.error('[PAYMENT] Redirecting to checkout:', orderRes.data.checkout_url);
+        console.error('[PAYMENT] Redirecting to:', orderRes.data.checkout_url);
         localStorage.setItem('dodo_pending_tier', String(selectedTier));
-        window.location.href = orderRes.data.checkout_url;
+        setRedirectUrl(orderRes.data.checkout_url);
+        setPaying(false);
+        window.location.assign(orderRes.data.checkout_url);
         return;
       }
 
@@ -292,7 +295,15 @@ export default function EnrichmentPage() {
           </div>
         )}
 
-        {result ? (
+        {redirectUrl ? (
+          <div className="rounded-2xl border-2 border-ink bg-brand-purple-bg shadow-brutal p-8 text-center">
+            <Spinner />
+            <p className="text-base font-bold font-satoshi mt-4">Redirecting to payment...</p>
+            <a href={redirectUrl} className="text-sm text-primary underline font-satoshi mt-2 block">
+              Click here if not redirected automatically
+            </a>
+          </div>
+        ) : result ? (
           <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center animate-fade-in">
             <div className="w-12 h-12 rounded-full bg-studojo-green-bg border-2 border-ink flex items-center justify-center mx-auto mb-6">
               <CheckCircle className="w-6 h-6 text-secondary" />
