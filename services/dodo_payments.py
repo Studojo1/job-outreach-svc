@@ -71,14 +71,15 @@ async def get_checkout_status(session_id: str) -> dict:
 
     Returns:
         {"status": str, "payment_id": str | None}
+        status values: succeeded, failed, cancelled, processing, etc.
     """
     client = _get_client()
     try:
         session = await client.checkout_sessions.retrieve(session_id)
-        return {
-            "status": getattr(session, "status", "unknown"),
-            "payment_id": getattr(session, "payment_id", None),
-        }
+        status = getattr(session, "payment_status", None) or "unknown"
+        payment_id = getattr(session, "payment_id", None)
+        logger.info("[DODO] Checkout %s: payment_status=%s, payment_id=%s", session_id, status, payment_id)
+        return {"status": status, "payment_id": payment_id}
     except Exception as e:
         logger.error("[DODO] Failed to retrieve checkout session %s: %s", session_id, e)
         return {"status": "unknown", "payment_id": None}
