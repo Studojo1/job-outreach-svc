@@ -49,8 +49,13 @@ FastAPI app mounted at root path `/job-outreach`. Routes under `api/routes_*.py`
 
 Key services: `candidate_intelligence` (resume parsing via Azure OpenAI), `lead_discovery` (Apollo.io API), `lead_scoring` (5-dimension heuristic), `enrichment` (contact backfill), `email_campaign` (Gmail sender + AI email generation).
 
-### Frontend
-Next.js App Router with `basePath: '/outreach'` and `output: 'standalone'`. All pages use `'use client'` and are force-dynamic (no static generation). State via Zustand with localStorage persistence (`useAppStore`).
+### Frontend (CRITICAL)
+**The outreach frontend is NOT in this repo.** The `frontend/` directory here is a LOCAL DEVELOPMENT copy only. The PRODUCTION frontend is the centralized Studojo platform at `Studojo1/frontend` on GitHub. All frontend changes that need to be deployed MUST be made in `Studojo1/frontend`, NOT in `job-outreach-svc/frontend/`.
+
+- The outreach pages live under `app/routes/` in `Studojo1/frontend` (Remix-based)
+- Routes: `/outreach/enrichment`, `/outreach/onboarding/*`, `/payment-success`, etc.
+- To make frontend changes: clone `Studojo1/frontend` to a temp directory, edit there, commit and push
+- The `frontend/` dir in this repo can be used as a REFERENCE but deploying it does NOT affect what users see
 
 Auth flow: BetterAuth session cookie → `ensureAuthToken()` exchanges for JWT → stored in localStorage → Axios interceptor attaches to all API calls. The `useAuth` hook handles this; redirect to platform login only fires after loading completes (not during fetch).
 
