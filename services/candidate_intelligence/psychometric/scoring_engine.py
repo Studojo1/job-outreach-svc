@@ -1,6 +1,7 @@
 """Multi-dimensional scoring engine.
 
-Tracks 4 dimensions: analytical, creative, execution, social.
+Tracks 8 dimensions: analytical, creative, execution, social,
+leadership, strategic, technical, communication.
 Signals come from 3 sources (in order of trust):
   1. Psychometric answers (direct, highest weight)
   2. Onboarding answers (indirect, moderate weight)
@@ -16,51 +17,60 @@ from .types import DIMENSIONS, empty_scores
 
 _MOTIVATION_WEIGHTS: dict[str, dict[str, float]] = {
     "learning fast":     {"analytical": 1.0, "creative": 0.5},
-    "building new skills": {"analytical": 1.0, "creative": 0.5},
+    "building new skills": {"analytical": 1.0, "creative": 0.5, "technical": 0.5},
     "real impact":       {"execution": 1.0, "analytical": 0.5},
-    "impact on the product": {"execution": 1.0, "analytical": 0.5},
+    "impact on the product": {"execution": 1.0, "strategic": 0.5},
     "compensation":      {"execution": 1.0},
-    "career growth":     {"execution": 1.0},
-    "high-energy team":  {"social": 1.5},
-    "clear mission":     {"creative": 0.5, "social": 0.5},
+    "career growth":     {"execution": 1.0, "leadership": 0.5},
+    "high-energy team":  {"social": 1.5, "leadership": 0.5},
+    "clear mission":     {"creative": 0.5, "strategic": 0.5},
     "autonomy":          {"analytical": 1.0, "creative": 0.5},
-    "independently":     {"analytical": 1.0},
+    "independently":     {"analytical": 1.0, "technical": 0.5},
 }
 
 _COMPANY_STAGE_WEIGHTS: dict[str, dict[str, float]] = {
-    "early":      {"creative": 1.0, "execution": 0.5},
-    "seed":       {"creative": 1.0, "execution": 0.5},
-    "growth":     {"execution": 1.0, "creative": 0.5},
-    "mid-size":   {"execution": 0.5, "social": 0.5},
-    "large":      {"analytical": 0.5, "execution": 0.5},
-    "enterprise": {"analytical": 0.5, "execution": 0.5},
-    "mnc":        {"analytical": 0.5, "social": 0.5},
+    "early":      {"creative": 1.0, "execution": 0.5, "strategic": 0.5},
+    "seed":       {"creative": 1.0, "execution": 0.5, "technical": 0.5},
+    "growth":     {"execution": 1.0, "creative": 0.5, "leadership": 0.5},
+    "mid-size":   {"execution": 0.5, "social": 0.5, "leadership": 0.5},
+    "large":      {"analytical": 0.5, "execution": 0.5, "communication": 0.5},
+    "enterprise": {"analytical": 0.5, "strategic": 0.5, "communication": 0.5},
+    "mnc":        {"analytical": 0.5, "social": 0.5, "communication": 0.5},
 }
 
 _CAREER_GOAL_KEYWORDS: dict[str, dict[str, float]] = {
     "data": {"analytical": 1.0},
     "analy": {"analytical": 1.0},
     "research": {"analytical": 0.8},
-    "model": {"analytical": 0.8},
+    "model": {"analytical": 0.8, "technical": 0.5},
     "design": {"creative": 1.0},
-    "build": {"creative": 0.8, "execution": 0.5},
-    "create": {"creative": 0.8},
-    "launch": {"execution": 1.0, "creative": 0.5},
-    "ship": {"execution": 1.0},
-    "manage": {"execution": 0.8, "social": 0.5},
-    "lead": {"social": 1.0, "execution": 0.5},
-    "sell": {"social": 1.0},
+    "build": {"creative": 0.8, "execution": 0.5, "technical": 0.5},
+    "create": {"creative": 0.8, "communication": 0.5},
+    "launch": {"execution": 1.0, "strategic": 0.5},
+    "ship": {"execution": 1.0, "technical": 0.5},
+    "manage": {"execution": 0.8, "leadership": 0.8},
+    "lead": {"leadership": 1.5, "social": 0.5},
+    "sell": {"social": 1.0, "communication": 0.5},
     "close": {"social": 0.8, "execution": 0.5},
-    "market": {"creative": 0.5, "social": 0.5},
-    "strategy": {"analytical": 0.8, "creative": 0.5},
-    "consult": {"analytical": 0.8, "social": 0.5},
-    "gtm": {"execution": 0.8, "creative": 0.5},
+    "market": {"creative": 0.5, "communication": 0.8},
+    "strategy": {"strategic": 1.2, "analytical": 0.5},
+    "consult": {"strategic": 1.0, "communication": 0.5},
+    "gtm": {"execution": 0.8, "strategic": 0.5},
     "ops": {"execution": 1.0},
-    "operations": {"execution": 1.0},
-    "content": {"creative": 1.0},
-    "product": {"creative": 0.5, "analytical": 0.5},
-    "code": {"analytical": 1.0, "execution": 0.5},
-    "engineer": {"analytical": 1.0, "execution": 0.5},
+    "operations": {"execution": 1.0, "leadership": 0.3},
+    "content": {"creative": 1.0, "communication": 1.0},
+    "product": {"creative": 0.5, "analytical": 0.5, "strategic": 0.5},
+    "code": {"technical": 1.5, "analytical": 0.5},
+    "engineer": {"technical": 1.5, "analytical": 0.5},
+    "software": {"technical": 1.5},
+    "develop": {"technical": 1.0},
+    "write": {"communication": 1.0, "creative": 0.5},
+    "present": {"communication": 1.0},
+    "pitch": {"communication": 0.8, "social": 0.5},
+    "vision": {"strategic": 1.0, "leadership": 0.5},
+    "plan": {"strategic": 1.0, "analytical": 0.5},
+    "team": {"leadership": 0.8, "social": 0.5},
+    "hire": {"leadership": 0.8, "social": 0.5},
 }
 
 # ── Resume domain → dimension mapping (max 15% boost) ────────────────────
@@ -68,7 +78,7 @@ _CAREER_GOAL_KEYWORDS: dict[str, dict[str, float]] = {
 _RESUME_DIMENSION_KEYWORDS: dict[str, list[str]] = {
     "analytical": [
         "data", "analytics", "finance", "research", "statistics", "sql",
-        "python", "modeling", "quantitative", "actuarial", "economics",
+        "modeling", "quantitative", "actuarial", "economics",
     ],
     "creative": [
         "design", "product", "content", "ux", "branding", "innovation",
@@ -79,8 +89,26 @@ _RESUME_DIMENSION_KEYWORDS: dict[str, list[str]] = {
         "agile", "scrum", "shipping", "logistics", "implementation",
     ],
     "social": [
-        "sales", "marketing", "hr", "recruiting", "leadership",
-        "communication", "negotiation", "partnerships", "account",
+        "sales", "marketing", "hr", "recruiting",
+        "negotiation", "partnerships", "account",
+    ],
+    "leadership": [
+        "leadership", "manager", "director", "head of", "team lead",
+        "vp", "managing", "mentoring", "people management",
+    ],
+    "strategic": [
+        "strategy", "consulting", "advisory", "business development",
+        "planning", "roadmap", "go-to-market", "gtm", "strategic",
+    ],
+    "technical": [
+        "software", "engineering", "python", "javascript", "react",
+        "backend", "frontend", "api", "cloud", "devops", "programming",
+        "developer", "typescript", "node", "sql",
+    ],
+    "communication": [
+        "writing", "copywriting", "communications", "journalism",
+        "public relations", "presenting", "content creation",
+        "storytelling", "editorial", "newsletter",
     ],
 }
 

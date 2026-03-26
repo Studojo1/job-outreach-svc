@@ -3,12 +3,27 @@
 from __future__ import annotations
 from typing import Literal
 
-Dimension = Literal["analytical", "creative", "execution", "social"]
-DIMENSIONS: list[Dimension] = ["analytical", "creative", "execution", "social"]
+Dimension = Literal[
+    "analytical", "creative", "execution", "social",
+    "leadership", "strategic", "technical", "communication",
+]
+DIMENSIONS: list[Dimension] = [
+    "analytical", "creative", "execution", "social",
+    "leadership", "strategic", "technical", "communication",
+]
 
 
 def empty_scores() -> dict[str, float]:
-    return {"analytical": 0.0, "creative": 0.0, "execution": 0.0, "social": 0.0}
+    return {
+        "analytical": 0.0,
+        "creative": 0.0,
+        "execution": 0.0,
+        "social": 0.0,
+        "leadership": 0.0,
+        "strategic": 0.0,
+        "technical": 0.0,
+        "communication": 0.0,
+    }
 
 
 def new_profile(

@@ -56,6 +56,46 @@ ROLE_MAP: dict[str, list[str]] = {
         "HR Business Partner",
         "Recruitment Lead",
     ],
+    "leadership": [
+        "Team Lead",
+        "Program Manager",
+        "Chief of Staff",
+        "Operations Director",
+        "People Manager",
+        "General Manager",
+        "Product Lead",
+        "VP of Operations",
+    ],
+    "strategic": [
+        "Strategy Consultant",
+        "Business Development Manager",
+        "Go-to-Market Lead",
+        "Corporate Strategy Analyst",
+        "Market Research Manager",
+        "Strategic Partnerships Lead",
+        "M&A Analyst",
+        "Policy Analyst",
+    ],
+    "technical": [
+        "Software Engineer",
+        "Full-Stack Developer",
+        "Data Engineer",
+        "Backend Developer",
+        "DevOps Engineer",
+        "Technical Product Manager",
+        "Solutions Architect",
+        "ML Engineer",
+    ],
+    "communication": [
+        "Content Strategist",
+        "Brand Manager",
+        "Communications Manager",
+        "Public Relations Manager",
+        "Editorial Lead",
+        "Growth Marketing Manager",
+        "Copywriter",
+        "Content Director",
+    ],
 }
 
 # ── Cross-dimension specializations ──────────────────────────────────────
@@ -65,9 +105,19 @@ _CROSS_ROLES: dict[tuple[str, str], list[str]] = {
     ("analytical", "creative"): ["Product Analyst", "Strategy Consultant", "UX Researcher"],
     ("analytical", "execution"): ["Data Engineer", "Technical Program Manager", "Systems Analyst"],
     ("analytical", "social"): ["Management Consultant", "Research Director", "Technical Sales"],
+    ("analytical", "strategic"): ["Corporate Strategy Analyst", "Management Consultant", "BI Consultant"],
+    ("analytical", "technical"): ["Data Scientist", "ML Engineer", "Quantitative Analyst"],
     ("creative", "execution"): ["Product Manager", "Growth Lead", "Full-Stack Builder"],
     ("creative", "social"): ["Brand Manager", "Marketing Lead", "Content Director"],
+    ("creative", "communication"): ["Content Strategist", "Creative Director", "Brand Storyteller"],
+    ("creative", "strategic"): ["Product Strategist", "Innovation Lead", "GTM Specialist"],
     ("execution", "social"): ["Operations Manager", "Client Delivery Lead", "Sales Operations"],
+    ("execution", "leadership"): ["Chief of Staff", "Operations Director", "Program Lead"],
+    ("execution", "technical"): ["Engineering Manager", "DevOps Lead", "Technical PM"],
+    ("leadership", "social"): ["People Operations Lead", "Head of Partnerships", "Community Director"],
+    ("leadership", "strategic"): ["Business Unit Lead", "Chief of Staff", "Head of Strategy"],
+    ("strategic", "communication"): ["Communications Director", "PR Strategist", "Thought Leadership Lead"],
+    ("technical", "communication"): ["Developer Advocate", "Technical Writer", "Solutions Consultant"],
 }
 
 # ── Reasoning templates ──────────────────────────────────────────────────
@@ -94,6 +144,26 @@ _REASONING: dict[str, str] = {
         "influence, and human connection drive your best work. "
         "You're the person who keeps the team aligned."
     ),
+    "leadership": (
+        "You naturally step into the room and take charge. Your answers show someone "
+        "who thinks about the people around them first — how to motivate, unblock, "
+        "and bring out the best in a team."
+    ),
+    "strategic": (
+        "You think two steps ahead. Your answers reveal a big-picture thinker "
+        "who connects dots others miss — someone who asks 'why' before 'how' "
+        "and spots opportunities before they're obvious."
+    ),
+    "technical": (
+        "You're most at home building, coding, or deeply understanding how systems work. "
+        "Your answers show a preference for precision, craft, and technical depth "
+        "over abstract discussion."
+    ),
+    "communication": (
+        "You think in stories and ideas. Your answers reveal someone who translates "
+        "complex things clearly — whether that's writing, presenting, or making sure "
+        "the message lands the way it was intended."
+    ),
 }
 
 _CROSS_REASONING: dict[tuple[str, str], str] = {
@@ -105,13 +175,47 @@ _CROSS_REASONING: dict[tuple[str, str], str] = {
         "You think clearly and ship consistently — "
         "a rare combination of rigorous analysis and bias toward action."
     ),
+    ("analytical", "strategic"): (
+        "You're a rigorous strategist — you don't just make plans, you stress-test them. "
+        "That combination of analytical depth and big-picture thinking is rare."
+    ),
+    ("analytical", "technical"): (
+        "You bring both depth and precision. "
+        "You're equally comfortable modeling a problem and building the solution for it."
+    ),
     ("creative", "execution"): (
         "You don't just have ideas — you build them. "
         "That maker mentality shows up clearly in both your answers and your background."
     ),
+    ("creative", "communication"): (
+        "You think in stories and bring them to life. "
+        "Your combination of originality and clarity makes you a rare creative communicator."
+    ),
+    ("creative", "strategic"): (
+        "You're the person in the room who sees what's possible before anyone else does — "
+        "and can explain why it matters."
+    ),
     ("execution", "social"): (
         "You get things done through people. "
         "Your blend of operational discipline and interpersonal skill makes you a natural team lead."
+    ),
+    ("execution", "leadership"): (
+        "You lead by doing. Your answers reveal someone who earns trust through output — "
+        "the kind of person teams follow because they deliver."
+    ),
+    ("leadership", "strategic"): (
+        "You think at the org level. "
+        "Your combination of people intuition and strategic clarity is what separates "
+        "good managers from great ones."
+    ),
+    ("strategic", "communication"): (
+        "You think big and communicate it clearly. "
+        "That's rare — most people can do one but not both."
+    ),
+    ("technical", "communication"): (
+        "You can build it and explain it. "
+        "That bridge between technical depth and clear communication is one of the "
+        "most in-demand combinations in tech."
     ),
 }
 
@@ -133,7 +237,7 @@ def generate_result(profile: dict) -> dict:
 
     result = {
         "top_strengths": top_2,
-        "dimension_scores": {d: round(scores.get(d, 0), 1) for d in DIMENSIONS},
+        "dimension_scores": {d: round(scores.get(d, 0), 1) for d in sorted_dims},
         "traits": profile.get("traits") or [],
         "recommended_roles": roles,
         "reasoning": reasoning,
