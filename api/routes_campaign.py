@@ -68,6 +68,7 @@ class CampaignCreateRequest(BaseModel):
     body_template: str = ""
     selected_styles: list[str] = []  # Email styles for AI generation
     user_timezone: str = "Asia/Kolkata"
+    lead_limit: Optional[int] = None  # Max leads to include (defaults to all)
 
 
 class CampaignTransitionRequest(BaseModel):
@@ -106,18 +107,21 @@ async def validate_campaign_readiness(
     if not account.access_token:
         return {"valid": False, "reason": "Gmail access token missing. Please reconnect your Gmail."}
 
-    # Check enriched leads with verified emails
+    # Check that leads exist (JIT: enrichment happens later, so just check any leads exist)
+    lead_count = db.query(Lead).filter(Lead.candidate_id == candidate_id).count()
+
+    if lead_count == 0:
+        return {"valid": False, "reason": "No leads found. Run lead discovery first."}
+
     enriched_count = db.query(Lead).filter(
         Lead.candidate_id == candidate_id,
         Lead.email.isnot(None),
         Lead.email_verified == True,
     ).count()
 
-    if enriched_count == 0:
-        return {"valid": False, "reason": "No leads with verified emails found. Run lead discovery first."}
-
     return {
         "valid": True,
+        "total_leads": lead_count,
         "enriched_leads": enriched_count,
         "email_account": account.email_address,
     }
@@ -145,6 +149,7 @@ async def api_create_campaign(
                 candidate_id=request.candidate_id,
                 selected_styles=request.selected_styles,
                 user_timezone=request.user_timezone,
+                lead_limit=request.lead_limit,
             )
         else:
             # Fall back to template mode
@@ -640,6 +645,7 @@ async def get_campaign_emails(
             "to_email": email.to_email,
             "subject": email.subject,
             "status": email.status,
+            "enrichment_status": email.enrichment_status,
             "assigned_style": email.assigned_style,
             "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
             "sent_at": email.sent_at.isoformat() if email.sent_at else None,
@@ -648,20 +654,88 @@ async def get_campaign_emails(
     return {"emails": result}
 
 
+# ── Cancel Campaign (with credit refund) ───────────────────────────────────
+
+@router.post("/{campaign_id}/cancel")
+async def cancel_campaign(
+    campaign_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel a running campaign and refund credits for un-enriched leads."""
+    from database.models import EmailSent, OutreachOrder, Candidate
+    from sqlalchemy import func
+    from api.routes_payment import refund_credits
+
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Verify ownership
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if campaign.status not in ("draft", "running", "paused"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel campaign in '{campaign.status}' status")
+
+    # Count un-enriched emails (these never consumed Apollo credits)
+    pending_count = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.enrichment_status == "pending",
+    ).scalar() or 0
+
+    # Mark pending emails as skipped
+    db.query(EmailSent).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.status.in_(["pending_enrichment", "queued"]),
+    ).update({
+        EmailSent.status: "failed",
+        EmailSent.error_message: "Campaign cancelled",
+    }, synchronize_session="fetch")
+
+    campaign.status = "completed"
+
+    # Refund credits for un-enriched leads
+    if pending_count > 0:
+        refund_credits(db, current_user.id, pending_count)
+
+    # Update outreach order
+    order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+    if order:
+        order.status = "completed"
+        order.credits_refunded = (order.credits_refunded or 0) + pending_count
+        from datetime import datetime
+        log = list(order.action_log or [])
+        log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Campaign cancelled, {pending_count} credits refunded"})
+        order.action_log = log
+        order.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    logger.info("[CAMPAIGN] Campaign %d cancelled by user %s, refunded %d credits",
+                campaign_id, current_user.id, pending_count)
+
+    return {
+        "status": "cancelled",
+        "credits_refunded": pending_count,
+    }
+
+
 # ── Internal Worker Endpoints (no auth — cluster-only) ─────────────────────
 
 @router.post("/worker/send-ready")
 async def worker_send_ready():
     """Internal endpoint called by job-outreach-worker goroutine every 30s.
 
-    Processes all scheduled emails that are ready to send. No auth required
-    because this is only accessible within the k8s cluster.
+    Runs the 3-phase JIT cycle: enrich upcoming → generate content → send ready.
+    No auth required because this is only accessible within the k8s cluster.
     """
-    from services.email_campaign.campaign_worker import _process_ready_emails
+    from services.email_campaign.campaign_worker import _process_cycle
 
     try:
-        sent, failed = _process_ready_emails()
-        return {"sent": sent, "failed": failed}
+        result = _process_cycle()
+        return result
     except Exception as e:
         logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,10 +1,13 @@
-"""Campaign Worker — Stateless polling-based email scheduler.
+"""Campaign Worker — JIT enrichment + email generation + sending.
 
-Architecture:
-  - On campaign launch, pre-compute scheduled_at for ALL emails (with randomized delays + business hours)
-  - A single background thread polls every 30s for emails ready to send
+Architecture (Just-In-Time):
+  - On campaign launch, pre-compute scheduled_at for ALL placeholder emails
+  - A single background thread polls every 30s and runs a 3-phase cycle:
+    Phase 1: Enrich upcoming leads (3-hour lookahead, max 3 per cycle)
+    Phase 2: Generate email content for enriched leads (max 2 per cycle)
+    Phase 3: Send ready emails (max 5 per cycle)
   - Completely stateless — survives pod restarts without losing progress
-  - No per-campaign threads, no sleeping for hours
+  - Total cycle budget: ~3.6s worst case (under 5s k8s health check limit)
 
 Scheduling rules:
   - First email: 30-180 seconds after launch (ignores business hours — trust signal)
@@ -19,10 +22,14 @@ import time
 from datetime import datetime, timedelta
 
 import pytz
+from sqlalchemy import func
 
 from core.logger import get_logger
 from database.session import SessionLocal
-from database.models import Campaign, EmailSent, EmailAccount
+from database.models import (
+    Campaign, EmailSent, EmailAccount, Lead, LeadScore,
+    Candidate, OutreachOrder, UserCredit,
+)
 from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 
 logger = get_logger(__name__)
@@ -33,14 +40,20 @@ _sender_stop = threading.Event()
 POLL_INTERVAL = 30  # seconds between poll cycles
 DAILY_LIMIT_MIN = 5
 DAILY_LIMIT_MAX = 7
+JIT_LOOKAHEAD_HOURS = 3  # enrich/generate leads this far ahead of send time
+MAX_ENRICH_PER_CYCLE = 3  # ~0.6s at 0.2s Apollo rate limit
+MAX_GENERATE_PER_CYCLE = 2  # ~2s for LLM calls
+MAX_SEND_PER_CYCLE = 5  # ~1s for Gmail API calls
+MAX_ENRICHMENT_FAILURES = 3  # skip lead after this many failures
 
 
 # ── Schedule Computation ─────────────────────────────────────────────────────
 
 def compute_campaign_schedule(db, campaign_id: int):
-    """Pre-compute scheduled_at for all queued emails in a campaign.
+    """Pre-compute scheduled_at for all pending emails in a campaign.
 
     Called when campaign transitions to 'running'.
+    Works with both 'pending_enrichment' (JIT) and 'queued' (legacy) statuses.
 
     Algorithm:
       1. First email: 30-180s from now (ignores business hours — trust signal)
@@ -59,10 +72,16 @@ def compute_campaign_schedule(db, campaign_id: int):
     except pytz.UnknownTimeZoneError:
         tz = pytz.timezone("Asia/Kolkata")
 
+    # Support both JIT (pending_enrichment) and legacy (queued) statuses
     emails = (
         db.query(EmailSent)
-        .filter(EmailSent.campaign_id == campaign_id, EmailSent.status == "queued")
-        .order_by(EmailSent.id.asc())
+        .filter(
+            EmailSent.campaign_id == campaign_id,
+            EmailSent.status.in_(["pending_enrichment", "queued"]),
+        )
+        .outerjoin(Lead, EmailSent.lead_id == Lead.id)
+        .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
+        .order_by(LeadScore.overall_score.desc().nullslast(), EmailSent.id.asc())
         .all()
     )
 
@@ -139,11 +158,12 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
     now = datetime.utcnow()
     shift = timedelta(seconds=shift_seconds)
 
+    # Shift both pending_enrichment and queued emails
     emails = (
         db.query(EmailSent)
         .filter(
             EmailSent.campaign_id == campaign_id,
-            EmailSent.status == "queued",
+            EmailSent.status.in_(["queued", "pending_enrichment"]),
             EmailSent.scheduled_at.isnot(None),
             EmailSent.scheduled_at > now,
         )
@@ -158,18 +178,412 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
                 len(emails), shift_seconds, campaign_id)
 
 
+# ── JIT Phase 1: Enrich Upcoming Leads ──────────────────────────────────────
+
+def _enrich_upcoming(db) -> int:
+    """Enrich leads scheduled within the lookahead window.
+
+    Finds pending_enrichment emails with scheduled_at within the next few hours,
+    calls Apollo People Match API for each lead, and updates the email record.
+
+    Returns number of leads successfully enriched.
+    """
+    from services.enrichment.enrichment_service import _enrich_single_lead
+
+    now = datetime.utcnow()
+    lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
+
+    # Find emails needing enrichment within the lookahead window
+    pending_emails = (
+        db.query(EmailSent)
+        .join(Campaign, EmailSent.campaign_id == Campaign.id)
+        .join(Lead, EmailSent.lead_id == Lead.id)
+        .filter(
+            Campaign.status == "running",
+            EmailSent.enrichment_status == "pending",
+            EmailSent.scheduled_at.isnot(None),
+            EmailSent.scheduled_at <= lookahead,
+        )
+        .order_by(EmailSent.scheduled_at.asc())
+        .limit(MAX_ENRICH_PER_CYCLE)
+        .all()
+    )
+
+    if not pending_emails:
+        return 0
+
+    enriched_count = 0
+
+    for email in pending_emails:
+        lead = db.query(Lead).filter_by(id=email.lead_id).first()
+        if not lead:
+            email.enrichment_status = "skipped"
+            email.status = "failed"
+            email.error_message = "Lead not found"
+            db.commit()
+            continue
+
+        # Skip if lead is already enriched (another email for same lead)
+        if lead.email and lead.email_verified:
+            email.to_email = lead.email
+            email.enrichment_status = "enriched"
+            db.commit()
+            enriched_count += 1
+            continue
+
+        try:
+            result = _enrich_single_lead(lead)
+
+            if result:
+                # Update lead
+                lead.email = result["email"]
+                if result.get("name"):
+                    lead.name = result["name"]
+                lead.email_verified = True
+                lead.status = "enriched"
+
+                # Update email record
+                email.to_email = result["email"]
+                email.enrichment_status = "enriched"
+
+                # Deduct 1 credit
+                _deduct_single_credit(db, email)
+
+                db.commit()
+                enriched_count += 1
+                logger.info("[JIT-ENRICH] Enriched lead %d (%s) -> %s for email %d",
+                            lead.id, lead.name, result["email"], email.id)
+            else:
+                # Enrichment returned no email
+                lead.enrichment_fail_count += 1
+                if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+                    email.enrichment_status = "skipped"
+                    email.status = "failed"
+                    email.error_message = f"Enrichment failed after {MAX_ENRICHMENT_FAILURES} attempts"
+                    logger.warning("[JIT-ENRICH] Skipping lead %d (%s) after %d failures",
+                                   lead.id, lead.name, lead.enrichment_fail_count)
+                db.commit()
+
+            time.sleep(0.2)  # Apollo rate limit
+
+        except Exception as e:
+            lead.enrichment_fail_count += 1
+            if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+                email.enrichment_status = "skipped"
+                email.status = "failed"
+                email.error_message = f"Enrichment error: {str(e)[:200]}"
+            db.commit()
+            logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, e)
+
+    return enriched_count
+
+
+def _deduct_single_credit(db, email: EmailSent):
+    """Deduct 1 credit for a successful enrichment. Updates OutreachOrder tracking."""
+    # Find the campaign's outreach order to get the user_id
+    campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
+    if not campaign or not campaign.candidate_id:
+        return
+
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+    if not candidate:
+        return
+
+    user_id = candidate.user_id
+
+    # Deduct from UserCredit
+    credit = db.query(UserCredit).filter_by(user_id=user_id).first()
+    if credit and (credit.total_credits - credit.used_credits) >= 1:
+        credit.used_credits += 1
+    else:
+        logger.warning("[JIT-ENRICH] No credits available for user %s, skipping deduction", user_id)
+
+    # Update OutreachOrder tracking
+    order = (
+        db.query(OutreachOrder)
+        .filter_by(user_id=user_id, candidate_id=campaign.candidate_id)
+        .filter(OutreachOrder.status.in_(["campaign_running", "email_connected", "campaign_setup"]))
+        .order_by(OutreachOrder.created_at.desc())
+        .first()
+    )
+    if order:
+        order.credits_used = (order.credits_used or 0) + 1
+
+
+# ── JIT Phase 2: Generate Email Content ─────────────────────────────────────
+
+def _generate_pending(db) -> int:
+    """Generate email content for enriched leads that don't have content yet.
+
+    Returns number of emails successfully generated.
+    """
+    from services.email_campaign.email_generator_service import generate_email_for_lead
+
+    now = datetime.utcnow()
+    lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
+
+    # Find enriched emails without content
+    enriched_no_content = (
+        db.query(EmailSent)
+        .join(Campaign, EmailSent.campaign_id == Campaign.id)
+        .filter(
+            Campaign.status == "running",
+            EmailSent.enrichment_status == "enriched",
+            EmailSent.status == "pending_enrichment",
+            EmailSent.subject.is_(None),
+            EmailSent.scheduled_at.isnot(None),
+            EmailSent.scheduled_at <= lookahead,
+        )
+        .order_by(EmailSent.scheduled_at.asc())
+        .limit(MAX_GENERATE_PER_CYCLE)
+        .all()
+    )
+
+    if not enriched_no_content:
+        return 0
+
+    generated_count = 0
+
+    for email in enriched_no_content:
+        lead = db.query(Lead).filter_by(id=email.lead_id).first()
+        campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
+        if not lead or not campaign:
+            continue
+
+        candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+        if not candidate:
+            continue
+
+        style = email.assigned_style or "warm_intro"
+
+        try:
+            subject, body = generate_email_for_lead(lead, candidate, style)
+            email.subject = subject
+            email.body = body
+            email.status = "queued"  # Ready for Phase 3 (send)
+            db.commit()
+            generated_count += 1
+            logger.info("[JIT-GENERATE] Generated email %d for lead %d (%s), style=%s",
+                        email.id, lead.id, lead.name, style)
+
+        except Exception as e:
+            logger.error("[JIT-GENERATE] Failed to generate email %d for lead %d: %s",
+                         email.id, lead.id, e)
+            # Don't mark as failed — retry next cycle (within the 3-hour window)
+
+    return generated_count
+
+
+# ── JIT Phase 3: Send Ready Emails (unchanged logic) ────────────────────────
+
+def _send_ready(db) -> tuple:
+    """Find and send all emails where scheduled_at <= now and status = queued.
+
+    Returns (sent_count, failed_count) tuple.
+    """
+    sent_count = 0
+    failed_count = 0
+    now = datetime.utcnow()
+
+    # Find emails ready to send (across ALL running campaigns)
+    ready_emails = (
+        db.query(EmailSent)
+        .join(Campaign, EmailSent.campaign_id == Campaign.id)
+        .filter(
+            Campaign.status == "running",
+            EmailSent.status == "queued",
+            EmailSent.scheduled_at.isnot(None),
+            EmailSent.scheduled_at <= now,
+        )
+        .order_by(EmailSent.scheduled_at.asc())
+        .limit(MAX_SEND_PER_CYCLE)
+        .all()
+    )
+
+    if not ready_emails:
+        return sent_count, failed_count
+
+    logger.info("[SENDER] Found %d emails ready to send", len(ready_emails))
+
+    # Group by campaign for token caching
+    token_cache: dict = {}  # email_account_id -> access_token
+
+    for email in ready_emails:
+        campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
+        if not campaign or campaign.status != "running":
+            continue
+
+        account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
+        if not account:
+            email.status = "failed"
+            email.error_message = "Email account not found"
+            db.commit()
+            failed_count += 1
+            continue
+
+        # Get/refresh access token
+        acct_id = account.id
+        if acct_id not in token_cache:
+            try:
+                token_cache[acct_id] = _refresh_token_sync(account, db)
+            except Exception as e:
+                logger.error("[SENDER] Token refresh failed for account %d: %s", acct_id, e)
+                email.status = "failed"
+                email.error_message = f"Token refresh failed: {str(e)[:200]}"
+                db.commit()
+                failed_count += 1
+                continue
+
+        access_token = token_cache[acct_id]
+
+        # Send the email
+        try:
+            logger.info("[SENDER] Sending email %d (campaign %d) to %s",
+                        email.id, email.campaign_id, email.to_email)
+
+            result = send_gmail_email(
+                access_token=access_token,
+                to_email=email.to_email,
+                subject=email.subject,
+                body=email.body,
+                from_email=account.email_address,
+            )
+
+            email.status = "sent"
+            email.sent_at = datetime.utcnow()
+            email.message_id = result.get("id")
+            db.commit()
+            sent_count += 1
+
+            logger.info("[SENDER] Email %d sent successfully (gmail_id=%s)", email.id, result.get("id"))
+
+        except Exception as e:
+            logger.error("[SENDER] Email %d failed: %s", email.id, e)
+            email.status = "failed"
+            email.error_message = str(e)[:500]
+            db.commit()
+            failed_count += 1
+
+    return sent_count, failed_count
+
+
+# ── Campaign Completion ──────────────────────────────────────────────────────
+
+def _check_campaign_completion(db):
+    """Mark campaigns as completed if no pending_enrichment or queued emails remain."""
+    running_campaigns = db.query(Campaign).filter_by(status="running").all()
+    for campaign in running_campaigns:
+        remaining = db.query(func.count(EmailSent.id)).filter(
+            EmailSent.campaign_id == campaign.id,
+            EmailSent.status.in_(["pending_enrichment", "queued"]),
+        ).scalar() or 0
+
+        if remaining == 0:
+            campaign.status = "completed"
+            db.commit()
+            logger.info("[SENDER] Campaign %d completed (no more pending/queued emails)", campaign.id)
+
+
+# ── Credit Exhaustion Check ──────────────────────────────────────────────────
+
+def _check_credit_exhaustion(db):
+    """If a running campaign's user has no credits left, skip remaining pending emails."""
+    running_campaigns = db.query(Campaign).filter_by(status="running").all()
+    for campaign in running_campaigns:
+        # Check if there are pending enrichment emails
+        pending_count = db.query(func.count(EmailSent.id)).filter(
+            EmailSent.campaign_id == campaign.id,
+            EmailSent.enrichment_status == "pending",
+        ).scalar() or 0
+
+        if pending_count == 0:
+            continue
+
+        # Get user's credit balance
+        candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+        if not candidate:
+            continue
+
+        credit = db.query(UserCredit).filter_by(user_id=candidate.user_id).first()
+        if not credit:
+            continue
+
+        available = credit.total_credits - credit.used_credits
+        if available <= 0:
+            # Skip all remaining pending emails
+            db.query(EmailSent).filter(
+                EmailSent.campaign_id == campaign.id,
+                EmailSent.enrichment_status == "pending",
+            ).update({
+                EmailSent.enrichment_status: "skipped",
+                EmailSent.status: "failed",
+                EmailSent.error_message: "Credits exhausted",
+            }, synchronize_session="fetch")
+            db.commit()
+            logger.warning("[JIT] Credits exhausted for campaign %d (user %s), skipped %d emails",
+                           campaign.id, candidate.user_id, pending_count)
+
+
+# ── Main Cycle ───────────────────────────────────────────────────────────────
+
+def _process_cycle():
+    """Run all three JIT phases in sequence.
+
+    Phase 1: Enrich upcoming leads (~0.6s)
+    Phase 2: Generate email content (~2s)
+    Phase 3: Send ready emails (~1s)
+    Total: ~3.6s worst case, under 5s k8s health check limit.
+
+    Returns dict with counts from each phase.
+    """
+    db = SessionLocal()
+    result = {"enriched": 0, "generated": 0, "sent": 0, "failed": 0}
+    try:
+        # Phase 1: Enrich upcoming leads
+        result["enriched"] = _enrich_upcoming(db)
+
+        # Phase 2: Generate email content for enriched leads
+        result["generated"] = _generate_pending(db)
+
+        # Phase 3: Send ready emails
+        sent, failed = _send_ready(db)
+        result["sent"] = sent
+        result["failed"] = failed
+
+        # Post-cycle checks
+        _check_campaign_completion(db)
+        _check_credit_exhaustion(db)
+
+    finally:
+        db.close()
+
+    if any(v > 0 for v in result.values()):
+        logger.info("[CYCLE] enriched=%d generated=%d sent=%d failed=%d",
+                    result["enriched"], result["generated"], result["sent"], result["failed"])
+
+    return result
+
+
+# ── Legacy compat: keep old function name for worker endpoint ────────────────
+
+def _process_ready_emails():
+    """Legacy wrapper — calls _process_cycle() for backward compatibility."""
+    cycle = _process_cycle()
+    return cycle["sent"], cycle["failed"]
+
+
 # ── Polling Sender Loop ──────────────────────────────────────────────────────
 
 def _sender_loop():
-    """Background thread: polls for scheduled emails ready to send every POLL_INTERVAL seconds.
+    """Background thread: runs the 3-phase JIT cycle every POLL_INTERVAL seconds.
 
-    Completely stateless — reads from DB, sends, updates DB. Safe across pod restarts.
+    Completely stateless — reads from DB, processes, updates DB. Safe across pod restarts.
     """
-    logger.info("[SENDER] Email sender loop started (poll every %ds)", POLL_INTERVAL)
+    logger.info("[SENDER] JIT email sender loop started (poll every %ds)", POLL_INTERVAL)
 
     while not _sender_stop.is_set():
         try:
-            _process_ready_emails()
+            _process_cycle()
         except Exception as e:
             logger.error("[SENDER] Error in sender loop: %s", e, exc_info=True)
 
@@ -180,122 +594,6 @@ def _sender_loop():
             time.sleep(1)
 
     logger.info("[SENDER] Email sender loop stopped")
-
-
-def _process_ready_emails():
-    """Find and send all emails where scheduled_at <= now and status = queued.
-
-    Returns (sent_count, failed_count) tuple.
-    """
-    db = SessionLocal()
-    sent_count = 0
-    failed_count = 0
-    try:
-        now = datetime.utcnow()
-
-        # Find emails ready to send (across ALL running campaigns)
-        ready_emails = (
-            db.query(EmailSent)
-            .join(Campaign, EmailSent.campaign_id == Campaign.id)
-            .filter(
-                Campaign.status == "running",
-                EmailSent.status == "queued",
-                EmailSent.scheduled_at.isnot(None),
-                EmailSent.scheduled_at <= now,
-            )
-            .order_by(EmailSent.scheduled_at.asc())
-            .limit(5)  # Process max 5 per cycle to avoid blocking
-            .all()
-        )
-
-        if not ready_emails:
-            return sent_count, failed_count
-
-        logger.info("[SENDER] Found %d emails ready to send", len(ready_emails))
-
-        # Group by campaign for token caching
-        token_cache: dict = {}  # email_account_id -> access_token
-
-        for email in ready_emails:
-            campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
-            if not campaign or campaign.status != "running":
-                continue
-
-            account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
-            if not account:
-                email.status = "failed"
-                email.error_message = "Email account not found"
-                db.commit()
-                failed_count += 1
-                continue
-
-            # Get/refresh access token
-            acct_id = account.id
-            if acct_id not in token_cache:
-                try:
-                    token_cache[acct_id] = _refresh_token_sync(account, db)
-                except Exception as e:
-                    logger.error("[SENDER] Token refresh failed for account %d: %s", acct_id, e)
-                    email.status = "failed"
-                    email.error_message = f"Token refresh failed: {str(e)[:200]}"
-                    db.commit()
-                    failed_count += 1
-                    continue
-
-            access_token = token_cache[acct_id]
-
-            # Send the email
-            try:
-                logger.info("[SENDER] Sending email %d (campaign %d) to %s",
-                            email.id, email.campaign_id, email.to_email)
-
-                result = send_gmail_email(
-                    access_token=access_token,
-                    to_email=email.to_email,
-                    subject=email.subject,
-                    body=email.body,
-                    from_email=account.email_address,
-                )
-
-                email.status = "sent"
-                email.sent_at = datetime.utcnow()
-                email.message_id = result.get("id")
-                db.commit()
-                sent_count += 1
-
-                logger.info("[SENDER] Email %d sent successfully (gmail_id=%s)", email.id, result.get("id"))
-
-            except Exception as e:
-                logger.error("[SENDER] Email %d failed: %s", email.id, e)
-                email.status = "failed"
-                email.error_message = str(e)[:500]
-                db.commit()
-                failed_count += 1
-
-        # Check if any campaigns are now complete
-        _check_campaign_completion(db)
-
-    finally:
-        db.close()
-
-    return sent_count, failed_count
-
-
-def _check_campaign_completion(db):
-    """Mark campaigns as completed if all emails are sent/failed."""
-    from sqlalchemy import func
-
-    running_campaigns = db.query(Campaign).filter_by(status="running").all()
-    for campaign in running_campaigns:
-        remaining = db.query(func.count(EmailSent.id)).filter(
-            EmailSent.campaign_id == campaign.id,
-            EmailSent.status == "queued",
-        ).scalar() or 0
-
-        if remaining == 0:
-            campaign.status = "completed"
-            db.commit()
-            logger.info("[SENDER] Campaign %d completed (no more queued emails)", campaign.id)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

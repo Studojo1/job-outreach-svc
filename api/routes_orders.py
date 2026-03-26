@@ -9,7 +9,7 @@ from typing import Optional
 
 from database.session import get_db
 from database.models import (
-    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead,
+    User, OutreachOrder, Candidate, Campaign, EmailAccount,
 )
 from api.dependencies import get_current_user
 
@@ -17,16 +17,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
-# Valid state transitions
+# Valid state transitions (JIT: enrichment happens during campaign_running, not as a separate step)
 VALID_TRANSITIONS = {
     "created": ["leads_generating"],
     "leads_generating": ["leads_ready"],
-    "leads_ready": ["enriching", "campaign_setup"],
-    "enriching": ["enrichment_complete", "leads_ready"],  # leads_ready = enrichment failed, can retry
-    "enrichment_complete": ["campaign_setup"],
+    "leads_ready": ["campaign_setup"],
     "campaign_setup": ["email_connected"],
     "email_connected": ["campaign_running"],
     "campaign_running": ["completed"],
+    # Legacy states still accepted for backward compat with existing orders
+    "enriching": ["enrichment_complete", "leads_ready", "campaign_setup"],
+    "enrichment_complete": ["campaign_setup"],
 }
 
 
@@ -195,23 +196,14 @@ async def resume_order(
         else:
             redirect = "/onboarding/upload"
     elif status == "leads_ready":
-        # Auto-correct: if enriched leads already exist, the order status
-        # was missed during enrichment (frontend didn't pass order_id).
-        enriched_count = db.query(Lead).filter(
-            Lead.candidate_id == order.candidate_id,
-            Lead.email_verified == True,
-        ).count()
-        if enriched_count > 0:
-            order.status = "enrichment_complete"
-            order.updated_at = datetime.utcnow()
-            _append_log(order, f"Auto-corrected: leads_ready → enrichment_complete ({enriched_count} enriched leads found)")
-            db.commit()
-            redirect = "/connect/gmail"
-        else:
-            redirect = "/leads/results"
-    elif status == "enriching":
-        redirect = "/enrichment"
-    elif status == "enrichment_complete":
+        # JIT: skip enrichment, go to campaign setup (payment page)
+        redirect = "/leads/results"
+    elif status in ("enriching", "enrichment_complete"):
+        # Legacy orders still in enrichment states — auto-advance to campaign setup
+        order.status = "campaign_setup"
+        order.updated_at = datetime.utcnow()
+        _append_log(order, f"Auto-corrected: {status} → campaign_setup (JIT enrichment)")
+        db.commit()
         redirect = "/connect/gmail"
     elif status in ("campaign_setup", "email_connected"):
         redirect = "/campaign/setup"

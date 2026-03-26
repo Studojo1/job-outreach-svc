@@ -86,6 +86,7 @@ class Lead(Base):
     email = Column(String(255))
     company_size = Column(String(50))
     email_verified = Column(Boolean, default=False)
+    enrichment_fail_count = Column(Integer, default=0)
     status = Column(String(50), default="new")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -121,6 +122,8 @@ class Campaign(Base):
     body_template = Column(Text)
     daily_limit = Column(Integer, default=20)
     user_timezone = Column(String(50), default="Asia/Kolkata")
+    selected_styles = Column(JSONB)  # persist style choices for JIT email generation
+    generation_mode = Column(String(20), default="ai")  # 'ai' or 'template'
     paused_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -139,6 +142,7 @@ class EmailSent(Base):
     body = Column(Text)
     to_email = Column(String(255))
     assigned_style = Column(String(50))  # Email style: warm_intro, value_prop, company_curiosity, peer_to_peer, direct_ask
+    enrichment_status = Column(String(20), default="pending")  # pending, enriched, failed, skipped
     scheduled_at = Column(DateTime)  # When this email should be sent (timezone-aware scheduling)
     sent_at = Column(DateTime)
     status = Column(String(50), default="queued")
@@ -152,7 +156,7 @@ class EmailSent(Base):
 class OutreachOrder(Base):
     """Tracks the full lifecycle of an outreach run.
 
-    State machine:
+    State machine (JIT enrichment — enrichment happens during campaign_running):
       CREATED → LEADS_GENERATING → LEADS_READY → CAMPAIGN_SETUP
       → EMAIL_CONNECTED → CAMPAIGN_RUNNING → COMPLETED
 
@@ -168,6 +172,11 @@ class OutreachOrder(Base):
     status = Column(String(50), default="created", nullable=False)
     leads_collected = Column(Integer, default=0)
     leads_target = Column(Integer, default=500)
+
+    # JIT credit tracking
+    credits_reserved = Column(Integer, default=0)   # total credits purchased for this order
+    credits_used = Column(Integer, default=0)        # credits consumed by successful enrichments
+    credits_refunded = Column(Integer, default=0)    # credits returned on cancel/failure
 
     # Logs — JSONB array of timestamped action entries
     action_log = Column(JSONB, default=list)
