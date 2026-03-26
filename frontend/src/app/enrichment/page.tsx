@@ -194,18 +194,17 @@ export default function EnrichmentPage() {
       }
 
       const provider = orderRes.data.provider || 'razorpay';
-      console.log('[PAYMENT-DEBUG] create-order response:', JSON.stringify(orderRes.data));
-      console.log('[PAYMENT-DEBUG] provider:', provider);
+      console.error('[PAYMENT] provider:', provider, 'checkout_url:', orderRes.data.checkout_url);
 
-      // ── Dodo Payments (international) — redirect to checkout ──
-      if (provider === 'dodo') {
-        console.log('[PAYMENT-DEBUG] Redirecting to Dodo:', orderRes.data.checkout_url);
+      // ── External checkout (Dodo / any gateway with checkout_url) ──
+      if (orderRes.data.checkout_url) {
+        console.error('[PAYMENT] Redirecting to checkout:', orderRes.data.checkout_url);
         localStorage.setItem('dodo_pending_tier', String(selectedTier));
         window.location.href = orderRes.data.checkout_url;
         return;
       }
 
-      console.log('[PAYMENT-DEBUG] Using Razorpay path, key_id:', orderRes.data.key_id);
+      console.error('[PAYMENT] Razorpay path, key_id:', orderRes.data.key_id);
       // ── Razorpay (India) — modal checkout ──
       const options = {
         key: orderRes.data.key_id,
@@ -248,7 +247,8 @@ export default function EnrichmentPage() {
       });
       rzp.open();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to create payment order');
+      console.error('[PAYMENT] Error:', err);
+      setError(err.response?.data?.detail || err.message || 'Failed to create payment order');
       setPaying(false);
     }
   };
