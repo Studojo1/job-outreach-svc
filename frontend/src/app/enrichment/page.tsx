@@ -183,6 +183,9 @@ export default function EnrichmentPage() {
         coupon_code: couponResult?.valid ? couponCode.trim() : undefined,
       });
 
+      // DIAGNOSTIC — remove after debugging
+      alert('API response: ' + JSON.stringify(orderRes.data));
+
       // If fully discounted (100% coupon)
       if (orderRes.data.free) {
         setCredits((prev) => prev
@@ -199,6 +202,7 @@ export default function EnrichmentPage() {
 
       // ── External checkout (Dodo / any gateway with checkout_url) ──
       if (orderRes.data.checkout_url) {
+        alert('Redirecting to: ' + orderRes.data.checkout_url);
         console.error('[PAYMENT] Redirecting to:', orderRes.data.checkout_url);
         localStorage.setItem('dodo_pending_tier', String(selectedTier));
         setRedirectUrl(orderRes.data.checkout_url);
@@ -250,6 +254,7 @@ export default function EnrichmentPage() {
       });
       rzp.open();
     } catch (err: any) {
+      alert('CATCH: ' + (err.response?.data?.detail || err.message || String(err)));
       console.error('[PAYMENT] Error:', err);
       setError(err.response?.data?.detail || err.message || 'Failed to create payment order');
       setPaying(false);
