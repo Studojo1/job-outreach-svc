@@ -210,7 +210,7 @@ def normalize_scores(profile: dict) -> dict:
         scores[dim] = (scores[dim] / total) * 100
 
     # Second pass — apply minimum floor (3 pts) then re-normalize
-    MIN_FLOOR = 3.0
+    MIN_FLOOR = 5.0
     floored = False
     for dim in DIMENSIONS:
         if scores[dim] < MIN_FLOOR:
@@ -231,49 +231,71 @@ def normalize_scores(profile: dict) -> dict:
 
 # ── Trait detection ───────────────────────────────────────────────────────
 
+# With 8 dims summing to 100, average is ~12.5. Thresholds scaled accordingly.
+# "High" = 20+ (top ~2 dims), "moderate" = 14+, "low" = < 8.
 _TRAIT_RULES: list[dict] = [
     {
-        "check": lambda s: s["analytical"] >= 45 and s["social"] < 20,
+        "check": lambda s: s["analytical"] >= 22 and s["social"] < 10,
         "trait": "Independent Thinker",
         "label": "Deep Analyst",
     },
     {
-        "check": lambda s: s["creative"] >= 45 and s["social"] >= 25,
+        "check": lambda s: s["creative"] >= 20 and s["communication"] >= 14,
         "trait": "Idea-Driven Communicator",
         "label": "Creative Builder",
     },
     {
-        "check": lambda s: s["execution"] >= 45 and s["analytical"] >= 20,
+        "check": lambda s: s["execution"] >= 20 and s["analytical"] >= 12,
         "trait": "Structured Executor",
         "label": "Structured Executor",
     },
     {
-        "check": lambda s: s["social"] >= 45 and s["execution"] >= 20,
+        "check": lambda s: s["social"] >= 20 and s["leadership"] >= 12,
         "trait": "People-First Operator",
         "label": "People-First Leader",
     },
     {
-        "check": lambda s: s["analytical"] >= 35 and s["creative"] >= 35,
+        "check": lambda s: s["strategic"] >= 18 and s["analytical"] >= 14,
+        "trait": "Strategic Thinker",
+        "label": "Strategic Thinker",
+    },
+    {
+        "check": lambda s: s["leadership"] >= 20 and s["social"] >= 12,
+        "trait": "Natural Leader",
+        "label": "Natural Leader",
+    },
+    {
+        "check": lambda s: s["technical"] >= 20 and s["analytical"] >= 12,
+        "trait": "Technical Builder",
+        "label": "Technical Builder",
+    },
+    {
+        "check": lambda s: s["communication"] >= 18 and s["social"] >= 12,
+        "trait": "Strong Communicator",
+        "label": "Strong Communicator",
+    },
+    {
+        "check": lambda s: s["analytical"] >= 16 and s["creative"] >= 14,
         "trait": "Strategic Creative",
         "label": "Strategic Creative",
     },
     {
-        "check": lambda s: s["execution"] >= 35 and s["social"] >= 35,
+        "check": lambda s: s["execution"] >= 16 and s["social"] >= 14,
         "trait": "Operational Leader",
         "label": "Operational Leader",
     },
     {
-        "check": lambda s: s["analytical"] >= 30 and s["execution"] >= 30,
+        "check": lambda s: s["analytical"] >= 14 and s["execution"] >= 14,
         "trait": "Systematic Builder",
         "label": "Systematic Builder",
     },
     {
-        "check": lambda s: s["creative"] >= 30 and s["execution"] >= 30,
+        "check": lambda s: s["creative"] >= 14 and s["execution"] >= 14,
         "trait": "Maker",
         "label": "Full-Stack Maker",
     },
     {
-        "check": lambda s: max(s.values()) - min(s.values()) < 15,
+        "check": lambda s: max(s.values()) - min(s.values()) < 10,
         "trait": "Versatile Generalist",
         "label": "Versatile Generalist",
     },
