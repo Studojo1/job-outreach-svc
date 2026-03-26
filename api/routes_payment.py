@@ -182,7 +182,10 @@ async def create_order(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        return_url = f"{settings.FRONTEND_URL}/payment-success?session_id={{CHECKOUT_SESSION_ID}}"
+        # Dodo appends payment_id, status, etc. as query params automatically.
+        # payment-success is a top-level route (not under /outreach basePath).
+        base_url = settings.FRONTEND_URL.replace("/outreach", "")
+        return_url = f"{base_url}/payment-success"
 
         try:
             dodo_result = await dodo_svc.create_checkout(
