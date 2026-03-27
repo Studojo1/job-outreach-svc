@@ -30,63 +30,31 @@ EMAIL_TEMPLATES = [
         "id": 1,
         "name": "Warm Introduction",
         "subject": "quick intro",
-        "body": "Hi {name},
-
-I noticed {company} recently and wanted to reach out. I've been working in the space and your team caught my eye.
-
-Would you mind pointing me in the right direction if there's anyone I should talk to?
-
-Appreciate your time either way.
-
-Best,",
+        "body": "Hi {name},\n\nI noticed {company} recently and wanted to reach out. I've been working in the space and your team caught my eye.\n\nWould you mind pointing me in the right direction if there's anyone I should talk to?\n\nAppreciate your time either way.\n\nBest,",
     },
     {
         "id": 2,
         "name": "Skills-Based Pitch",
         "subject": "saw your team at {company}",
-        "body": "Hi {name},
-
-I've been building some projects in the same area {company} works in and thought it'd be worth reaching out. I'm looking for a role where I can keep working on similar problems.
-
-Is there someone on the team I should connect with?
-
-Thanks for reading.",
+        "body": "Hi {name},\n\nI've been building some projects in the same area {company} works in and thought it'd be worth reaching out. I'm looking for a role where I can keep working on similar problems.\n\nIs there someone on the team I should connect with?\n\nThanks for reading.",
     },
     {
         "id": 3,
         "name": "Company Curiosity",
         "subject": "curious about {company}",
-        "body": "Hey {name},
-
-Came across {company} while looking at teams in the space and got curious about what you're building. I've been spending time on related work and would love to learn more.
-
-Would you have a few minutes to chat sometime?
-
-Cheers,",
+        "body": "Hey {name},\n\nCame across {company} while looking at teams in the space and got curious about what you're building. I've been spending time on related work and would love to learn more.\n\nWould you have a few minutes to chat sometime?\n\nCheers,",
     },
     {
         "id": 4,
         "name": "Peer Connect",
         "subject": "quick question about {company}",
-        "body": "Hi {name},
-
-I saw your role at {company} and thought we might share some overlapping interests. I've been working on a few things in the same area and figured it was worth saying hi.
-
-Would you be up for a quick chat? No worries if not.
-
-Thanks,",
+        "body": "Hi {name},\n\nI saw your role at {company} and thought we might share some overlapping interests. I've been working on a few things in the same area and figured it was worth saying hi.\n\nWould you be up for a quick chat? No worries if not.\n\nThanks,",
     },
     {
         "id": 5,
         "name": "Direct Outreach",
         "subject": "looking for roles at {company}",
-        "body": "Hi {name},
-
-I'm exploring roles in the area {company} works in. I've got some relevant experience and wanted to see if there's anyone on the team I should reach out to.
-
-Would appreciate any direction.
-
-Thanks,",
+        "body": "Hi {name},\n\nI'm exploring roles in the area {company} works in. I've got some relevant experience and wanted to see if there's anyone on the team I should reach out to.\n\nWould appreciate any direction.\n\nThanks,",
     },
 ]
 
