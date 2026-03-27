@@ -223,10 +223,11 @@ def _enrich_upcoming(db) -> int:
             db.commit()
             continue
 
-        # Skip if lead is already enriched (another email for same lead)
+        # Lead already enriched (e.g., by preview enrichment) — reuse email, still deduct credit
         if lead.email and lead.email_verified:
             email.to_email = lead.email
             email.enrichment_status = "enriched"
+            _deduct_single_credit(db, email)
             db.commit()
             enriched_count += 1
             continue
