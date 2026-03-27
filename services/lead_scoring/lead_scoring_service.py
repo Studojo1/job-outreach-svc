@@ -70,10 +70,10 @@ REGION_TO_COUNTRY = {
     "england": "united kingdom",
 }
 
-# Irrelevant role keywords to filter out
+# Role keywords to filter out — only truly irrelevant titles (not hiring decision makers)
+# Recruiters, HR, Talent — these ARE valid outreach targets for job seekers, so not filtered
 IRRELEVANT_KEYWORDS = [
-    "sales", "finance", "recruiter", "consultant",
-    "freelancer", "advisor", "hr", "talent"
+    "freelancer", "contractor", "intern",
 ]
 
 
