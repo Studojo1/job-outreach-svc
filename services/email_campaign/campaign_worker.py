@@ -474,15 +474,32 @@ def _check_campaign_completion(db):
     """Mark campaigns as completed if no pending_enrichment or queued emails remain."""
     running_campaigns = db.query(Campaign).filter_by(status="running").all()
     for campaign in running_campaigns:
+        # Flush any pending changes and expire cached attributes to get fresh counts
+        db.flush()
+        db.expire_all()
+
         remaining = db.query(func.count(EmailSent.id)).filter(
             EmailSent.campaign_id == campaign.id,
             EmailSent.status.in_(["pending_enrichment", "queued"]),
         ).scalar() or 0
 
-        if remaining == 0:
+        total = db.query(func.count(EmailSent.id)).filter(
+            EmailSent.campaign_id == campaign.id,
+        ).scalar() or 0
+
+        sent = db.query(func.count(EmailSent.id)).filter(
+            EmailSent.campaign_id == campaign.id,
+            EmailSent.status == "sent",
+        ).scalar() or 0
+
+        if remaining == 0 and total > 0:
             campaign.status = "completed"
             db.commit()
-            logger.info("[SENDER] Campaign %d completed (no more pending/queued emails)", campaign.id)
+            logger.info("[SENDER] Campaign %d completed — total=%d sent=%d remaining=%d",
+                        campaign.id, total, sent, remaining)
+        elif remaining > 0:
+            logger.debug("[SENDER] Campaign %d still active — remaining=%d (total=%d sent=%d)",
+                         campaign.id, remaining, total, sent)
 
 
 # ── Credit Exhaustion Check ──────────────────────────────────────────────────
