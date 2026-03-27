@@ -142,6 +142,76 @@ _ROLE_KEYWORDS: dict[str, list[str]] = {
     "Management Consultant":    ["consulting", "advisory", "strategy consulting"],
 }
 
+# Role → expected skills mapping for skill-match scoring
+_ROLE_SKILL_MAP: dict[str, list[str]] = {
+    "Software Engineer":           ["Python", "JavaScript", "Java", "SQL", "Git", "Docker", "REST API", "TypeScript", "AWS", "Linux"],
+    "Backend Developer":           ["Python", "Java", "Go", "Node.js", "SQL", "PostgreSQL", "Redis", "Docker", "REST API", "Microservices"],
+    "Frontend Developer":          ["JavaScript", "TypeScript", "React", "Vue", "CSS", "HTML", "Figma", "Next.js", "Webpack", "Git"],
+    "Full-Stack Developer":        ["JavaScript", "TypeScript", "React", "Node.js", "SQL", "Python", "Docker", "REST API", "Git", "AWS"],
+    "Mobile Developer":            ["Swift", "Kotlin", "React Native", "Flutter", "iOS", "Android", "Firebase", "REST API", "Git"],
+    "DevOps Engineer":             ["Docker", "Kubernetes", "AWS", "CI/CD", "Terraform", "Linux", "Python", "Bash", "Jenkins", "Monitoring"],
+    "ML Engineer":                 ["Python", "TensorFlow", "PyTorch", "Machine Learning", "SQL", "Docker", "MLflow", "NumPy", "Pandas", "AWS"],
+    "Data Scientist":              ["Python", "Machine Learning", "Statistics", "SQL", "Pandas", "NumPy", "Scikit-learn", "Jupyter", "TensorFlow", "Data Visualization"],
+    "Data Analyst":                ["SQL", "Python", "Excel", "Tableau", "Power BI", "Data Visualization", "Statistics", "Google Analytics", "R"],
+    "Analytics Engineer":          ["SQL", "dbt", "Python", "Airflow", "BigQuery", "Snowflake", "Data Modeling", "ETL", "Looker"],
+    "Product Manager":             ["Product Strategy", "Roadmapping", "Agile", "Jira", "User Research", "Data Analysis", "SQL", "A/B Testing", "Stakeholder Management"],
+    "Associate PM":                ["Product Thinking", "Wireframing", "User Research", "Agile", "Jira", "SQL", "Communication"],
+    "Growth Marketing Manager":    ["SEO", "SEM", "Google Analytics", "Meta Ads", "Email Marketing", "A/B Testing", "CRM", "HubSpot", "Content Strategy"],
+    "Performance Marketer":        ["Google Ads", "Meta Ads", "SEO", "SEM", "Google Analytics", "A/B Testing", "CRO", "Email Marketing", "Data Analysis"],
+    "Content Marketing Specialist":["Content Strategy", "SEO", "Copywriting", "Social Media", "HubSpot", "WordPress", "Analytics", "Email Marketing"],
+    "Product Marketing Manager":   ["Go-to-Market", "Positioning", "Sales Enablement", "Product Strategy", "Copywriting", "Market Research", "CRM"],
+    "Account Executive":           ["CRM", "Salesforce", "Cold Outreach", "Negotiation", "B2B Sales", "Pipeline Management", "LinkedIn Sales Navigator"],
+    "Business Development Rep":    ["Cold Calling", "Email Outreach", "CRM", "Salesforce", "Prospecting", "LinkedIn", "Communication"],
+    "UX Designer":                 ["Figma", "User Research", "Wireframing", "Prototyping", "Usability Testing", "Design Systems", "Adobe XD", "Sketch"],
+    "Product Designer":            ["Figma", "User Research", "Prototyping", "Design Systems", "Usability Testing", "Interaction Design", "Sketch"],
+    "Financial Analyst":           ["Financial Modeling", "Excel", "Python", "SQL", "Valuation", "Bloomberg", "PowerPoint", "Accounting"],
+    "Investment Banking Analyst":  ["Financial Modeling", "Excel", "M&A", "Valuation", "PowerPoint", "Capital Markets", "Bloomberg"],
+    "Management Consultant":       ["PowerPoint", "Excel", "Data Analysis", "Problem Solving", "Project Management", "Financial Modeling", "Communication"],
+    "Business Analyst":            ["SQL", "Excel", "Requirements Gathering", "Process Mapping", "Jira", "PowerPoint", "Stakeholder Management"],
+    "Operations Analyst":          ["Excel", "SQL", "Process Improvement", "Project Management", "Data Analysis", "Operations"],
+    "Marketing Analyst":           ["SQL", "Google Analytics", "Excel", "Python", "Data Visualization", "A/B Testing", "Marketing Attribution"],
+}
+
+
+def _compute_skill_match(role_title: str, candidate_skills: list[str]) -> tuple[list[str], float]:
+    """
+    Return (matching_skills, fit_score) by computing overlap between
+    candidate's skills and the role's expected skills.
+    """
+    expected = _ROLE_SKILL_MAP.get(role_title, [])
+    if not expected or not candidate_skills:
+        return [], 0.75  # default when no data
+
+    cand_lower = {s.lower() for s in candidate_skills}
+    matching = []
+    for exp_skill in expected:
+        exp_lower = exp_skill.lower()
+        # Check for substring match in either direction
+        if any(exp_lower in c or c in exp_lower for c in cand_lower):
+            matching.append(exp_skill)
+
+    # Fit score: base 0.60 + up to 0.35 from skill overlap
+    overlap_ratio = len(matching) / max(len(expected[:8]), 1)
+    score = 0.60 + (overlap_ratio * 0.35)
+    return matching[:5], round(min(score, 0.97), 2)
+
+
+def _build_skill_reasoning(role_title: str, matching_skills: list[str], source: str) -> str:
+    """Generate a human-readable reasoning string from matched skills."""
+    if matching_skills:
+        if len(matching_skills) == 1:
+            return f"Your {matching_skills[0]} experience is a direct match for this role"
+        elif len(matching_skills) == 2:
+            return f"Your {matching_skills[0]} and {matching_skills[1]} skills align well here"
+        else:
+            top = matching_skills[:3]
+            return f"Strong match — your {', '.join(top[:-1])} and {top[-1]} skills fit this role"
+    if source == "resume":
+        return "Matched directly from your resume experience"
+    if source == "quiz":
+        return "Your target role selection from the quiz"
+    return "Based on your career profile"
+
 
 def _build_primary_cluster(answers: dict, resume_profile: dict) -> str:
     # 1. resume_profile domain is most reliable
@@ -182,40 +252,48 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
     seniority = _map_seniority(answers.get("career_stage", ""))
     career_goal = answers.get("career_goal", "")
     target_role = answers.get("target_role", "")
+    candidate_skills = resume_profile.get("top_skills", [])
+
     roles: list[dict] = []
     seen: set[str] = set()
 
-    def _add(title: str, score: float, reason: str):
+    def _add(title: str, base_score: float, source: str):
         t = title.strip()
-        if t and t.lower() not in ("other", "skip", "") and t not in seen:
-            roles.append({
-                "title": t,
-                "seniority": seniority,
-                "fit_score": round(score, 2),
-                "salary_alignment": True,
-                "reasoning": reason,
-            })
-            seen.add(t)
+        if not t or t.lower() in ("other", "skip", "") or t in seen:
+            return
+        matching_skills, computed_score = _compute_skill_match(t, candidate_skills)
+        # Blend base score (source quality) with computed skill score
+        final_score = round((base_score * 0.4) + (computed_score * 0.6), 2)
+        reasoning = _build_skill_reasoning(t, matching_skills, source)
+        roles.append({
+            "title": t,
+            "seniority": seniority,
+            "fit_score": final_score,
+            "salary_alignment": True,
+            "reasoning": reasoning,
+            "matching_skills": matching_skills,
+        })
+        seen.add(t)
 
-    # 1. Resume profile likely_roles — highest signal, LLM-extracted from actual resume
+    # 1. Resume profile likely_roles — LLM-extracted from actual resume (highest signal)
     for r in resume_profile.get("likely_roles", [])[:4]:
         title = r if isinstance(r, str) else r.get("title", "")
-        _add(title, 0.90, "Matched directly from your resume experience")
+        _add(title, 0.95, "resume")
 
-    # 2. Explicit quiz target_role answer (what they selected from likely_roles MCQ)
+    # 2. Explicit quiz target_role answer
     for t in _parse_multi(target_role):
         if t.lower() not in ("other", "skip"):
-            _add(t, 0.88, "Explicitly selected as target role")
+            _add(t, 0.90, "quiz")
 
     # 3. Infer from career_goal free text
     if career_goal and len(career_goal) > 5:
         goal_lower = career_goal.lower()
         for role_title, kws in _ROLE_KEYWORDS.items():
             if any(kw in goal_lower for kw in kws):
-                _add(role_title, 0.78, f"Inferred from career goal description")
+                _add(role_title, 0.80, "goal")
                 break
 
-    # 4. Ontology fallback if still fewer than 2 roles
+    # 4. Ontology fallback
     if len(roles) < 2:
         try:
             from services.candidate_intelligence.career_ontology import CAREER_ONTOLOGY
@@ -225,7 +303,7 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
                     for _, role_list in list(specializations.items())[:2]:
                         for r in role_list[:2]:
                             if len(roles) < 4:
-                                _add(r, 0.70, f"Matched from career domain: {cluster_name}")
+                                _add(r, 0.72, "ontology")
                     break
         except Exception:
             pass
@@ -234,11 +312,14 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
         roles.append({
             "title": "Associate",
             "seniority": seniority,
-            "fit_score": 0.50,
+            "fit_score": 0.60,
             "salary_alignment": True,
             "reasoning": "General entry-level role",
+            "matching_skills": [],
         })
 
+    # Sort by fit_score descending
+    roles.sort(key=lambda r: r["fit_score"], reverse=True)
     return roles[:5]
 
 
