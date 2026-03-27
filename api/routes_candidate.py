@@ -398,38 +398,47 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
     """
     Background worker: generate final payload and store it.
     Opens its own DB session (request session is already closed).
+    Uses deterministic parser — zero LLM calls, completes in <50ms.
     """
     import traceback
     t_start = time.perf_counter()
     try:
         db = SessionLocal()
         try:
-            from services.candidate_intelligence.profiler_agent import generate_final_payload
-            from services.candidate_intelligence.models import ChatMessage
+            from services.candidate_intelligence.payload_builder import (
+                reconstruct_answers,
+                build_payload_from_answers,
+            )
 
             candidate = db.query(Candidate).filter_by(id=candidate_id).first()
             if not candidate:
                 logger.error(f"[PAYLOAD-BG] Candidate {candidate_id} not found")
                 return
 
-            chat_history = [ChatMessage(role=m["role"], content=m["content"]) for m in chat_history_dicts]
+            # Reconstruct structured answers from chat history (same logic as chat/stream endpoint)
+            answers = reconstruct_answers(chat_history_dicts, candidate)
+            logger.info(f"[PAYLOAD-BG] Reconstructed {len(answers)} answers: {list(answers.keys())}")
 
-            payload = generate_final_payload(
-                chat_history=chat_history,
-                resume_summary=candidate.parsed_json,
-                resume_raw_text=candidate.resume_text,
-                resume_uploaded=True,
+            # Build payload deterministically — no LLM
+            payload_dict = build_payload_from_answers(
+                answers=answers,
+                candidate=candidate,
+                resume_uploaded=bool(candidate.resume_text),
             )
 
-            payload_dict = payload.dict() if hasattr(payload, "dict") else payload.model_dump()
             candidate.parsed_json = payload_dict
-            if payload.career_analysis and payload.career_analysis.recommended_roles:
-                candidate.target_roles = [r.title for r in payload.career_analysis.recommended_roles]
-            if payload.preferences and payload.preferences.industry_interests:
-                candidate.target_industries = payload.preferences.industry_interests
+            recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
+            if recommended:
+                candidate.target_roles = [r["title"] for r in recommended]
+            industry_interests = payload_dict.get("preferences", {}).get("industry_interests", [])
+            if industry_interests:
+                candidate.target_industries = industry_interests
             db.commit()
 
-            logger.info(f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms")
+            logger.info(
+                f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms "
+                f"(deterministic, no LLM)"
+            )
         finally:
             db.close()
     except Exception as exc:
