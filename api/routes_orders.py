@@ -150,6 +150,18 @@ async def update_order(
         order.status = request.status
         _append_log(order, f"Status: {old_status} → {request.status}")
 
+        # Trigger background enrichment of first 15 leads when entering campaign setup.
+        # Ensures preview emails and test emails have enriched leads to work with.
+        if request.status == "campaign_setup" and order.candidate_id:
+            import threading
+            from services.enrichment.enrichment_service import enrich_preview_leads
+            threading.Thread(
+                target=enrich_preview_leads,
+                args=(order.candidate_id,),
+                daemon=True,
+            ).start()
+            logger.info("[ORDER] Triggered preview enrichment for candidate %d", order.candidate_id)
+
     if request.candidate_id is not None:
         order.candidate_id = request.candidate_id
     if request.campaign_id is not None:
