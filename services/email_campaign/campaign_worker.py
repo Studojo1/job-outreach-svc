@@ -395,12 +395,18 @@ def _send_ready(db) -> tuple:
     failed_count = 0
     now = datetime.utcnow()
 
-    # Find emails ready to send (across ALL running campaigns)
+    # Find emails ready to send:
+    # - Regular emails: only from running campaigns
+    # - Test emails (is_test=True): from running, completed, or paused campaigns
+    from sqlalchemy import or_, and_
     ready_emails = (
         db.query(EmailSent)
         .join(Campaign, EmailSent.campaign_id == Campaign.id)
         .filter(
-            Campaign.status == "running",
+            or_(
+                and_(Campaign.status == "running", EmailSent.is_test == False),
+                and_(Campaign.status.in_(["running", "completed", "paused"]), EmailSent.is_test == True),
+            ),
             EmailSent.status == "queued",
             EmailSent.scheduled_at.isnot(None),
             EmailSent.scheduled_at <= now,

@@ -710,8 +710,8 @@ async def send_test_emails(
     if not candidate:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    if campaign.status != "running":
-        raise HTTPException(status_code=400, detail="Campaign must be running to send test emails")
+    if campaign.status not in ("running", "completed", "paused"):
+        raise HTTPException(status_code=400, detail="Campaign must be running, paused, or completed to send test emails")
 
     if not payload.recipients or len(payload.recipients) > 10:
         raise HTTPException(status_code=400, detail="Provide 1-10 test recipients")
