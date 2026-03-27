@@ -719,6 +719,11 @@ async def send_test_emails(
     # Schedule 2 minutes from now so the worker picks it up immediately
     send_at = datetime.utcnow() + timedelta(minutes=2)
 
+    # Extract candidate name from parsed resume JSON (Candidate model has no `name` field)
+    candidate_name = ""
+    if candidate.parsed_json and isinstance(candidate.parsed_json, dict):
+        candidate_name = candidate.parsed_json.get("personal_info", {}).get("name", "")
+
     created_emails = []
     for recipient in payload.recipients:
         style = (campaign.selected_styles[0] if campaign.selected_styles else "warm_intro")
@@ -726,7 +731,7 @@ async def send_test_emails(
             campaign_id=campaign_id,
             lead_id=None,
             to_email=recipient.email,
-            subject=f"[Test] Outreach from {candidate.name or 'your campaign'}",
+            subject=f"[Test] Outreach from {candidate_name or 'your campaign'}",
             body=(
                 f"Hi {recipient.first_name},\n\n"
                 f"This is a test email from your outreach campaign.\n\n"
