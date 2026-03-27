@@ -30,31 +30,63 @@ EMAIL_TEMPLATES = [
         "id": 1,
         "name": "Warm Introduction",
         "subject": "quick intro",
-        "body": "Hi {name},\n\nI noticed {company} recently and wanted to reach out. I've been working in the space and your team caught my eye.\n\nWould you mind pointing me in the right direction if there's anyone I should talk to?\n\nAppreciate your time either way.\n\nBest,",
+        "body": "Hi {name},
+
+I noticed {company} recently and wanted to reach out. I've been working in the space and your team caught my eye.
+
+Would you mind pointing me in the right direction if there's anyone I should talk to?
+
+Appreciate your time either way.
+
+Best,",
     },
     {
         "id": 2,
         "name": "Skills-Based Pitch",
         "subject": "saw your team at {company}",
-        "body": "Hi {name},\n\nI've been building some projects in the same area {company} works in and thought it'd be worth reaching out. I'm looking for a role where I can keep working on similar problems.\n\nIs there someone on the team I should connect with?\n\nThanks for reading.",
+        "body": "Hi {name},
+
+I've been building some projects in the same area {company} works in and thought it'd be worth reaching out. I'm looking for a role where I can keep working on similar problems.
+
+Is there someone on the team I should connect with?
+
+Thanks for reading.",
     },
     {
         "id": 3,
         "name": "Company Curiosity",
         "subject": "curious about {company}",
-        "body": "Hey {name},\n\nCame across {company} while looking at teams in the space and got curious about what you're building. I've been spending time on related work and would love to learn more.\n\nWould you have a few minutes to chat sometime?\n\nCheers,",
+        "body": "Hey {name},
+
+Came across {company} while looking at teams in the space and got curious about what you're building. I've been spending time on related work and would love to learn more.
+
+Would you have a few minutes to chat sometime?
+
+Cheers,",
     },
     {
         "id": 4,
         "name": "Peer Connect",
         "subject": "quick question about {company}",
-        "body": "Hi {name},\n\nI saw your role at {company} and thought we might share some overlapping interests. I've been working on a few things in the same area and figured it was worth saying hi.\n\nWould you be up for a quick chat? No worries if not.\n\nThanks,",
+        "body": "Hi {name},
+
+I saw your role at {company} and thought we might share some overlapping interests. I've been working on a few things in the same area and figured it was worth saying hi.
+
+Would you be up for a quick chat? No worries if not.
+
+Thanks,",
     },
     {
         "id": 5,
         "name": "Direct Outreach",
         "subject": "looking for roles at {company}",
-        "body": "Hi {name},\n\nI'm exploring roles in the area {company} works in. I've got some relevant experience and wanted to see if there's anyone on the team I should reach out to.\n\nWould appreciate any direction.\n\nThanks,",
+        "body": "Hi {name},
+
+I'm exploring roles in the area {company} works in. I've got some relevant experience and wanted to see if there's anyone on the team I should reach out to.
+
+Would appreciate any direction.
+
+Thanks,",
     },
 ]
 
@@ -239,8 +271,12 @@ async def preview_email(
 
     try:
         style = assign_style(sample_lead, request.selected_styles)
-        # Run blocking AI call in thread pool to keep event loop responsive for health checks
-        subject, body = await asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style)
+        # Hard 12s timeout — prevents the 30s frontend timeout being hit 3x (= 90s hang).
+        # If Azure OpenAI is slow, we fail fast with a clear message.
+        subject, body = await asyncio.wait_for(
+            asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style),
+            timeout=12.0,
+        )
         return {
             "subject": subject,
             "body": body,
@@ -248,6 +284,11 @@ async def preview_email(
             "company": sample_lead.company,
             "style": style,
         }
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Preview generation timed out. Your campaign will still work — emails are generated fresh per lead just before sending.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
