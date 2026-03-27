@@ -150,17 +150,7 @@ async def update_order(
         order.status = request.status
         _append_log(order, f"Status: {old_status} → {request.status}")
 
-        # Trigger background enrichment of first 15 leads when entering campaign setup.
-        # Ensures preview emails and test emails have enriched leads to work with.
-        if request.status == "campaign_setup" and order.candidate_id:
-            import threading
-            from services.enrichment.enrichment_service import enrich_preview_leads
-            threading.Thread(
-                target=enrich_preview_leads,
-                args=(order.candidate_id,),
-                daemon=True,
-            ).start()
-            logger.info("[ORDER] Triggered preview enrichment for candidate %d", order.candidate_id)
+
 
     if request.candidate_id is not None:
         order.candidate_id = request.candidate_id
@@ -173,6 +163,26 @@ async def update_order(
 
     if request.log_entry:
         _append_log(order, request.log_entry)
+
+    # Trigger preview enrichment when in campaign_setup (new or existing orders).
+    # Guard: only fires if fewer than 5 leads are enriched, preventing redundant Apollo calls.
+    if order.status == "campaign_setup" and order.candidate_id:
+        from database.models import Lead as _Lead
+        already_enriched = db.query(_Lead).filter(
+            _Lead.candidate_id == order.candidate_id,
+            _Lead.email.isnot(None),
+            _Lead.email_verified == True,
+        ).count()
+        if already_enriched < 5:
+            import threading
+            from services.enrichment.enrichment_service import enrich_preview_leads
+            threading.Thread(
+                target=enrich_preview_leads,
+                args=(order.candidate_id,),
+                daemon=True,
+            ).start()
+            logger.info("[ORDER] Triggered preview enrichment for candidate %d (enriched=%d)",
+                        order.candidate_id, already_enriched)
 
     order.updated_at = datetime.utcnow()
     db.commit()
