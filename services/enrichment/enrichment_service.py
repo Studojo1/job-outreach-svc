@@ -168,3 +168,66 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
         return result_dict
 
     return None
+
+def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
+    """Immediately enrich the first N unenriched leads for a candidate.
+
+    Called in the background when a user enters campaign setup, so that
+    preview emails and test emails have enriched leads to work with.
+    Credits are NOT deducted here — they are deducted by the JIT worker
+    when it processes each lead 3 hours before the scheduled send time.
+
+    Args:
+        candidate_id: The candidate whose leads to enrich.
+        n: Number of leads to enrich (default 15 — enough for 5 test emails + buffer).
+    """
+    from database.session import SessionLocal
+    from database.models import LeadScore
+
+    db = SessionLocal()
+    try:
+        leads = (
+            db.query(Lead)
+            .filter(
+                Lead.candidate_id == candidate_id,
+                Lead.email.is_(None),
+            )
+            .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
+            .order_by(LeadScore.overall_score.desc().nullslast(), Lead.id.asc())
+            .limit(n)
+            .all()
+        )
+
+        if not leads:
+            logger.info("[PREVIEW-ENRICH] No unenriched leads for candidate %d", candidate_id)
+            return
+
+        logger.info("[PREVIEW-ENRICH] Enriching %d leads for candidate %d", len(leads), candidate_id)
+        enriched = 0
+
+        for lead in leads:
+            try:
+                result = _enrich_single_lead(lead)
+                if result:
+                    lead.email = result["email"]
+                    if result.get("name"):
+                        lead.name = result["name"]
+                    lead.email_verified = True
+                    lead.status = "enriched"
+                    db.commit()
+                    enriched += 1
+                    logger.info("[PREVIEW-ENRICH] Enriched lead %d (%s) -> %s",
+                                lead.id, lead.name, result["email"])
+            except Exception as e:
+                logger.warning("[PREVIEW-ENRICH] Failed to enrich lead %d: %s", lead.id, e)
+
+            time.sleep(0.2)  # Apollo rate limit
+
+        logger.info("[PREVIEW-ENRICH] Done: %d/%d enriched for candidate %d",
+                    enriched, len(leads), candidate_id)
+    except Exception as e:
+        logger.error("[PREVIEW-ENRICH] Error in preview enrichment for candidate %d: %s",
+                     candidate_id, e)
+    finally:
+        db.close()
+
