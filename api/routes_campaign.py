@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import time
+from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from database.session import get_db
 from database.models import User, Campaign
@@ -21,6 +22,16 @@ from api.dependencies import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaign", tags=["Campaign"])
+
+
+class TestEmailRecipient(BaseModel):
+    first_name: str
+    company: str
+    email: str
+
+
+class SendTestEmailsRequest(BaseModel):
+    recipients: List[TestEmailRecipient]
 
 # Pre-built email templates (legacy fallback for non-AI mode)
 # When AI styles are selected, the structured pipeline in email_generator_service.py
@@ -653,14 +664,100 @@ async def get_campaign_emails(
             "lead_title": lead.title if lead else "",
             "to_email": email.to_email,
             "subject": email.subject,
+            "body": email.body,
             "status": email.status,
             "enrichment_status": email.enrichment_status,
             "assigned_style": email.assigned_style,
             "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
             "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+            "reply_text": email.reply_text,
+            "reply_sentiment": email.reply_sentiment,
+            "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
+            "bounce_reason": email.bounce_reason,
+            "is_test": email.is_test or False,
         })
 
     return {"emails": result}
+
+
+# ── Send Test Emails ─────────────────────────────────────────────────────────
+
+@router.post("/{campaign_id}/send-test-emails")
+async def send_test_emails(
+    campaign_id: int,
+    payload: SendTestEmailsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Insert test email rows into a campaign's lead list.
+
+    Creates EmailSent rows with is_test=True, scheduled_at=2 minutes from now,
+    and status='queued'. The normal campaign worker picks these up and sends them
+    through the exact same pipeline as real campaign emails.
+
+    This is a permanent feature — lets the user test reply detection, sentiment
+    classification, and the full send pipeline using their own email addresses.
+    """
+    from database.models import EmailSent, Candidate
+    from datetime import timedelta
+
+    # Verify campaign exists and user owns it
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if campaign.status != "running":
+        raise HTTPException(status_code=400, detail="Campaign must be running to send test emails")
+
+    if not payload.recipients or len(payload.recipients) > 10:
+        raise HTTPException(status_code=400, detail="Provide 1-10 test recipients")
+
+    # Schedule 2 minutes from now so the worker picks it up immediately
+    send_at = datetime.utcnow() + timedelta(minutes=2)
+
+    created_emails = []
+    for recipient in payload.recipients:
+        style = (campaign.selected_styles[0] if campaign.selected_styles else "warm_intro")
+        email_row = EmailSent(
+            campaign_id=campaign_id,
+            lead_id=None,
+            to_email=recipient.email,
+            subject=f"[Test] Outreach from {candidate.name or 'your campaign'}",
+            body=(
+                f"Hi {recipient.first_name},\n\n"
+                f"This is a test email from your outreach campaign.\n\n"
+                f"If you received this, the campaign pipeline is working correctly. "
+                f"Reply to this email with any message to test reply detection and sentiment analysis.\n\n"
+                f"Best regards"
+            ),
+            status="queued",
+            enrichment_status="skipped",
+            assigned_style=style,
+            scheduled_at=send_at,
+            is_test=True,
+        )
+        db.add(email_row)
+        db.flush()
+        created_emails.append({
+            "id": email_row.id,
+            "to_email": recipient.email,
+            "first_name": recipient.first_name,
+            "company": recipient.company,
+            "scheduled_at": send_at.isoformat(),
+            "status": "queued",
+        })
+
+    db.commit()
+    logger.info("[TEST_EMAILS] Created %d test emails for campaign %d", len(created_emails), campaign_id)
+
+    return {
+        "message": f"{len(created_emails)} test email(s) scheduled — sending in ~2 minutes",
+        "emails": created_emails,
+    }
 
 
 # ── Cancel Campaign (with credit refund) ───────────────────────────────────

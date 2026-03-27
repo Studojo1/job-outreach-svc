@@ -48,6 +48,7 @@ class EmailAccount(Base):
     refresh_token = Column(Text)
     token_expiry = Column(DateTime)
     daily_send_limit = Column(Integer, default=10, nullable=False)
+    last_reply_check_at = Column(DateTime)             # Last time we polled inbox for replies
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="email_accounts")
@@ -147,6 +148,12 @@ class EmailSent(Base):
     sent_at = Column(DateTime)
     status = Column(String(50), default="queued")
     error_message = Column(Text)
+    thread_id = Column(String(255))                    # Gmail threadId for reply matching
+    reply_text = Column(Text)                          # First reply body text
+    reply_received_at = Column(DateTime)               # When first reply was received
+    reply_sentiment = Column(String(20))               # positive, negative, neutral
+    bounce_reason = Column(Text)                       # Bounce reason if bounced
+    is_test = Column(Boolean, default=False)           # True for "Send Test Emails" feature
     created_at = Column(DateTime, default=datetime.utcnow)
 
     campaign = relationship("Campaign", back_populates="emails_sent")

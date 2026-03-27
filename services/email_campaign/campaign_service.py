@@ -302,6 +302,26 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
         EmailSent.status == "replied",
     ).scalar() or 0
 
+    bounced = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.status == "bounced",
+    ).scalar() or 0
+
+    positive = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.reply_sentiment == "positive",
+    ).scalar() or 0
+
+    negative = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.reply_sentiment == "negative",
+    ).scalar() or 0
+
+    neutral_replies = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.reply_sentiment == "neutral",
+    ).scalar() or 0
+
     queued = db.query(func.count(EmailSent.id)).filter(
         EmailSent.campaign_id == campaign_id,
         EmailSent.status.in_(["queued", "scheduled"]),
@@ -337,6 +357,10 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
         "emails_sent": sent,
         "emails_failed": failed,
         "emails_replied": replied,
+        "emails_bounced": bounced,
+        "emails_positive": positive,
+        "emails_negative": negative,
+        "emails_neutral": neutral_replies,
         "reply_rate": round(reply_rate, 2),
     }
 

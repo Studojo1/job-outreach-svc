@@ -31,6 +31,13 @@ from database.models import (
     Candidate, OutreachOrder, UserCredit,
 )
 from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
+from services.email_campaign.gmail_inbox_service import (
+    list_inbox_messages,
+    get_message_detail,
+    is_bounce_message,
+    extract_bounce_reason,
+)
+from services.email_campaign.reply_classifier_service import classify_reply_sentiment
 
 logger = get_logger(__name__)
 
@@ -45,6 +52,8 @@ MAX_ENRICH_PER_CYCLE = 3  # ~0.6s at 0.2s Apollo rate limit
 MAX_GENERATE_PER_CYCLE = 2  # ~2s for LLM calls
 MAX_SEND_PER_CYCLE = 5  # ~1s for Gmail API calls
 MAX_ENRICHMENT_FAILURES = 3  # skip lead after this many failures
+REPLY_CHECK_INTERVAL = 300  # 5 minutes between reply checks
+_last_reply_check: float = 0.0  # module-level timestamp for throttling
 
 
 # ── Schedule Computation ─────────────────────────────────────────────────────
@@ -453,10 +462,12 @@ def _send_ready(db) -> tuple:
             email.status = "sent"
             email.sent_at = datetime.utcnow()
             email.message_id = result.get("id")
+            email.thread_id = result.get("threadId")
             db.commit()
             sent_count += 1
 
-            logger.info("[SENDER] Email %d sent successfully (gmail_id=%s)", email.id, result.get("id"))
+            logger.info("[SENDER] Email %d sent successfully (gmail_id=%s, thread_id=%s)",
+                        email.id, result.get("id"), result.get("threadId"))
 
         except Exception as e:
             logger.error("[SENDER] Email %d failed: %s", email.id, e)
@@ -542,20 +553,164 @@ def _check_credit_exhaustion(db):
                            campaign.id, candidate.user_id, pending_count)
 
 
+# ── Reply & Bounce Check ─────────────────────────────────────────────────────
+
+def _check_replies(db):
+    """Phase 4: Check Gmail inbox for replies and bounces to sent outreach emails.
+
+    Throttled to run every REPLY_CHECK_INTERVAL seconds (5 minutes).
+    Only checks accounts that have running or recently completed campaigns.
+
+    Returns:
+        Dict with keys: replies_found, bounces_found.
+    """
+    global _last_reply_check
+
+    now = time.time()
+    if now - _last_reply_check < REPLY_CHECK_INTERVAL:
+        return {"replies_found": 0, "bounces_found": 0}
+
+    _last_reply_check = now
+    replies_found = 0
+    bounces_found = 0
+
+    logger.info("[REPLY_CHECK] Starting reply check cycle")
+
+    try:
+        # Find all email accounts with running or completed campaigns
+        running_account_ids = (
+            db.query(Campaign.email_account_id)
+            .filter(Campaign.status.in_(["running", "completed"]))
+            .distinct()
+            .all()
+        )
+        account_ids = [row[0] for row in running_account_ids if row[0]]
+
+        if not account_ids:
+            logger.debug("[REPLY_CHECK] No active campaigns — skipping")
+            return {"replies_found": 0, "bounces_found": 0}
+
+        for account_id in account_ids:
+            account = db.query(EmailAccount).filter_by(id=account_id).first()
+            if not account:
+                continue
+
+            try:
+                # Refresh access token
+                access_token = _refresh_token_sync(account, db)
+
+                # Compute after_epoch: use last_reply_check_at or 24 hours ago
+                if account.last_reply_check_at:
+                    after_epoch = int(account.last_reply_check_at.timestamp())
+                else:
+                    after_epoch = int((datetime.utcnow() - timedelta(hours=24)).timestamp())
+
+                # List new inbox messages since last check
+                messages = list_inbox_messages(access_token, after_epoch)
+
+                if not messages:
+                    account.last_reply_check_at = datetime.utcnow()
+                    db.commit()
+                    continue
+
+                # Get all thread_ids from sent emails for this account's campaigns
+                campaign_ids = [
+                    row[0] for row in
+                    db.query(Campaign.id).filter_by(email_account_id=account_id).all()
+                ]
+                sent_emails_by_thread = {}
+                if campaign_ids:
+                    sent_emails = (
+                        db.query(EmailSent)
+                        .filter(
+                            EmailSent.campaign_id.in_(campaign_ids),
+                            EmailSent.thread_id.isnot(None),
+                            EmailSent.status.in_(["sent", "replied"]),
+                        )
+                        .all()
+                    )
+                    sent_emails_by_thread = {e.thread_id: e for e in sent_emails}
+
+                if not sent_emails_by_thread:
+                    account.last_reply_check_at = datetime.utcnow()
+                    db.commit()
+                    continue
+
+                # Process each inbox message
+                for msg_stub in messages:
+                    msg_thread_id = msg_stub.get("threadId")
+                    if not msg_thread_id or msg_thread_id not in sent_emails_by_thread:
+                        continue  # Not a reply to our outreach
+
+                    email_row = sent_emails_by_thread[msg_thread_id]
+                    if email_row.status == "bounced":
+                        continue  # Already processed as bounce
+
+                    detail = get_message_detail(access_token, msg_stub["id"])
+                    if not detail:
+                        continue
+
+                    # Skip our own sent messages (same thread includes our outbound email)
+                    if detail["from_email"] and account.email_address in detail["from_email"]:
+                        continue
+
+                    # Check for bounce
+                    if is_bounce_message(detail["from_email"]):
+                        email_row.status = "bounced"
+                        email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
+                        db.commit()
+                        bounces_found += 1
+                        logger.info("[REPLY_CHECK] Bounce detected for email %d: %s",
+                                    email_row.id, (email_row.bounce_reason or "")[:100])
+                        continue
+
+                    # First reply only — skip if already replied
+                    if email_row.status == "replied":
+                        continue
+
+                    # Classify sentiment
+                    classification = classify_reply_sentiment(detail["body_text"])
+                    email_row.status = "replied"
+                    email_row.reply_text = detail["body_text"][:10000]
+                    email_row.reply_received_at = datetime.utcfromtimestamp(detail["internal_date"])
+                    email_row.reply_sentiment = classification.get("sentiment", "neutral")
+                    db.commit()
+                    replies_found += 1
+                    logger.info("[REPLY_CHECK] Reply detected for email %d: sentiment=%s",
+                                email_row.id, email_row.reply_sentiment)
+
+                # Update last check timestamp for this account
+                account.last_reply_check_at = datetime.utcnow()
+                db.commit()
+
+            except Exception as e:
+                logger.error("[REPLY_CHECK] Error checking account %d: %s", account_id, e, exc_info=True)
+                continue
+
+    except Exception as e:
+        logger.error("[REPLY_CHECK] Reply check cycle failed: %s", e, exc_info=True)
+
+    if replies_found > 0 or bounces_found > 0:
+        logger.info("[REPLY_CHECK] Cycle complete — replies=%d bounces=%d", replies_found, bounces_found)
+
+    return {"replies_found": replies_found, "bounces_found": bounces_found}
+
+
 # ── Main Cycle ───────────────────────────────────────────────────────────────
 
 def _process_cycle():
-    """Run all three JIT phases in sequence.
+    """Run all JIT phases in sequence.
 
     Phase 1: Enrich upcoming leads (~0.6s)
     Phase 2: Generate email content (~2s)
     Phase 3: Send ready emails (~1s)
+    Phase 4: Check replies/bounces (throttled to every 5 min)
     Total: ~3.6s worst case, under 5s k8s health check limit.
 
     Returns dict with counts from each phase.
     """
     db = SessionLocal()
-    result = {"enriched": 0, "generated": 0, "sent": 0, "failed": 0}
+    result = {"enriched": 0, "generated": 0, "sent": 0, "failed": 0, "replies": 0, "bounces": 0}
     try:
         # Phase 1: Enrich upcoming leads
         result["enriched"] = _enrich_upcoming(db)
@@ -572,12 +727,18 @@ def _process_cycle():
         _check_campaign_completion(db)
         _check_credit_exhaustion(db)
 
+        # Phase 4: Check for replies and bounces (throttled to every 5 min)
+        reply_result = _check_replies(db)
+        result["replies"] = reply_result.get("replies_found", 0)
+        result["bounces"] = reply_result.get("bounces_found", 0)
+
     finally:
         db.close()
 
     if any(v > 0 for v in result.values()):
-        logger.info("[CYCLE] enriched=%d generated=%d sent=%d failed=%d",
-                    result["enriched"], result["generated"], result["sent"], result["failed"])
+        logger.info("[CYCLE] enriched=%d generated=%d sent=%d failed=%d replies=%d bounces=%d",
+                    result["enriched"], result["generated"], result["sent"], result["failed"],
+                    result["replies"], result["bounces"])
 
     return result
 
