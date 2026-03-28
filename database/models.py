@@ -12,6 +12,7 @@ class User(Base):
     email = Column(Text, unique=True, index=True, nullable=False)
     name = Column(Text, nullable=False)
     image = Column(Text)
+    role = Column(String(50))
     email_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
@@ -47,6 +48,7 @@ class EmailAccount(Base):
     refresh_token = Column(Text)
     token_expiry = Column(DateTime)
     daily_send_limit = Column(Integer, default=10, nullable=False)
+    last_reply_check_at = Column(DateTime)             # Last time we polled inbox for replies
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="email_accounts")
@@ -59,6 +61,9 @@ class Candidate(Base):
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     resume_text = Column(Text)
     parsed_json = Column(JSONB)
+    resume_profile = Column(JSONB)  # pre-extracted intelligence for adaptive quiz
+    dream_companies = Column(JSONB)  # user-specified target companies from quiz
+    psychometric_profile = Column(JSONB)  # 4-dimension scoring + traits + confidence
     target_roles = Column(JSONB)
     target_industries = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -82,6 +87,7 @@ class Lead(Base):
     email = Column(String(255))
     company_size = Column(String(50))
     email_verified = Column(Boolean, default=False)
+    enrichment_fail_count = Column(Integer, default=0)
     status = Column(String(50), default="new")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -117,6 +123,8 @@ class Campaign(Base):
     body_template = Column(Text)
     daily_limit = Column(Integer, default=20)
     user_timezone = Column(String(50), default="Asia/Kolkata")
+    selected_styles = Column(JSONB)  # persist style choices for JIT email generation
+    generation_mode = Column(String(20), default="ai")  # 'ai' or 'template'
     paused_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -135,10 +143,17 @@ class EmailSent(Base):
     body = Column(Text)
     to_email = Column(String(255))
     assigned_style = Column(String(50))  # Email style: warm_intro, value_prop, company_curiosity, peer_to_peer, direct_ask
+    enrichment_status = Column(String(20), default="pending")  # pending, enriched, failed, skipped
     scheduled_at = Column(DateTime)  # When this email should be sent (timezone-aware scheduling)
     sent_at = Column(DateTime)
     status = Column(String(50), default="queued")
     error_message = Column(Text)
+    thread_id = Column(String(255))                    # Gmail threadId for reply matching
+    reply_text = Column(Text)                          # First reply body text
+    reply_received_at = Column(DateTime)               # When first reply was received
+    reply_sentiment = Column(String(20))               # positive, negative, neutral
+    bounce_reason = Column(Text)                       # Bounce reason if bounced
+    is_test = Column(Boolean, default=False)           # True for "Send Test Emails" feature
     created_at = Column(DateTime, default=datetime.utcnow)
 
     campaign = relationship("Campaign", back_populates="emails_sent")
@@ -148,7 +163,7 @@ class EmailSent(Base):
 class OutreachOrder(Base):
     """Tracks the full lifecycle of an outreach run.
 
-    State machine:
+    State machine (JIT enrichment — enrichment happens during campaign_running):
       CREATED → LEADS_GENERATING → LEADS_READY → CAMPAIGN_SETUP
       → EMAIL_CONNECTED → CAMPAIGN_RUNNING → COMPLETED
 
@@ -164,6 +179,11 @@ class OutreachOrder(Base):
     status = Column(String(50), default="created", nullable=False)
     leads_collected = Column(Integer, default=0)
     leads_target = Column(Integer, default=500)
+
+    # JIT credit tracking
+    credits_reserved = Column(Integer, default=0)   # total credits purchased for this order
+    credits_used = Column(Integer, default=0)        # credits consumed by successful enrichments
+    credits_refunded = Column(Integer, default=0)    # credits returned on cancel/failure
 
     # Logs — JSONB array of timestamped action entries
     action_log = Column(JSONB, default=list)
@@ -195,9 +215,13 @@ class PaymentOrder(Base):
     __tablename__ = "payment_orders"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String(20), default="razorpay", nullable=False)
     razorpay_order_id = Column(String(255), unique=True)
     razorpay_payment_id = Column(String(255))
     razorpay_signature = Column(String(512))
+    dodo_checkout_id = Column(String(255))
+    dodo_payment_id = Column(String(255))
+    geo_country = Column(String(5))
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)

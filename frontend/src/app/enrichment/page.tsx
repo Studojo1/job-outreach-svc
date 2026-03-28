@@ -60,6 +60,7 @@ export default function EnrichmentPage() {
 
   // Payment
   const [paying, setPaying] = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState('');
 
   // Enrichment
   const [enriching, setEnriching] = useState(false);
@@ -71,15 +72,12 @@ export default function EnrichmentPage() {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const locale = navigator.language || 'en-US';
-        const detectedCurrency = locale.toLowerCase().includes('in') ? 'INR' : 'USD';
-        setCurrency(detectedCurrency);
-
         const [pricingRes, creditsRes] = await Promise.all([
-          api.get(`/payment/pricing?currency=${detectedCurrency}`),
+          api.get('/payment/pricing'),
           api.get('/payment/credits'),
         ]);
         setPricing(pricingRes.data.tiers || []);
+        setCurrency(pricingRes.data.currency || 'USD');
         setCredits(creditsRes.data);
       } catch {
         // pricing fetch failed — fallback tiers will show
@@ -185,6 +183,9 @@ export default function EnrichmentPage() {
         coupon_code: couponResult?.valid ? couponCode.trim() : undefined,
       });
 
+      // DIAGNOSTIC — remove after debugging
+      alert('API response: ' + JSON.stringify(orderRes.data));
+
       // If fully discounted (100% coupon)
       if (orderRes.data.free) {
         setCredits((prev) => prev
@@ -196,11 +197,26 @@ export default function EnrichmentPage() {
         return;
       }
 
-      // Open Razorpay checkout
+      const provider = orderRes.data.provider || 'razorpay';
+      console.error('[PAYMENT] provider:', provider, 'checkout_url:', orderRes.data.checkout_url);
+
+      // ── External checkout (Dodo / any gateway with checkout_url) ──
+      if (orderRes.data.checkout_url) {
+        alert('Redirecting to: ' + orderRes.data.checkout_url);
+        console.error('[PAYMENT] Redirecting to:', orderRes.data.checkout_url);
+        localStorage.setItem('dodo_pending_tier', String(selectedTier));
+        setRedirectUrl(orderRes.data.checkout_url);
+        setPaying(false);
+        window.location.assign(orderRes.data.checkout_url);
+        return;
+      }
+
+      console.error('[PAYMENT] Razorpay path, key_id:', orderRes.data.key_id);
+      // ── Razorpay (India) — modal checkout ──
       const options = {
         key: orderRes.data.key_id,
         amount: orderRes.data.amount,
-        currency: orderRes.data.currency,
+        currency: orderRes.data.currency || 'INR',
         name: 'OpportunityApply',
         description: `${selectedTier} Email Enrichment Credits`,
         order_id: orderRes.data.order_id,
@@ -238,7 +254,9 @@ export default function EnrichmentPage() {
       });
       rzp.open();
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to create payment order');
+      alert('CATCH: ' + (err.response?.data?.detail || err.message || String(err)));
+      console.error('[PAYMENT] Error:', err);
+      setError(err.response?.data?.detail || err.message || 'Failed to create payment order');
       setPaying(false);
     }
   };
@@ -282,7 +300,15 @@ export default function EnrichmentPage() {
           </div>
         )}
 
-        {result ? (
+        {redirectUrl ? (
+          <div className="rounded-2xl border-2 border-ink bg-brand-purple-bg shadow-brutal p-8 text-center">
+            <Spinner />
+            <p className="text-base font-bold font-satoshi mt-4">Redirecting to payment...</p>
+            <a href={redirectUrl} className="text-sm text-primary underline font-satoshi mt-2 block">
+              Click here if not redirected automatically
+            </a>
+          </div>
+        ) : result ? (
           <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center animate-fade-in">
             <div className="w-12 h-12 rounded-full bg-studojo-green-bg border-2 border-ink flex items-center justify-center mx-auto mb-6">
               <CheckCircle className="w-6 h-6 text-secondary" />

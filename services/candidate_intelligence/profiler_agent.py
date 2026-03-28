@@ -229,12 +229,25 @@ def _parse_llm_json(raw_text: str, chat_history: list[ChatMessage]) -> AgentResp
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError:
-        # Try to extract JSON from markdown code blocks
         import re
+        data = None
+        # Attempt 1: JSON in markdown code block
         match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_text, re.DOTALL)
         if match:
-            data = json.loads(match.group(1))
-        else:
+            try:
+                data = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Attempt 2: bare JSON object anywhere in the text (model prepended/appended prose)
+        if data is None:
+            start = raw_text.find('{')
+            end = raw_text.rfind('}')
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(raw_text[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+        if data is None:
             logger.error(f"[QUIZ] Could not parse LLM response as JSON: {raw_text[:300]}")
             return AgentResponse(
                 message="Could you repeat that? I had trouble processing.",
@@ -511,3 +524,156 @@ def generate_final_payload(
     except Exception as e:
         logger.error(f"Payload generation error: {e}")
         raise
+
+
+# ============================================================================
+# Fast Streaming Mode — compact context, 2 LLM questions (Q6 + Q7)
+# ============================================================================
+
+SYSTEM_PROMPT_FAST = """You are StudojoProfiler. Ask the candidate exactly 2 more questions to complete their profile.
+
+QUESTION 6: Ask ONE open text question about what kind of work gets them excited day-to-day.
+  Set: current_state=TEXT, text_input=true, mcq=null, questions_asked_so_far=6
+
+QUESTION 7 (after Q6 answer arrives): Ask ONE MCQ about industries or skill areas they want.
+  Generate 7-8 options tailored to their background. Set allow_multiple=true, questions_asked_so_far=7
+
+AFTER Q7 ANSWER: Set is_complete=true, message="Perfect, that's everything I need. Generating your profile now..."
+
+FORMAT RULES:
+- Output ONLY valid JSON. Nothing before or after the JSON object.
+- The "message" field MUST be the first field in the JSON.
+- Message value format: "warm 1-sentence ack|||question text"
+- MCQ options: always end with "Other"
+
+EXAMPLE (Q6 output):
+{"message":"Got it!|||What kind of work gets you most excited day-to-day? For example: closing a deal, shipping a product feature, cracking a data problem, or something else entirely?","current_state":"TEXT","mcq":null,"text_input":true,"is_complete":false,"questions_asked_so_far":6}
+"""
+
+
+def _detect_career_domain(skills: list) -> str:
+    """Simple keyword matching to detect career domain from skills list."""
+    skill_text = " ".join(str(s).lower() for s in skills)
+    domains = {
+        "tech/engineering": ["python", "javascript", "java", "react", "node", "aws", "sql", "backend", "frontend", "devops", "docker", "typescript", "golang", "c++", "kotlin", "swift"],
+        "data/analytics": ["machine learning", "data science", "pandas", "tensorflow", "analytics", "tableau", "statistics", "r programming", "power bi", "excel", "numpy"],
+        "marketing/growth": ["seo", "sem", "content marketing", "social media", "google analytics", "hubspot", "email marketing", "copywriting", "brand", "growth hacking", "ads"],
+        "finance/consulting": ["financial modeling", "accounting", "cfa", "equity", "valuation", "financial analysis", "consulting", "excel", "bloomberg", "investment"],
+        "design/ux": ["figma", "ui/ux", "adobe", "user research", "wireframe", "sketch", "illustrator", "photoshop", "prototyping"],
+        "product": ["product management", "agile", "scrum", "roadmap", "user stories", "jira", "product strategy", "okrs"],
+        "sales/bd": ["crm", "salesforce", "b2b", "lead generation", "account management", "business development", "cold outreach"],
+    }
+    best, best_score = "general", 0
+    for domain, keywords in domains.items():
+        score = sum(1 for kw in keywords if kw in skill_text)
+        if score > best_score:
+            best, best_score = domain, score
+    return best
+
+
+def build_messages_fast(
+    chat_history: list[ChatMessage],
+    resume_summary: dict | None = None,
+    llm_phase_start: int = 5,
+) -> list[dict]:
+    """Compact message builder — small context window for fast LLM inference."""
+    system = SYSTEM_PROMPT_FAST
+
+    # Compact resume profile (~250 chars max)
+    if resume_summary and isinstance(resume_summary, dict):
+        parts = []
+        if resume_summary.get("name"):
+            parts.append(f"Name: {resume_summary['name']}")
+        skills = resume_summary.get("skills", [])
+        if skills:
+            parts.append(f"Skills: {', '.join(str(s) for s in skills[:10])}")
+            domain = _detect_career_domain(skills)
+            parts.append(f"Domain: {domain}")
+        exp = resume_summary.get("experience_years")
+        if exp is not None:
+            parts.append(f"Exp: {exp}y")
+        edu = resume_summary.get("education", [])
+        if edu:
+            edu_str = str(edu[0])[:50] if isinstance(edu, list) and edu else str(edu)[:50]
+            parts.append(f"Education: {edu_str}")
+        if parts:
+            system += f"\n\nCANDIDATE PROFILE: {' | '.join(parts)}"
+
+    # Compact summary of static question answers
+    # Labels aligned with _STATIC_QUESTIONS: stage, job_type, location, company_stage, career_goal
+    user_msgs = [m for m in chat_history if m.role == "user" and m.content not in ("__start__",)]
+    labels = ["Career stage", "Job type", "Location", "Company preference", "Career goal"]
+    prior = [f"{labels[i]}: {user_msgs[i].content[:100]}" for i in range(min(llm_phase_start, len(user_msgs)))]
+    if prior:
+        system += "\n\nPREVIOUS ANSWERS:\n" + "\n".join(prior)
+
+    messages = [{"role": "system", "content": system}]
+
+    # Include only LLM-phase turns (everything after the static Q&A block)
+    static_qa_count = llm_phase_start * 2
+    llm_turns = chat_history[static_qa_count:] if len(chat_history) > static_qa_count else []
+    recent = llm_turns[-4:] if len(llm_turns) > 4 else llm_turns
+
+    if recent:
+        for msg in recent:
+            messages.append({"role": msg.role, "content": msg.content})
+    else:
+        messages.append({"role": "user", "content": "Please ask the next profiling question."})
+
+    return messages
+
+
+def stream_agent_response(
+    chat_history: list[ChatMessage],
+    resume_summary: dict | None = None,
+    llm_phase_start: int = 5,
+):
+    """
+    Stream the final 2 LLM profiling questions with reduced context.
+    Yields: ('chunk', str) for text tokens | ('done', AgentResponse) | ('error', str)
+    """
+    t_start = time.perf_counter()
+    client = _get_client()
+    model = _get_model()
+    messages = build_messages_fast(chat_history, resume_summary, llm_phase_start=llm_phase_start)
+
+    accumulated = ""
+    try:
+        # Do NOT use response_format=json_object with stream=True — some Azure deployments
+        # buffer the entire response before streaming, producing empty chunk content.
+        # The prompt already instructs JSON-only output; _parse_llm_json handles cleanup.
+        stream = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=600,
+            stream=True,
+        )
+
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                delta = chunk.choices[0].delta.content
+                accumulated += delta
+                yield "chunk", delta
+
+        t_llm = time.perf_counter()
+        logger.info(f"[STREAM] LLM done: {(t_llm - t_start)*1000:.0f}ms, {len(accumulated)} chars")
+
+        if not accumulated.strip():
+            logger.error("[STREAM] Empty response from LLM — yielding error")
+            yield "error", "Empty response from model"
+            return
+
+        response = _parse_llm_json(accumulated, chat_history)
+
+        # Guard: don't allow completion before enough answers
+        user_answer_count = len([m for m in chat_history if m.role == "user" and m.content not in ("__start__",)])
+        min_answers = llm_phase_start + 2
+        if response.is_complete and user_answer_count < min_answers:
+            logger.warning(f"[STREAM] Premature completion at {user_answer_count} (need {min_answers}) — forcing continuation")
+            response.is_complete = False
+
+        yield "done", response
+
+    except Exception as e:
+        logger.error(f"[STREAM] Error: {e}", exc_info=True)
+        yield "error", str(e)

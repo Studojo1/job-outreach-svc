@@ -78,6 +78,9 @@ jobs:
           kubectl set image deployment/${{ env.SERVICE_NAME }} \
             ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
+          kubectl set env deployment/${{ env.SERVICE_NAME }} \
+            AZURE_OPENAI_LLM_DEPLOYMENT=gpt-4o \
+            -n ${{ env.NAMESPACE }}
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."

@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import time
+from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from database.session import get_db
 from database.models import User, Campaign
@@ -21,6 +23,16 @@ from api.dependencies import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/campaign", tags=["Campaign"])
+
+
+class TestEmailRecipient(BaseModel):
+    first_name: str
+    company: str
+    email: str
+
+
+class SendTestEmailsRequest(BaseModel):
+    recipients: List[TestEmailRecipient]
 
 # Pre-built email templates (legacy fallback for non-AI mode)
 # When AI styles are selected, the structured pipeline in email_generator_service.py
@@ -68,6 +80,7 @@ class CampaignCreateRequest(BaseModel):
     body_template: str = ""
     selected_styles: list[str] = []  # Email styles for AI generation
     user_timezone: str = "Asia/Kolkata"
+    lead_limit: Optional[int] = None  # Max leads to include (defaults to all)
 
 
 class CampaignTransitionRequest(BaseModel):
@@ -106,18 +119,21 @@ async def validate_campaign_readiness(
     if not account.access_token:
         return {"valid": False, "reason": "Gmail access token missing. Please reconnect your Gmail."}
 
-    # Check enriched leads with verified emails
+    # Check that leads exist (JIT: enrichment happens later, so just check any leads exist)
+    lead_count = db.query(Lead).filter(Lead.candidate_id == candidate_id).count()
+
+    if lead_count == 0:
+        return {"valid": False, "reason": "No leads found. Run lead discovery first."}
+
     enriched_count = db.query(Lead).filter(
         Lead.candidate_id == candidate_id,
         Lead.email.isnot(None),
         Lead.email_verified == True,
     ).count()
 
-    if enriched_count == 0:
-        return {"valid": False, "reason": "No leads with verified emails found. Run lead discovery first."}
-
     return {
         "valid": True,
+        "total_leads": lead_count,
         "enriched_leads": enriched_count,
         "email_account": account.email_address,
     }
@@ -145,6 +161,7 @@ async def api_create_campaign(
                 candidate_id=request.candidate_id,
                 selected_styles=request.selected_styles,
                 user_timezone=request.user_timezone,
+                lead_limit=request.lead_limit,
             )
         else:
             # Fall back to template mode
@@ -234,8 +251,12 @@ async def preview_email(
 
     try:
         style = assign_style(sample_lead, request.selected_styles)
-        # Run blocking AI call in thread pool to keep event loop responsive for health checks
-        subject, body = await asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style)
+        # Hard 12s timeout — prevents the 30s frontend timeout being hit 3x (= 90s hang).
+        # If Azure OpenAI is slow, we fail fast with a clear message.
+        subject, body = await asyncio.wait_for(
+            asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style),
+            timeout=12.0,
+        )
         return {
             "subject": subject,
             "body": body,
@@ -243,6 +264,11 @@ async def preview_email(
             "company": sample_lead.company,
             "style": style,
         }
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Preview generation timed out. Your campaign will still work — emails are generated fresh per lead just before sending.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
@@ -625,7 +651,7 @@ async def get_campaign_emails(
     emails = (
         db.query(EmailSent)
         .filter(EmailSent.campaign_id == campaign_id)
-        .order_by(EmailSent.created_at.asc())
+        .order_by(func.coalesce(EmailSent.scheduled_at, EmailSent.created_at).asc())
         .all()
     )
 
@@ -639,13 +665,173 @@ async def get_campaign_emails(
             "lead_title": lead.title if lead else "",
             "to_email": email.to_email,
             "subject": email.subject,
+            "body": email.body,
             "status": email.status,
+            "enrichment_status": email.enrichment_status,
             "assigned_style": email.assigned_style,
             "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
             "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+            "reply_text": email.reply_text,
+            "reply_sentiment": email.reply_sentiment,
+            "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
+            "bounce_reason": email.bounce_reason,
+            "is_test": email.is_test or False,
         })
 
     return {"emails": result}
+
+
+# ── Send Test Emails ─────────────────────────────────────────────────────────
+
+@router.post("/{campaign_id}/send-test-emails")
+async def send_test_emails(
+    campaign_id: int,
+    payload: SendTestEmailsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Insert test email rows into a campaign's lead list.
+
+    Creates EmailSent rows with is_test=True, scheduled_at=2 minutes from now,
+    and status='queued'. The normal campaign worker picks these up and sends them
+    through the exact same pipeline as real campaign emails.
+
+    This is a permanent feature — lets the user test reply detection, sentiment
+    classification, and the full send pipeline using their own email addresses.
+    """
+    from database.models import EmailSent, Candidate
+    from datetime import timedelta
+
+    # Verify campaign exists and user owns it
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if campaign.status not in ("running", "completed", "paused"):
+        raise HTTPException(status_code=400, detail="Campaign must be running, paused, or completed to send test emails")
+
+    if not payload.recipients or len(payload.recipients) > 10:
+        raise HTTPException(status_code=400, detail="Provide 1-10 test recipients")
+
+    # Schedule 2 minutes from now so the worker picks it up immediately
+    send_at = datetime.utcnow() + timedelta(minutes=2)
+
+    # Extract candidate name from parsed resume JSON (Candidate model has no `name` field)
+    candidate_name = ""
+    if candidate.parsed_json and isinstance(candidate.parsed_json, dict):
+        candidate_name = candidate.parsed_json.get("personal_info", {}).get("name", "")
+
+    created_emails = []
+    for recipient in payload.recipients:
+        style = (campaign.selected_styles[0] if campaign.selected_styles else "warm_intro")
+        email_row = EmailSent(
+            campaign_id=campaign_id,
+            lead_id=None,
+            to_email=recipient.email,
+            subject=f"[Test] Outreach from {candidate_name or 'your campaign'}",
+            body=(
+                f"Hi {recipient.first_name},\n\n"
+                f"This is a test email from your outreach campaign.\n\n"
+                f"If you received this, the campaign pipeline is working correctly. "
+                f"Reply to this email with any message to test reply detection and sentiment analysis.\n\n"
+                f"Best regards"
+            ),
+            status="queued",
+            enrichment_status="skipped",
+            assigned_style=style,
+            scheduled_at=send_at,
+            is_test=True,
+        )
+        db.add(email_row)
+        db.flush()
+        created_emails.append({
+            "id": email_row.id,
+            "to_email": recipient.email,
+            "first_name": recipient.first_name,
+            "company": recipient.company,
+            "scheduled_at": send_at.isoformat(),
+            "status": "queued",
+        })
+
+    db.commit()
+    logger.info("[TEST_EMAILS] Created %d test emails for campaign %d", len(created_emails), campaign_id)
+
+    return {
+        "message": f"{len(created_emails)} test email(s) scheduled — sending in ~2 minutes",
+        "emails": created_emails,
+    }
+
+
+# ── Cancel Campaign (with credit refund) ───────────────────────────────────
+
+@router.post("/{campaign_id}/cancel")
+async def cancel_campaign(
+    campaign_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel a running campaign and refund credits for un-enriched leads."""
+    from database.models import EmailSent, OutreachOrder, Candidate
+    from sqlalchemy import func
+    from api.routes_payment import refund_credits
+
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Verify ownership
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if campaign.status not in ("draft", "running", "paused"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel campaign in '{campaign.status}' status")
+
+    # Count un-enriched emails (these never consumed Apollo credits)
+    pending_count = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.enrichment_status == "pending",
+    ).scalar() or 0
+
+    # Mark pending emails as skipped
+    db.query(EmailSent).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.status.in_(["pending_enrichment", "queued"]),
+    ).update({
+        EmailSent.status: "failed",
+        EmailSent.error_message: "Campaign cancelled",
+    }, synchronize_session="fetch")
+
+    campaign.status = "completed"
+
+    # Refund credits for un-enriched leads
+    if pending_count > 0:
+        refund_credits(db, current_user.id, pending_count)
+
+    # Update outreach order
+    order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+    if order:
+        order.status = "completed"
+        order.credits_refunded = (order.credits_refunded or 0) + pending_count
+        from datetime import datetime
+        log = list(order.action_log or [])
+        log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Campaign cancelled, {pending_count} credits refunded"})
+        order.action_log = log
+        order.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    logger.info("[CAMPAIGN] Campaign %d cancelled by user %s, refunded %d credits",
+                campaign_id, current_user.id, pending_count)
+
+    return {
+        "status": "cancelled",
+        "credits_refunded": pending_count,
+    }
 
 
 # ── Internal Worker Endpoints (no auth — cluster-only) ─────────────────────
@@ -654,14 +840,14 @@ async def get_campaign_emails(
 async def worker_send_ready():
     """Internal endpoint called by job-outreach-worker goroutine every 30s.
 
-    Processes all scheduled emails that are ready to send. No auth required
-    because this is only accessible within the k8s cluster.
+    Runs the 3-phase JIT cycle: enrich upcoming → generate content → send ready.
+    No auth required because this is only accessible within the k8s cluster.
     """
-    from services.email_campaign.campaign_worker import _process_ready_emails
+    from services.email_campaign.campaign_worker import _process_cycle
 
     try:
-        sent, failed = _process_ready_emails()
-        return {"sent": sent, "failed": failed}
+        result = _process_cycle()
+        return result
     except Exception as e:
         logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

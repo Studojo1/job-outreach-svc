@@ -34,6 +34,13 @@ def get_tier_pricing(tier: int, test_mode: bool = False) -> TierPricing:
     return pricing
 
 
+def get_dodo_product_id(settings) -> str:
+    """Return the single Dodo product ID (pay_what_you_want, amount set at checkout)."""
+    if not settings.DODO_PRODUCT_OUTREACH:
+        raise ValueError("DODO_PRODUCT_OUTREACH not configured")
+    return settings.DODO_PRODUCT_OUTREACH
+
+
 def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -> int:
     """Apply coupon discount. Returns final amount in cents/paise (minimum 0)."""
     if discount_type == "percent":

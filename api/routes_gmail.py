@@ -3,6 +3,7 @@
 import logging
 from urllib.parse import quote
 
+import requests as http_requests
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -103,7 +104,7 @@ async def get_gmail_account(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the current user's connected Gmail account ID and email."""
+    """Return the current user's connected Gmail account ID, email, and token health."""
     account = db.query(EmailAccount).filter_by(
         user_id=str(current_user.id), provider="gmail"
     ).first()
@@ -111,7 +112,25 @@ async def get_gmail_account(
     if not account:
         raise HTTPException(status_code=404, detail="No Gmail account connected")
 
+    # Verify the refresh token is still valid
+    token_valid = False
+    try:
+        resp = http_requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": settings.GMAIL_CLIENT_ID,
+                "client_secret": settings.GMAIL_CLIENT_SECRET,
+                "refresh_token": account.refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=5,
+        )
+        token_valid = resp.status_code == 200
+    except Exception:
+        logger.warning("[GmailOAuth] Token validation request failed for account %s", account.id)
+
     return {
         "email_account_id": account.id,
         "email_address": account.email_address,
+        "token_valid": token_valid,
     }

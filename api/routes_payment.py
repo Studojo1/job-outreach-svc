@@ -1,7 +1,8 @@
-"""Payment Routes — Razorpay order creation, verification, webhooks, and credits."""
+"""Payment Routes — Razorpay + Dodo Payments with geo-based routing."""
 
 import hashlib
 import hmac
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -14,8 +15,10 @@ from typing import Optional
 from database.session import get_db
 from database.models import User, Coupon, PaymentOrder, UserCredit
 from core.config import settings
-from core.pricing import get_tier_pricing, apply_coupon, TIERS, TEST_TIERS
+from core.pricing import get_tier_pricing, get_dodo_product_id, apply_coupon, TIERS, TEST_TIERS
+from core.geo import detect_country, is_india
 from api.dependencies import get_current_user
+import services.dodo_payments as dodo_svc
 
 logger = logging.getLogger(__name__)
 
@@ -30,22 +33,24 @@ def _get_razorpay_client():
 # ── Pricing Info ──────────────────────────────────────────────────────────────
 
 @router.get("/pricing")
-async def get_pricing(currency: str = "USD"):
-    """Return tier pricing for the given currency."""
+async def get_pricing(req: Request):
+    """Return tier pricing — currency auto-detected from geo (India → INR, else USD)."""
+    currency = "INR" if is_india(req) else "USD"
+
     source = TEST_TIERS if settings.RAZORPAY_TEST_MODE else TIERS
     result = []
     for tier_val, tp in source.items():
         if tier_val == 5:
             continue  # free test tier not shown in pricing
-        amount = tp.price_inr if currency.upper() == "INR" else tp.price_usd
+        amount = tp.price_inr if currency == "INR" else tp.price_usd
         result.append({
             "tier": tp.tier,
             "label": tp.label,
             "amount_cents": amount,
-            "currency": currency.upper(),
-            "display_price": f"{'₹' if currency.upper() == 'INR' else '$'}{amount / 100:.0f}",
+            "currency": currency,
+            "display_price": f"{'₹' if currency == 'INR' else '$'}{amount / 100:.0f}",
         })
-    return {"tiers": result, "test_mode": settings.RAZORPAY_TEST_MODE}
+    return {"tiers": result, "test_mode": settings.RAZORPAY_TEST_MODE, "currency": currency}
 
 
 # ── Coupon Validation ─────────────────────────────────────────────────────────
@@ -95,7 +100,7 @@ async def validate_coupon(
     }
 
 
-# ── Create Razorpay Order ────────────────────────────────────────────────────
+# ── Create Payment Order (geo-routed) ────────────────────────────────────────
 
 class CreateOrderRequest(BaseModel):
     tier: int
@@ -105,23 +110,33 @@ class CreateOrderRequest(BaseModel):
 
 @router.post("/create-order")
 async def create_order(
-    request: CreateOrderRequest,
+    body: CreateOrderRequest,
+    req: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create a Razorpay order for the selected tier."""
-    if request.tier == 5:
+    """Create a payment order — routes to Razorpay (India) or Dodo (international)."""
+    if body.tier == 5:
         raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
 
-    pricing = get_tier_pricing(request.tier, settings.RAZORPAY_TEST_MODE)
-    currency = request.currency.upper()
-    amount = pricing.price_inr if currency == "INR" else pricing.price_usd
+    # Detect geo for gateway routing
+    country = detect_country(req)
+    use_razorpay = is_india(req)
+
+    # Determine currency and amount based on gateway
+    pricing = get_tier_pricing(body.tier, settings.RAZORPAY_TEST_MODE)
+    if use_razorpay:
+        currency = "INR"
+        amount = pricing.price_inr
+    else:
+        currency = "USD"
+        amount = pricing.price_usd
 
     # Apply coupon if provided
     coupon_id = None
-    if request.coupon_code:
+    if body.coupon_code:
         coupon = db.query(Coupon).filter(
-            Coupon.code == request.coupon_code.strip().upper(),
+            Coupon.code == body.coupon_code.strip().upper(),
             Coupon.is_active == True,
         ).first()
         if coupon:
@@ -140,25 +155,83 @@ async def create_order(
         idem_key = str(uuid.uuid4())
         order = PaymentOrder(
             user_id=current_user.id,
+            provider="coupon",
             amount_cents=0,
             currency=currency,
-            tier=request.tier,
+            tier=body.tier,
             coupon_id=coupon_id,
+            geo_country=country,
             status="paid",
-            credits_granted=request.tier,
+            credits_granted=body.tier,
             idempotency_key=idem_key,
         )
         db.add(order)
-        _grant_credits(db, current_user.id, request.tier)
+        _grant_credits(db, current_user.id, body.tier)
         if coupon_id:
             db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
         db.commit()
-        logger.info("[PAYMENT] Free order (100%% coupon) for user %s, tier %d", current_user.id, request.tier)
-        return {"free": True, "credits_granted": request.tier}
+        logger.info("[PAYMENT] Free order (100%% coupon) for user %s, tier %d", current_user.id, body.tier)
+        return {"free": True, "credits_granted": body.tier}
 
-    # Create Razorpay order
-    client = _get_razorpay_client()
     idem_key = str(uuid.uuid4())
+
+    # ── Dodo Payments (international) ──────────────────────────────────────
+    if not use_razorpay:
+        try:
+            product_id = get_dodo_product_id(settings)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Redirect back to enrichment page with dodo_return flag.
+        # The enrichment page handles verification inline (like Razorpay modal).
+        return_url = f"{settings.FRONTEND_URL}/enrichment?dodo_return=1"
+
+        try:
+            dodo_result = await dodo_svc.create_checkout(
+                product_id=product_id,
+                customer_email=current_user.email,
+                customer_name=current_user.name or "Customer",
+                return_url=return_url,
+                amount_cents=amount,
+                metadata={
+                    "user_id": str(current_user.id),
+                    "tier": str(body.tier),
+                    "coupon_id": str(coupon_id) if coupon_id else "",
+                    "idempotency_key": idem_key,
+                },
+            )
+        except Exception as e:
+            logger.error("[PAYMENT] Dodo checkout creation failed: %s", e)
+            raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
+
+        order = PaymentOrder(
+            user_id=current_user.id,
+            provider="dodo",
+            dodo_checkout_id=dodo_result["session_id"],
+            amount_cents=amount,
+            currency=currency,
+            tier=body.tier,
+            coupon_id=coupon_id,
+            geo_country=country,
+            status="created",
+            idempotency_key=idem_key,
+        )
+        db.add(order)
+        db.commit()
+
+        logger.info("[PAYMENT] Dodo order created: %s for user %s, tier %d, amount %d %s",
+                    dodo_result["session_id"], current_user.id, body.tier, amount, currency)
+
+        return {
+            "provider": "dodo",
+            "checkout_url": dodo_result["checkout_url"],
+            "session_id": dodo_result["session_id"],
+            "tier": body.tier,
+            "dodo_test_mode": settings.DODO_TEST_MODE,
+        }
+
+    # ── Razorpay (India) ──────────────────────────────────────────────────
+    client = _get_razorpay_client()
 
     try:
         rz_order = client.order.create({
@@ -167,7 +240,7 @@ async def create_order(
             "receipt": f"order_{idem_key[:8]}",
             "notes": {
                 "user_id": str(current_user.id),
-                "tier": str(request.tier),
+                "tier": str(body.tier),
                 "coupon_id": str(coupon_id) if coupon_id else "",
             },
         })
@@ -175,33 +248,35 @@ async def create_order(
         logger.error("[PAYMENT] Razorpay order creation failed: %s", e)
         raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
 
-    # Store order in DB
     order = PaymentOrder(
         user_id=current_user.id,
+        provider="razorpay",
         razorpay_order_id=rz_order["id"],
         amount_cents=amount,
         currency=currency,
-        tier=request.tier,
+        tier=body.tier,
         coupon_id=coupon_id,
+        geo_country=country,
         status="created",
         idempotency_key=idem_key,
     )
     db.add(order)
     db.commit()
 
-    logger.info("[PAYMENT] Order created: %s for user %s, tier %d, amount %d %s",
-                rz_order["id"], current_user.id, request.tier, amount, currency)
+    logger.info("[PAYMENT] Razorpay order created: %s for user %s, tier %d, amount %d %s",
+                rz_order["id"], current_user.id, body.tier, amount, currency)
 
     return {
+        "provider": "razorpay",
         "order_id": rz_order["id"],
         "amount": amount,
         "currency": currency,
         "key_id": settings.RAZORPAY_KEY_ID,
-        "tier": request.tier,
+        "tier": body.tier,
     }
 
 
-# ── Verify Payment ───────────────────────────────────────────────────────────
+# ── Verify Razorpay Payment ─────────────────────────────────────────────────
 
 class VerifyPaymentRequest(BaseModel):
     razorpay_order_id: str
@@ -261,7 +336,138 @@ async def verify_payment(
     return {"status": "verified", "credits": order.credits_granted}
 
 
-# ── Webhook (server-to-server from Razorpay) ─────────────────────────────────
+# ── Verify Dodo Payment (frontend polls after redirect) ──────────────────────
+
+class VerifyDodoRequest(BaseModel):
+    session_id: str
+
+
+@router.post("/verify-dodo")
+async def verify_dodo_payment(
+    request: VerifyDodoRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Check if a Dodo payment has been confirmed. Actively checks Dodo API if still pending."""
+    order = db.query(PaymentOrder).filter_by(
+        dodo_checkout_id=request.session_id,
+        user_id=current_user.id,
+    ).first()
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status == "paid":
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
+
+    if order.status == "failed":
+        return {"status": "failed"}
+
+    # Order still pending — actively check Dodo API instead of waiting for webhook
+    dodo_status = await dodo_svc.get_checkout_status(request.session_id)
+    logger.info("[PAYMENT] Dodo checkout %s status from API: %s", request.session_id, dodo_status)
+
+    if dodo_status["status"] in ("succeeded", "paid", "complete", "completed"):
+        # Payment confirmed — grant credits
+        order.dodo_payment_id = dodo_status.get("payment_id", "")
+        order.status = "paid"
+        order.credits_granted = order.tier
+        order.updated_at = datetime.utcnow()
+        _grant_credits(db, order.user_id, order.tier)
+
+        if order.coupon_id:
+            db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+
+        db.commit()
+        logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, granted %d credits",
+                    request.session_id, order.tier)
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
+
+    if dodo_status["status"] in ("failed", "expired", "cancelled"):
+        order.status = "failed"
+        order.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "failed"}
+
+    return {"status": "pending"}
+
+
+# ── Dodo Webhook (server-to-server) ──────────────────────────────────────────
+
+@router.post("/webhook/dodo")
+async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
+    """Dodo Payments webhook handler. Verifies Standard Webhooks signature."""
+    body = await request.body()
+
+    # Verify Standard Webhooks signature if secret is configured
+    if settings.DODO_WEBHOOK_SECRET:
+        try:
+            from standardwebhooks.webhooks import Webhook
+            wh = Webhook(settings.DODO_WEBHOOK_SECRET)
+            wh.verify(
+                body.decode(),
+                {
+                    "webhook-id": request.headers.get("webhook-id", ""),
+                    "webhook-timestamp": request.headers.get("webhook-timestamp", ""),
+                    "webhook-signature": request.headers.get("webhook-signature", ""),
+                },
+            )
+        except Exception as e:
+            logger.error("[DODO_WEBHOOK] Signature verification failed: %s", e)
+            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+
+    payload = json.loads(body)
+    event_type = payload.get("event_type") or payload.get("type", "")
+    data = payload.get("data", {})
+
+    logger.info("[DODO_WEBHOOK] Received event: %s", event_type)
+
+    if event_type == "payment.succeeded":
+        checkout_id = data.get("checkout_id") or data.get("metadata", {}).get("checkout_session_id", "")
+        payment_id = data.get("payment_id", "")
+
+        if not checkout_id:
+            logger.warning("[DODO_WEBHOOK] payment.succeeded without checkout_id: %s", payload)
+            return {"status": "ok"}
+
+        order = db.query(PaymentOrder).filter_by(dodo_checkout_id=checkout_id).first()
+        if not order:
+            logger.warning("[DODO_WEBHOOK] No order found for checkout %s", checkout_id)
+            return {"status": "ok"}
+
+        # Idempotent — skip if already paid
+        if order.status == "paid":
+            logger.info("[DODO_WEBHOOK] Order already paid: %s", checkout_id)
+            return {"status": "ok"}
+
+        order.dodo_payment_id = payment_id
+        order.status = "paid"
+        order.credits_granted = order.tier
+        order.updated_at = datetime.utcnow()
+
+        _grant_credits(db, order.user_id, order.tier)
+
+        if order.coupon_id:
+            db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+
+        db.commit()
+        logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, granted %d credits to user %s",
+                    checkout_id, order.tier, order.user_id)
+
+    elif event_type == "payment.failed":
+        checkout_id = data.get("checkout_id", "")
+        if checkout_id:
+            order = db.query(PaymentOrder).filter_by(dodo_checkout_id=checkout_id).first()
+            if order and order.status == "created":
+                order.status = "failed"
+                order.updated_at = datetime.utcnow()
+                db.commit()
+                logger.warning("[DODO_WEBHOOK] Payment failed: %s", checkout_id)
+
+    return {"status": "ok"}
+
+
+# ── Razorpay Webhook (server-to-server) ──────────────────────────────────────
 
 @router.post("/webhook")
 async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
@@ -280,7 +486,6 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             logger.error("[PAYMENT_WEBHOOK] Signature mismatch")
             raise HTTPException(status_code=400, detail="Invalid signature")
 
-    import json
     payload = json.loads(body)
     event = payload.get("event", "")
 

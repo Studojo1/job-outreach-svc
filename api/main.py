@@ -11,6 +11,7 @@ from api.routes_auth import router as auth_router
 from api.routes_gmail import router as gmail_router
 from api.routes_orders import router as orders_router
 from api.routes_payment import router as payment_router
+from api.routes_admin import router as admin_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -45,6 +46,8 @@ app.add_middleware(
         "https://api.studojo.com",
         "https://studojo.pro",
         "https://api.studojo.pro",
+        "https://admin.studojo.com",
+        "https://admin.studojo.pro",
         "http://localhost:3000",
         "http://localhost:3001",
     ],
@@ -63,6 +66,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(gmail_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(payment_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

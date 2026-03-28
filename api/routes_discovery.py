@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from database.session import get_db
 from database.models import User, Candidate, Lead, LeadScore
-from services.lead_discovery.lead_collector_service import collect_leads
+from services.lead_discovery.lead_collector_service import collect_leads, collect_dream_company_leads
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.candidate_schema import CandidateProfile
 from api.dependencies import get_current_user
@@ -100,6 +100,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         candidate_profile=candidate_profile,
         role_intelligence=role_intelligence,
         target_count=len(lead_dicts),
+        dream_companies=candidate.dream_companies or [],
     )
 
     # Store scores in DB using actual component scores from the scorer
@@ -209,6 +210,23 @@ async def search_leads(
 
         t_collect = time.perf_counter()
         logger.info(f"[LeadSearch] Lead collection complete: {count} leads in {(t_collect - t_start)*1000:.0f}ms")
+
+        # Secondary pass: dream company leads
+        dream_companies = candidate.dream_companies or []
+        dream_count = 0
+        if dream_companies:
+            try:
+                dream_count = await asyncio.to_thread(
+                    collect_dream_company_leads,
+                    base_filters=filters,
+                    dream_companies=dream_companies,
+                    candidate_id=candidate.id,
+                    db=db,
+                )
+                count += dream_count
+                logger.info(f"[LeadSearch] Dream company leads: {dream_count} additional")
+            except Exception as dream_err:
+                logger.error(f"[LeadSearch] Dream company search failed (non-fatal): {dream_err}", exc_info=True)
 
         # Score all newly collected leads
         scored_count = 0

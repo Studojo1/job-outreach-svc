@@ -1,12 +1,14 @@
 """Candidate Routes — Resume upload, profiling chat, and profile retrieval."""
 
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import json as _json
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
-from database.session import get_db
+from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
 from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
@@ -25,6 +27,7 @@ class ChatRequest(BaseModel):
 
 @router.post("/upload")
 async def upload_resume(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -42,6 +45,14 @@ async def upload_resume(
         db.add(new_candidate)
         db.commit()
         db.refresh(new_candidate)
+
+        # Extract resume intelligence in background — powers adaptive Q6 options
+        from services.candidate_intelligence.resume_intelligence import extract_and_store_resume_profile
+        background_tasks.add_task(
+            extract_and_store_resume_profile,
+            candidate_id=new_candidate.id,
+            db_session_factory=SessionLocal,
+        )
 
         return {
             "status": "success",
@@ -108,69 +119,374 @@ async def candidate_chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{candidate_id}/generate-payload")
-async def generate_payload(
+@router.post("/{candidate_id}/chat/v2")
+async def candidate_chat_fast(
     candidate_id: int,
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate the final candidate profile payload after chat completion."""
+    """Fast profiling chat using pre-defined static questions — zero LLM calls per turn."""
     t_start = time.perf_counter()
-    logger.info(f"[PAYLOAD] POST /candidate/{candidate_id}/generate-payload")
+    logger.info(f"[CHAT-V2] POST /candidate/{candidate_id}/chat/v2 — message='{request.message[:50]}'")
 
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     try:
-        from services.candidate_intelligence.profiler_agent import generate_final_payload
-        from services.candidate_intelligence.models import ChatMessage
+        from services.candidate_intelligence._question_flow import get_active_questions, get_question
 
-        logger.info(f"[PAYLOAD] chat_history length: {len(request.chat_history)}, resume_text length: {len(candidate.resume_text or '')}, parsed_json keys: {list(candidate.parsed_json.keys()) if isinstance(candidate.parsed_json, dict) else type(candidate.parsed_json)}")
-
-        chat_history = [
-            ChatMessage(role=msg["role"], content=msg["content"])
-            for msg in request.chat_history
+        # Collect user answers from chat history (frontend includes current msg in chat_history)
+        user_answers = [
+            m["content"] for m in request.chat_history
+            if m["role"] == "user" and m["content"] != "__start__"
         ]
 
-        logger.info(f"[PAYLOAD] Calling generate_final_payload with {len(chat_history)} messages")
-        # Run blocking LLM call in a thread to avoid blocking the event loop
-        payload = await asyncio.to_thread(
-            generate_final_payload,
-            chat_history=chat_history,
-            resume_summary=candidate.parsed_json,
-            resume_raw_text=candidate.resume_text,
-            resume_uploaded=True,
+        # Build session by replaying answers to determine conditional question branching
+        parsed_summary = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+        resume_skills = (
+            parsed_summary.get("personal_info", {}).get("skills_detected", [])
+            or parsed_summary.get("skills", [])
         )
+        session = {
+            "resume_uploaded": bool(candidate.resume_text),
+            "resume_summary": {"skills": resume_skills},
+            "answers": {},
+        }
+        for i, answer in enumerate(user_answers):
+            active_qs = get_active_questions(session)
+            if i < len(active_qs):
+                session["answers"][active_qs[i]] = answer
 
-        t_llm = time.perf_counter()
-        logger.info(f"[TIMING] Payload generation LLM: {(t_llm - t_start)*1000:.0f}ms")
+        # Determine next question index
+        active_qs = get_active_questions(session)
+        q_index = len(user_answers)
 
-        # Store profile in candidate record
-        payload_dict = payload.dict() if hasattr(payload, 'dict') else payload.model_dump()
-        logger.info(f"[PAYLOAD] Generated payload keys: {list(payload_dict.keys())}")
-        candidate.parsed_json = payload_dict
-        if payload.career_analysis and payload.career_analysis.recommended_roles:
-            candidate.target_roles = [r.title for r in payload.career_analysis.recommended_roles]
-            logger.info(f"[PAYLOAD] target_roles: {candidate.target_roles}")
-        if payload.preferences and payload.preferences.industry_interests:
-            candidate.target_industries = payload.preferences.industry_interests
-            logger.info(f"[PAYLOAD] target_industries: {candidate.target_industries}")
-        db.commit()
+        if q_index >= len(active_qs):
+            t_end = time.perf_counter()
+            logger.info(f"[CHAT-V2] Complete after {q_index} answers in {(t_end - t_start)*1000:.0f}ms")
+            return {
+                "message": "Got it! Generating your profile now...",
+                "current_state": "PAYLOAD_READY",
+                "mcq": None,
+                "text_input": False,
+                "is_complete": True,
+                "questions_asked_so_far": q_index,
+            }
+
+        q_id = active_qs[q_index]
+        q_def = get_question(q_id, session)
+
+        # Build message: ack for previous answer + new question
+        if request.message == "__start__":
+            msg = q_def["message"]
+        else:
+            prev_q_id = active_qs[q_index - 1] if q_index > 0 else None
+            ack = get_question(prev_q_id, session).get("ack") or "Got it." if prev_q_id else "Got it."
+            msg = f"{ack}|||{q_def['message']}"
 
         t_end = time.perf_counter()
-        logger.info(f"[TIMING] Total payload request: {(t_end - t_start)*1000:.0f}ms — SUCCESS")
+        logger.info(f"[CHAT-V2] Q{q_index + 1}/{len(active_qs)} ({q_id}) served in {(t_end - t_start)*1000:.0f}ms")
 
         return {
-            "status": "success",
-            "payload": payload_dict,
+            "message": msg,
+            "current_state": "MCQ" if q_def.get("mcq") else "TEXT",
+            "mcq": q_def.get("mcq"),
+            "text_input": q_def.get("text_input", False),
+            "is_complete": False,
+            "questions_asked_so_far": q_index + 1,
         }
+
     except Exception as e:
-        import traceback
-        logger.error(f"[PAYLOAD] FAILED for candidate {candidate_id} after {(time.perf_counter() - t_start)*1000:.0f}ms: {type(e).__name__}: {e}")
-        logger.error(f"[PAYLOAD] Traceback:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Profile generation failed: {type(e).__name__}: {str(e)}")
+        logger.error(f"[CHAT-V2] Error for candidate {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{candidate_id}/chat/stream")
+async def candidate_chat_stream(
+    candidate_id: int,
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Fully deterministic streaming chat — zero LLM calls during quiz.
+    All 7 questions served instantly from question_engine.py.
+    Resume profile (extracted in background after upload) powers Q6 role options.
+    Returns text/event-stream with 'complete' events only (no streaming chunks needed).
+    """
+    from services.candidate_intelligence.question_engine import (
+        build_question_sequence, build_message
+    )
+
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # Reconstruct answer map by replaying chat history against question sequence
+    raw_user_msgs = [
+        m["content"] for m in request.chat_history
+        if m["role"] == "user" and m["content"] != "__start__"
+    ]
+
+    # Build answers dict incrementally (needed because sequence depends on answers)
+    answers: dict[str, str] = {}
+    resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+    resume_text = candidate.resume_text or ""
+    parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+
+    def _make_state() -> dict:
+        return {
+            "answers": answers,
+            "resume_profile": resume_profile,
+            "resume_text": resume_text,
+            # _resume_text is a private key used by question_engine for NLP role detection
+            "parsed_json": {**parsed_json, "_resume_text": resume_text},
+        }
+
+    for answer in raw_user_msgs:
+        seq = build_question_sequence(_make_state())
+        answered_count = len(answers)
+        if answered_count < len(seq):
+            answers[seq[answered_count]["key"]] = answer
+
+    # Build state for the *current* turn (current message not yet in answers)
+    state = _make_state()
+    sequence = build_question_sequence(state)
+    q_index = len(answers)  # index of next question to serve
+
+    # ── Quiz complete ──────────────────────────────────────────────────
+    if q_index >= len(sequence):
+        # Persist dream companies from quiz answers
+        raw_dream = answers.get("dream_companies", "")
+        if raw_dream and raw_dream.strip().lower() not in ("skip", "none", "n/a", "na", ""):
+            dream_list = [c.strip() for c in raw_dream.split(",") if c.strip() and c.strip().lower() not in ("skip", "none")]
+            candidate.dream_companies = dream_list[:10]  # cap at 10
+            logger.info(f"[STREAM] Stored dream_companies={candidate.dream_companies} for candidate {candidate_id}")
+        else:
+            candidate.dream_companies = []
+
+        # ── Run psychometric profiling ────────────────────────────────
+        psych_profile = {}
+        try:
+            psych_profile = _build_psychometric_profile(answers, resume_profile)
+            candidate.psychometric_profile = psych_profile
+            logger.info(
+                f"[STREAM] Psychometric profile: strengths={psych_profile.get('result', {}).get('top_strengths')}, "
+                f"confidence={psych_profile.get('confidence', 0)}, traits={psych_profile.get('traits')}"
+            )
+        except Exception as psych_err:
+            logger.error(f"[STREAM] Psychometric profiling failed (non-fatal): {psych_err}", exc_info=True)
+
+        db.commit()
+
+        payload = {
+            "type": "complete",
+            "message": "That's everything I need. Generating your profile now...",
+            "current_state": "PAYLOAD_READY",
+            "mcq": None,
+            "text_input": False,
+            "is_complete": True,
+            "questions_asked_so_far": q_index,
+            "psychometric": psych_profile.get("result"),
+        }
+        logger.info(f"[STREAM] Quiz complete for candidate {candidate_id} after {q_index} answers")
+
+        async def done_sse():
+            yield f"data: {_json.dumps(payload)}\n\n"
+
+        return StreamingResponse(
+            done_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ── Serve next question instantly ─────────────────────────────────
+    q_def = sequence[q_index]
+    prev_key = sequence[q_index - 1]["key"] if q_index > 0 else None
+    is_first = (request.message == "__start__" or q_index == 0)
+    msg_text = build_message(q_def, prev_key, is_first)
+    mcq = q_def.get("mcq")
+
+    payload = {
+        "type": "complete",
+        "message": msg_text,
+        "current_state": "MCQ" if mcq else "TEXT",
+        "mcq": mcq,
+        "text_input": q_def.get("text_input", False),
+        "is_complete": False,
+        "questions_asked_so_far": q_index + 1,
+    }
+    logger.info(f"[STREAM] Q{q_index + 1}/{len(sequence)} ({q_def['key']}) served instantly for candidate {candidate_id}")
+
+    async def static_sse():
+        yield f"data: {_json.dumps(payload)}\n\n"
+
+    return StreamingResponse(
+        static_sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _build_psychometric_profile(answers: dict, resume_data: dict) -> dict:
+    """Run the full psychometric pipeline on quiz answers.
+
+    Extracts onboarding signals, scores psychometric answers,
+    applies resume boost, detects traits, calculates confidence,
+    and generates the final result.
+    """
+    from services.candidate_intelligence.psychometric import (
+        update_scores, normalize_scores, detect_traits,
+        extract_onboarding_signals, calculate_confidence, generate_result,
+    )
+    from services.candidate_intelligence.psychometric.types import new_profile
+    from services.candidate_intelligence.psychometric.questions import get_question_by_id
+    from services.candidate_intelligence.psychometric.scoring_engine import apply_resume_boost
+
+    profile = new_profile(resume_data=resume_data, onboarding_answers=answers)
+
+    # 1. Seed scores from onboarding answers (Q1-Q8)
+    ob_signals = extract_onboarding_signals(answers)
+    for dim, val in ob_signals.items():
+        profile["scores"][dim] += val
+
+    # 2. Score each psychometric answer
+    for key, answer_text in answers.items():
+        if not key.startswith("psych_"):
+            continue
+        q = get_question_by_id(key)
+        if not q:
+            continue
+        # Match selected label from answer text
+        selected_label = None
+        for opt in q["options"]:
+            if opt["text"].lower() == answer_text.lower() or opt["label"].lower() == answer_text.lower():
+                selected_label = opt["label"]
+                break
+        if not selected_label:
+            # Fuzzy: check if answer starts with a label letter
+            first_char = answer_text.strip()[:1].upper()
+            if first_char in ("A", "B", "C", "D"):
+                selected_label = first_char
+        if selected_label:
+            for opt in q["options"]:
+                if opt["label"] == selected_label:
+                    update_scores(profile, key, dict(opt["weights"]))
+                    break
+
+    # 3. Apply resume boost (max 15%)
+    apply_resume_boost(profile)
+
+    # 4. Normalize to 0-100
+    normalize_scores(profile)
+
+    # 5. Detect traits
+    detect_traits(profile)
+
+    # 6. Calculate confidence
+    calculate_confidence(profile)
+
+    # 7. Generate result
+    generate_result(profile)
+
+    return profile
+
+
+def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
+    """
+    Background worker: generate final payload and store it.
+    Opens its own DB session (request session is already closed).
+    Uses deterministic parser — zero LLM calls, completes in <50ms.
+    """
+    import traceback
+    t_start = time.perf_counter()
+    try:
+        db = SessionLocal()
+        try:
+            from services.candidate_intelligence.payload_builder import (
+                reconstruct_answers,
+                build_payload_from_answers,
+            )
+
+            candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+            if not candidate:
+                logger.error(f"[PAYLOAD-BG] Candidate {candidate_id} not found")
+                return
+
+            # Reconstruct structured answers from chat history (same logic as chat/stream endpoint)
+            answers = reconstruct_answers(chat_history_dicts, candidate)
+            logger.info(f"[PAYLOAD-BG] Reconstructed {len(answers)} answers: {list(answers.keys())}")
+
+            # Build payload deterministically — no LLM
+            payload_dict = build_payload_from_answers(
+                answers=answers,
+                candidate=candidate,
+                resume_uploaded=bool(candidate.resume_text),
+            )
+
+            candidate.parsed_json = payload_dict
+            recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
+            if recommended:
+                candidate.target_roles = [r["title"] for r in recommended]
+            industry_interests = payload_dict.get("preferences", {}).get("industry_interests", [])
+            if industry_interests:
+                candidate.target_industries = industry_interests
+            db.commit()
+
+            logger.info(
+                f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms "
+                f"(deterministic, no LLM)"
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error(f"[PAYLOAD-BG] FAILED for candidate {candidate_id}: {type(exc).__name__}: {exc}")
+        logger.error(traceback.format_exc())
+
+
+@router.post("/{candidate_id}/generate-payload")
+async def generate_payload(
+    candidate_id: int,
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Kick off profile generation as a background task — returns immediately.
+    Frontend should poll GET /{candidate_id}/profile-status until ready=true.
+    """
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    logger.info(f"[PAYLOAD] Starting background generation for candidate {candidate_id}")
+    background_tasks.add_task(
+        _run_generate_payload_background,
+        candidate_id=candidate_id,
+        chat_history_dicts=request.chat_history,
+    )
+    return {"status": "processing"}
+
+
+@router.get("/{candidate_id}/profile-status")
+async def get_profile_status(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Poll endpoint — returns ready=true once target_roles is populated.
+    Frontend polls this after calling /generate-payload.
+    """
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    ready = bool(candidate.target_roles)
+    return {"ready": ready}
 
 
 @router.get("/{candidate_id}/profile")
@@ -184,11 +500,14 @@ async def get_candidate_profile(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    psych = candidate.psychometric_profile or {}
     return {
         "candidate_id": candidate.id,
         "parsed_json": candidate.parsed_json,
         "target_roles": candidate.target_roles,
         "target_industries": candidate.target_industries,
+        "dream_companies": candidate.dream_companies,
+        "psychometric": psych.get("result") if psych else None,
         "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
     }
 

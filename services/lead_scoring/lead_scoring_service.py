@@ -19,7 +19,7 @@ from services.shared.ai.apollo_industry_mapper import APOLLO_INDUSTRY_MAP
 
 logger = get_logger(__name__)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════��════════════════════════
 # CITY ALIASES — groups of names that refer to the same city
 # ══════════════════════════════════════════════════════════════════════════════
 CITY_ALIASES = {
@@ -70,10 +70,10 @@ REGION_TO_COUNTRY = {
     "england": "united kingdom",
 }
 
-# Irrelevant role keywords to filter out
+# Role keywords to filter out — only truly irrelevant titles (not hiring decision makers)
+# Recruiters, HR, Talent — these ARE valid outreach targets for job seekers, so not filtered
 IRRELEVANT_KEYWORDS = [
-    "sales", "finance", "recruiter", "consultant",
-    "freelancer", "advisor", "hr", "talent"
+    "freelancer", "contractor", "intern",
 ]
 
 
@@ -217,7 +217,8 @@ def score_and_select_leads(
     candidate_profile: Dict[str, Any],
     role_intelligence: Dict[str, Any],
     target_count: int = 200,
-    campaign_id: str = "unknown"
+    campaign_id: str = "unknown",
+    dream_companies: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Score leads using weighted heuristics and return top N.
 
@@ -225,6 +226,7 @@ def score_and_select_leads(
       - score: normalized overall score (70-90 range)
       - _title_score, _dept_score, _industry_score, _seniority_score, _location_score:
         raw component scores for DB storage
+      - _dream_company_score: bonus points if lead's company matches a dream company
     """
     if not leads:
         return []
@@ -327,8 +329,18 @@ def score_and_select_leads(
         # --- 5. Location Relevance (0-10) ---
         l_score = _score_location(location, pref_locations)
 
+        # --- 6. Dream Company Bonus (0 or +10) ---
+        dc_score = 0
+        if dream_companies:
+            lead_company = (lead.get("company") or "").lower()
+            for dc in dream_companies:
+                dc_lower = dc.lower()
+                if dc_lower in lead_company or lead_company in dc_lower:
+                    dc_score = 10
+                    break
+
         # Total Calculation
-        total_score = t_score + d_score + i_score + sen_score + l_score
+        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score
 
         # Tie-breaker
         unique_str = str(lead.get("apollo_person_id") or lead.get("name") or "")
@@ -346,6 +358,7 @@ def score_and_select_leads(
         lead["_industry_score"] = i_score
         lead["_seniority_score"] = sen_score
         lead["_location_score"] = l_score
+        lead["_dream_company_score"] = dc_score
         scored_leads.append(lead)
 
         log_traces.append({
