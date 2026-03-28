@@ -103,7 +103,7 @@ def compute_campaign_schedule(db, campaign_id: int):
     first_delay = random.uniform(30, 180)
     emails[0].scheduled_at = now_utc + timedelta(seconds=first_delay)
 
-    # ── Remaining emails: distribute across days within business hours ──
+    # ── Remaining emails: sequential with random 40-90 min gaps ──
     remaining = emails[1:]
     if not remaining:
         db.commit()
@@ -111,30 +111,30 @@ def compute_campaign_schedule(db, campaign_id: int):
                     campaign_id, emails[0].scheduled_at)
         return
 
-    # Determine the first scheduling day (next business-hours window)
-    now_local = now_utc.replace(tzinfo=pytz.utc).astimezone(tz)
-    # If we're before 6pm today, start scheduling today; otherwise tomorrow
-    if now_local.hour < 18:
-        current_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        current_day = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    # Walk forward from the first email's time, adding random gaps.
+    # Roll to next day at 9 AM when we hit the daily limit or pass 5 PM.
+    cursor_utc = emails[0].scheduled_at
+    end_of_day_hour = 17  # 5 PM local — stop scheduling, roll to next day
+    daily_count = 1       # First email already counts for today
+    daily_limit = random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
 
-    idx = 0
-    while idx < len(remaining):
-        daily_limit = random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
-        day_batch = remaining[idx:idx + daily_limit]
+    for email in remaining:
+        # Random gap: 40-90 minutes after the previous email
+        gap_minutes = random.uniform(40, 90)
+        cursor_utc = cursor_utc + timedelta(minutes=gap_minutes)
 
-        # Generate random times between 9:00-17:30 for this day (leave 30min buffer before 18:00)
-        random_minutes = sorted([random.uniform(0, 510) for _ in range(len(day_batch))])  # 0-510 min = 9:00-17:30
+        # Check if we've exceeded today's limit or gone past business hours
+        cursor_local = cursor_utc.replace(tzinfo=pytz.utc).astimezone(tz)
+        if daily_count >= daily_limit or cursor_local.hour >= end_of_day_hour:
+            # Roll to next day at 9:00 AM + small random offset (0-30 min)
+            next_day = cursor_local.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            next_day = next_day + timedelta(minutes=random.uniform(0, 30))
+            cursor_utc = next_day.astimezone(pytz.utc).replace(tzinfo=None)
+            daily_count = 0
+            daily_limit = random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
 
-        for j, email in enumerate(day_batch):
-            send_local = current_day.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(minutes=random_minutes[j])
-            # Convert to UTC and strip tzinfo for DB storage
-            send_utc = send_local.astimezone(pytz.utc).replace(tzinfo=None)
-            email.scheduled_at = send_utc
-
-        idx += len(day_batch)
-        current_day += timedelta(days=1)  # Move to next day
+        email.scheduled_at = cursor_utc
+        daily_count += 1
 
     db.commit()
     logger.info("[SCHEDULER] Computed schedule for campaign %d: %d emails, first at %s, last at %s, spanning %d days",
