@@ -60,10 +60,9 @@ def extract_resume_profile(
     Returns the profile dict (to be stored in candidates.resume_profile).
     Raises on LLM failure — caller should catch and log.
     """
-    from core.config import get_settings
+    from core.config import settings
     from openai import AzureOpenAI
 
-    settings = get_settings()
     client = AzureOpenAI(
         api_key=settings.AZURE_OPENAI_API_KEY,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
