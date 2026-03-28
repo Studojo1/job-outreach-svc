@@ -413,6 +413,7 @@ def _send_ready(db) -> tuple:
         )
         .order_by(EmailSent.scheduled_at.asc())
         .limit(MAX_SEND_PER_CYCLE)
+        .with_for_update(skip_locked=True)
         .all()
     )
 
@@ -426,7 +427,10 @@ def _send_ready(db) -> tuple:
 
     for email in ready_emails:
         campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
-        if not campaign or campaign.status != "running":
+        if not campaign:
+            continue
+        # Regular emails: only from running campaigns. Test emails: also from completed/paused.
+        if campaign.status != "running" and not email.is_test:
             continue
 
         account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
@@ -451,6 +455,10 @@ def _send_ready(db) -> tuple:
                 continue
 
         access_token = token_cache[acct_id]
+
+        # Lock this email so concurrent cycles cannot re-send it
+        email.status = "sending"
+        db.commit()
 
         # Send the email
         try:

@@ -7,6 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -650,7 +651,7 @@ async def get_campaign_emails(
     emails = (
         db.query(EmailSent)
         .filter(EmailSent.campaign_id == campaign_id)
-        .order_by(EmailSent.created_at.asc())
+        .order_by(func.coalesce(EmailSent.scheduled_at, EmailSent.created_at).asc())
         .all()
     )
 

@@ -24,7 +24,7 @@ VALID_TRANSITIONS = {
     "draft": ["running"],
     "running": ["paused", "completed"],
     "paused": ["running", "completed"],
-    "completed": [],
+    "completed": ["running"],
 }
 
 
