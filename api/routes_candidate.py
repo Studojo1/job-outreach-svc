@@ -12,6 +12,7 @@ from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
 from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
+from core.analytics import capture, identify
 
 import logging
 import time
@@ -53,6 +54,11 @@ async def upload_resume(
             candidate_id=new_candidate.id,
             db_session_factory=SessionLocal,
         )
+
+        capture("resume_uploaded", str(current_user.id), {
+            "candidate_id": new_candidate.id,
+            "file_type": (file.filename or "").rsplit(".", 1)[-1].lower(),
+        })
 
         return {
             "status": "success",
@@ -280,6 +286,12 @@ async def candidate_chat_stream(
             logger.error(f"[STREAM] Psychometric profiling failed (non-fatal): {psych_err}", exc_info=True)
 
         db.commit()
+
+        capture("profile_quiz_completed", str(current_user.id), {
+            "candidate_id": candidate_id,
+            "questions_answered": q_index,
+            "has_dream_companies": bool(candidate.dream_companies),
+        })
 
         payload = {
             "type": "complete",

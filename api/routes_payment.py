@@ -18,6 +18,7 @@ from core.config import settings
 from core.pricing import get_tier_pricing, get_dodo_product_id, apply_coupon, TIERS, TEST_TIERS
 from core.geo import detect_country, is_india
 from api.dependencies import get_current_user
+from core.analytics import capture
 import services.dodo_payments as dodo_svc
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,12 @@ async def create_order(
             if valid:
                 amount = apply_coupon(amount, coupon.discount_type, float(coupon.discount_value))
                 coupon_id = coupon.id
+                capture("coupon_applied", str(current_user.id), {
+                    "coupon_code": body.coupon_code.strip().upper(),
+                    "discount_type": coupon.discount_type,
+                    "discount_value": float(coupon.discount_value),
+                    "tier": body.tier,
+                })
 
     if amount <= 0:
         # Fully discounted — grant credits directly
@@ -171,6 +178,14 @@ async def create_order(
             db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
         db.commit()
         logger.info("[PAYMENT] Free order (100%% coupon) for user %s, tier %d", current_user.id, body.tier)
+        capture("payment_confirmed", str(current_user.id), {
+            "tier": body.tier,
+            "credits_granted": body.tier,
+            "provider": "coupon",
+            "amount_cents": 0,
+            "currency": currency,
+            "country": country,
+        })
         return {"free": True, "credits_granted": body.tier}
 
     idem_key = str(uuid.uuid4())
@@ -221,6 +236,14 @@ async def create_order(
 
         logger.info("[PAYMENT] Dodo order created: %s for user %s, tier %d, amount %d %s",
                     dodo_result["session_id"], current_user.id, body.tier, amount, currency)
+        capture("payment_order_created", str(current_user.id), {
+            "tier": body.tier,
+            "amount_cents": amount,
+            "currency": currency,
+            "provider": "dodo",
+            "coupon_applied": coupon_id is not None,
+            "country": country,
+        })
 
         return {
             "provider": "dodo",
@@ -265,6 +288,14 @@ async def create_order(
 
     logger.info("[PAYMENT] Razorpay order created: %s for user %s, tier %d, amount %d %s",
                 rz_order["id"], current_user.id, body.tier, amount, currency)
+    capture("payment_order_created", str(current_user.id), {
+        "tier": body.tier,
+        "amount_cents": amount,
+        "currency": currency,
+        "provider": "razorpay",
+        "coupon_applied": coupon_id is not None,
+        "country": country,
+    })
 
     return {
         "provider": "razorpay",
@@ -332,6 +363,14 @@ async def verify_payment(
 
     logger.info("[PAYMENT] Payment verified: %s, granted %d credits to user %s",
                 request.razorpay_order_id, order.tier, current_user.id)
+    capture("payment_confirmed", str(current_user.id), {
+        "tier": order.tier,
+        "credits_granted": order.tier,
+        "provider": "razorpay",
+        "amount_cents": order.amount_cents,
+        "currency": order.currency,
+        "country": order.geo_country,
+    })
 
     return {"status": "verified", "credits": order.credits_granted}
 
@@ -381,6 +420,14 @@ async def verify_dodo_payment(
         db.commit()
         logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, granted %d credits",
                     request.session_id, order.tier)
+        capture("payment_confirmed", str(order.user_id), {
+            "tier": order.tier,
+            "credits_granted": order.tier,
+            "provider": "dodo",
+            "amount_cents": order.amount_cents,
+            "currency": order.currency,
+            "country": order.geo_country,
+        })
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):

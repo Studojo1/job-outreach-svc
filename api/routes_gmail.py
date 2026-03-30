@@ -18,6 +18,7 @@ from services.authentication.google_oauth import (
 )
 from services.authentication.token_manager import store_user_tokens
 from api.dependencies import get_current_user
+from core.analytics import capture
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,10 @@ async def gmail_oauth_callback(
             expires_in=expires_in,
         )
         logger.info(f"[GmailOAuth] Step 3 OK: tokens stored")
+        capture("gmail_connected", user_id, {
+            "email_address": email_address,
+            "provider": "gmail",
+        })
 
         redirect_url = f"{frontend_base}?status=success"
         logger.info(f"[GmailOAuth] SUCCESS — redirecting to {redirect_url}")

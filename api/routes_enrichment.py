@@ -19,6 +19,7 @@ from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, OutreachOrder
 from api.dependencies import get_current_user
 from api.routes_payment import deduct_credits, refund_credits
+from core.analytics import capture
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,12 @@ def _run_enrichment_in_background(
         job["enriched"] = enriched_count
         job["failed"] = failed_count
         logger.info("[ENRICHMENT_JOB] %s: Complete — %d enriched, %d failed", job_id, enriched_count, failed_count)
+        capture("enrichment_completed", user_id, {
+            "job_id": job_id,
+            "enriched_count": enriched_count,
+            "failed_count": failed_count,
+            "credits_refunded": unused if unused > 0 and limit > 5 else 0,
+        })
 
     except Exception as e:
         logger.error("[ENRICHMENT_JOB] %s: Crashed: %s", job_id, e, exc_info=True)
@@ -232,6 +239,12 @@ async def enrich_leads(
     thread.start()
 
     logger.info("[ENRICHMENT] Job %s started for user %s, limit=%d", job_id, current_user.id, request.limit)
+    capture("enrichment_started", str(current_user.id), {
+        "job_id": job_id,
+        "candidate_id": request.candidate_id,
+        "lead_limit": request.limit,
+        "unenriched_available": unenriched_count,
+    })
 
     return {
         "status": "processing",

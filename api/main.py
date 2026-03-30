@@ -79,6 +79,8 @@ def on_startup():
 def on_shutdown():
     """App shutdown hook."""
     logger.info("Job outreach service shutting down")
+    from core.analytics import shutdown as ph_shutdown
+    ph_shutdown()
 
 
 @app.get("/health")

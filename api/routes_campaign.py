@@ -19,6 +19,7 @@ from services.email_campaign.campaign_service import (
     get_campaign_metrics,
 )
 from api.dependencies import get_current_user
+from core.analytics import capture
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,12 @@ async def api_create_campaign(
         except Exception as oe:
             logger.error("[CAMPAIGN] Failed to auto-create order: %s", oe)
 
+        capture("campaign_created", str(current_user.id), {
+            "campaign_id": result["campaign_id"],
+            "generation_mode": "ai" if request.selected_styles else "template",
+            "queued_emails": result.get("queued_messages", 0),
+            "num_styles": len(request.selected_styles),
+        })
         return {"status": "success", **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -297,6 +304,11 @@ async def api_start_campaign(
     """Start sending emails for a campaign."""
     try:
         result = transition_campaign(db, campaign_id, "running")
+        campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+        capture("campaign_started", str(current_user.id), {
+            "campaign_id": campaign_id,
+            "daily_limit": campaign.daily_limit if campaign else None,
+        })
         return {"status": "success", **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -599,6 +611,11 @@ async def test_launch_campaign(
     thread.start()
 
     logger.info("[TEST_LAUNCH] Job %s started in background for user %s", job_id, current_user.id)
+    capture("test_launch_started", str(current_user.id), {
+        "job_id": job_id,
+        "num_test_emails": len(initial_leads),
+        "num_styles": len(request.selected_styles),
+    })
 
     return {
         "status": "processing",
@@ -827,6 +844,10 @@ async def cancel_campaign(
 
     logger.info("[CAMPAIGN] Campaign %d cancelled by user %s, refunded %d credits",
                 campaign_id, current_user.id, pending_count)
+    capture("campaign_cancelled", str(current_user.id), {
+        "campaign_id": campaign_id,
+        "credits_refunded": pending_count,
+    })
 
     return {
         "status": "cancelled",

@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     SENTRY_DSN: str = ""
     SERVICE_NAME: str = "job-outreach-svc"
 
+    # POSTHOG
+    POSTHOG_KEY: str = ""
+    POSTHOG_HOST: str = "https://us.i.posthog.com"
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
         env_file_encoding="utf-8",
