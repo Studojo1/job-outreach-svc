@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     # POSTHOG
     POSTHOG_KEY: str = ""
-    POSTHOG_HOST: str = "https://us.i.posthog.com"
+    POSTHOG_HOST: str = "https://eu.i.posthog.com"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
