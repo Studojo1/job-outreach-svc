@@ -25,6 +25,14 @@ ACTIVE_STATUSES = [
     "leads_generating", "leads_ready", "enriching", "enrichment_complete",
     "campaign_setup", "email_connected", "campaign_running",
 ]
+# Only flag stuck for states where the system is doing automated work.
+# User-action states (leads_ready, enrichment_complete, campaign_setup,
+# email_connected) wait for user input and should never be marked stuck.
+SYSTEM_PROCESSING_STATUSES = [
+    "leads_generating",
+    "enriching",
+    "campaign_running",
+]
 
 
 @router.get("/overview")
@@ -47,12 +55,12 @@ async def outreach_overview(
     active_orders = sum(orders_by_status.get(s, 0) for s in ACTIVE_STATUSES)
     completed_orders = orders_by_status.get("completed", 0)
 
-    # Stuck orders
+    # Stuck orders (only system-processing states — not user-action states)
     stuck_orders = (
         db.query(func.count())
         .select_from(OutreachOrder)
         .filter(
-            OutreachOrder.status.in_(ACTIVE_STATUSES),
+            OutreachOrder.status.in_(SYSTEM_PROCESSING_STATUSES),
             OutreachOrder.updated_at < stuck_cutoff,
         )
         .scalar()
@@ -243,6 +251,7 @@ async def outreach_users(
 
         is_stuck = (
             active_order is not None
+            and active_order.status in SYSTEM_PROCESSING_STATUSES
             and active_order.updated_at
             and active_order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
@@ -349,7 +358,7 @@ async def outreach_user_detail(
                 }
 
         is_stuck = (
-            order.status in ACTIVE_STATUSES
+            order.status in SYSTEM_PROCESSING_STATUSES
             and order.updated_at
             and order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
