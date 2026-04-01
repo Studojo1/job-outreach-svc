@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
@@ -426,4 +426,49 @@ async def outreach_user_detail(
         ],
         "orders": orders_data,
         "lead_summary": lead_summary,
+    }
+
+
+@router.get("/signups")
+async def signups_by_date(
+    start: str = Query(..., description="Start date YYYY-MM-DD (inclusive)"),
+    end: str = Query(..., description="End date YYYY-MM-DD (inclusive)"),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Return signup counts from the User table for a date range.
+    Used by the analytics dashboard for accurate new-signup metrics.
+    """
+    try:
+        start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start date, expected YYYY-MM-DD")
+    try:
+        end_dt = (datetime.fromisoformat(end) + timedelta(days=1)).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid end date, expected YYYY-MM-DD")
+
+    total = (
+        db.query(func.count(User.id))
+        .filter(User.created_at >= start_dt, User.created_at < end_dt)
+        .scalar()
+    ) or 0
+
+    daily_rows = (
+        db.query(
+            func.date_trunc("day", User.created_at).label("day"),
+            func.count(User.id).label("signups"),
+        )
+        .filter(User.created_at >= start_dt, User.created_at < end_dt)
+        .group_by("day")
+        .order_by("day")
+        .all()
+    )
+
+    return {
+        "count": total,
+        "daily": [
+            {"day": row.day.strftime("%Y-%m-%d"), "signups": row.signups}
+            for row in daily_rows
+        ],
     }
