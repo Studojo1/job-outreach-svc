@@ -10,10 +10,10 @@ Called once after Q8 (onboarding complete) to build the psychometric sequence.
 
 from __future__ import annotations
 from .types import DIMENSIONS, empty_scores
-from .questions import PSYCHOMETRIC_QUESTIONS
+from .questions import PSYCHOMETRIC_QUESTIONS, FLEX_QUESTIONS
 from .scoring_engine import extract_onboarding_signals
 
-TARGET_PSYCHOMETRIC_COUNT = 5  # serve 5 out of 8
+TARGET_PSYCHOMETRIC_COUNT = 3  # 3 adaptive + 2 always-included flex = 5 total
 
 
 def select_psychometric_questions(
@@ -49,9 +49,9 @@ def select_psychometric_questions(
 
     scored.sort(key=lambda x: -x[0])
 
-    # Step 5: Pick top N, then re-order for dimension diversity
+    # Step 5: Pick top N adaptive, then append the always-included flex questions
     selected = [q for _, q in scored[:TARGET_PSYCHOMETRIC_COUNT]]
-    return _diversify_order(selected)
+    return _diversify_order(selected) + FLEX_QUESTIONS
 
 
 def _resume_dimension_hints(resume_data: dict) -> dict[str, float]:

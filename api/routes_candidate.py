@@ -273,6 +273,13 @@ async def candidate_chat_stream(
         else:
             candidate.dream_companies = []
 
+        # Persist flex notes (email personalisation signals from psychometric phase)
+        best_project = (answers.get("flex_best_project") or "").strip()
+        outcome = (answers.get("flex_outcome") or "").strip()
+        if best_project:
+            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
+            logger.info(f"[STREAM] Stored flex_notes for candidate {candidate_id}")
+
         # ── Run psychometric profiling ────────────────────────────────
         psych_profile = {}
         try:

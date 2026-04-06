@@ -138,6 +138,30 @@ PSYCHOMETRIC_QUESTIONS: list[dict] = [
 ]
 
 
+FLEX_QUESTIONS: list[dict] = [
+    {
+        "id": "flex_best_project",
+        "key": "flex_best_project",
+        "text": "Describe your best project or experience in 1-2 sentences — what did you build or do, and who was it for?",
+        "options": [],
+        "primary_dimensions": [],
+        "always_include": True,
+        "text_input": True,
+        "placeholder": "e.g. Built an automated reporting tool for a fashion brand that cut weekly manual work from 5 hours to 20 minutes",
+    },
+    {
+        "id": "flex_outcome",
+        "key": "flex_outcome",
+        "text": "What was the result or impact of that?",
+        "options": [],
+        "primary_dimensions": [],
+        "always_include": True,
+        "text_input": True,
+        "placeholder": "e.g. The client renewed and referred two others, or grew Instagram from 2k to 8k in 3 months",
+    },
+]
+
+
 def get_question_by_id(question_id: str) -> dict | None:
     for q in PSYCHOMETRIC_QUESTIONS:
         if q["id"] == question_id:
