@@ -334,6 +334,7 @@ async def candidate_chat_stream(
         "current_state": "MCQ" if mcq else "TEXT",
         "mcq": mcq,
         "text_input": q_def.get("text_input", False),
+        "input_placeholder": q_def.get("input_placeholder") or None,
         "is_complete": False,
         "questions_asked_so_far": q_index + 1,
     }

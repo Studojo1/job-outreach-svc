@@ -240,17 +240,24 @@ def _build_psychometric_sequence(answers: dict, resume_profile: dict) -> list[di
     quiz_questions = []
     for i, pq in enumerate(selected):
         is_last = (i == len(selected) - 1)
-        quiz_questions.append({
+        is_text_input = pq.get("text_input", False)
+        entry = {
             "key": pq["key"],
             "ack": _PSYCH_ACKS.get(pq["key"]) or "Got it.",
-            "message": ("Last one! " if is_last else "") + pq["text"],
-            "mcq": {
+            "message": ("Last one! " if is_last and not is_text_input else "") + pq["text"],
+            "text_input": is_text_input,
+        }
+        if is_text_input:
+            entry["mcq"] = None
+            if pq.get("placeholder"):
+                entry["input_placeholder"] = pq["placeholder"]
+        else:
+            entry["mcq"] = {
                 "question": pq["text"],
                 "options": [{"label": o["label"], "text": o["text"]} for o in pq["options"]],
                 "allow_multiple": False,
-            },
-            "text_input": False,
-        })
+            }
+        quiz_questions.append(entry)
 
     return quiz_questions
 
