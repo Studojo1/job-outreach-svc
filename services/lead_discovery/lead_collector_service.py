@@ -88,6 +88,8 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
     else:
         company_size = organization.get("employee_count_range") or None
 
+    company_description = (organization.get("short_description") or "")[:500] or None
+
     return {
         "apollo_person_id": apollo_person_id,
         "name": name,
@@ -97,6 +99,7 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
         "location": location,
         "industry": industry,
         "company_size": company_size,
+        "company_description": company_description,
         "email": email,
     }
 
@@ -264,6 +267,7 @@ def _store_people(
             location=parsed_data.get("location"),
             industry=parsed_data.get("industry"),
             company_size=parsed_data.get("company_size"),
+            company_description=parsed_data.get("company_description"),
             email=apollo_email,
             email_verified=bool(apollo_email),
             status="discovered",

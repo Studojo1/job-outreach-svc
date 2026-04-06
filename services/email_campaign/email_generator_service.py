@@ -154,8 +154,14 @@ def extract_candidate_profile(candidate: Candidate) -> dict:
     if not industries and career.get("recommended_roles"):
         industries = list({r.get("industry", "") for r in career["recommended_roles"] if r.get("industry")})
 
-    # Build the short candidate signal
-    signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
+    # Use flex_notes if available (post-payment answers — much more specific than resume parse)
+    flex = candidate.flex_notes or {}
+    if flex.get("best_project"):
+        signal = flex["best_project"].strip()
+        if flex.get("outcome"):
+            signal += ". Outcome: " + flex["outcome"].strip()
+    else:
+        signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
     return {
         "candidate_name": name,
@@ -166,6 +172,7 @@ def extract_candidate_profile(candidate: Candidate) -> dict:
         "job_interest": job_interest,
         "industries_of_interest": industries[:3],
         "short_candidate_signal": signal,
+        "has_flex_notes": bool(flex.get("best_project")),
     }
 
 
@@ -238,8 +245,14 @@ def extract_lead_profile(lead: Lead) -> dict:
     # Infer department from title
     department_hint = _infer_department(lead_role)
 
-    # Build contextual hook
-    hook = _build_contextual_hook(company_name, lead_role, industry, department_hint)
+    # Use real company description from Apollo if available, else fall back to generated hook
+    if lead.company_description:
+        company_context = lead.company_description
+    else:
+        company_context = _build_contextual_hook(company_name, lead_role, industry, department_hint)
+
+    # Build a "why this person" line tailored to their role
+    why_this_person = _build_why_this_person(department_hint)
 
     return {
         "lead_name": lead_name,
@@ -247,7 +260,9 @@ def extract_lead_profile(lead: Lead) -> dict:
         "company_name": company_name,
         "company_focus": industry,
         "department_hint": department_hint,
-        "contextual_hook": hook,
+        "contextual_hook": company_context,
+        "why_this_person": why_this_person,
+        "has_company_description": bool(lead.company_description),
     }
 
 
@@ -271,6 +286,25 @@ def _infer_department(title: str) -> str:
     if any(t in title_lower for t in ["sales", "account", "business dev"]):
         return "sales"
     return "general"
+
+
+def _build_why_this_person(department: str) -> str:
+    """Build a short reason why the sender is emailing THIS specific person."""
+    if department == "leadership":
+        return "reaching out directly since you'd know the team better than a careers page would"
+    if department == "engineering":
+        return "figured you'd have more context on hiring than the recruiter would"
+    if department == "people":
+        return "saw you handle recruiting and wanted to reach out directly"
+    if department == "data":
+        return "thought you'd be the right person given you're on the data side"
+    if department == "product":
+        return "thought you'd be a good person to ask given your product role"
+    if department == "marketing":
+        return "thought you'd be the right person given your marketing background"
+    if department == "sales":
+        return "thought you might know who handles hiring on your side"
+    return "thought you might know who the right person to connect with is"
 
 
 def _build_contextual_hook(company: str, role: str, industry: str, department: str) -> str:
@@ -353,6 +387,19 @@ def _build_generation_prompt(
     # Vary sentence order
     order_seed = random.choice(["hook_first", "signal_first"])
 
+    has_flex = candidate_profile.get("has_flex_notes", False)
+    has_company_desc = lead_profile.get("has_company_description", False)
+    signal_instruction = (
+        "Use the SENDER SIGNAL verbatim as the basis — it's what they actually built and achieved, not a resume summary."
+        if has_flex else
+        "Use the SENDER SIGNAL as raw material — reference a specific skill or project, not generic phrases."
+    )
+    hook_instruction = (
+        "Use the COMPANY CONTEXT as the basis for your hook — it describes what the company actually does."
+        if has_company_desc else
+        "Use the CONTEXTUAL HOOK as inspiration but rephrase it naturally in your own words."
+    )
+
     prompt = f"""Write a short cold outreach email. You must follow EVERY rule below exactly.
 
 SENDER: {candidate_profile['candidate_name']}
@@ -363,8 +410,9 @@ SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_prof
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
-CONTEXTUAL HOOK: {lead_profile['contextual_hook']}
+COMPANY CONTEXT: {lead_profile['contextual_hook']}
 DEPARTMENT: {lead_profile['department_hint']}
+WHY THIS PERSON: {lead_profile['why_this_person']}
 
 STYLE: {style_info['tone']}
 HOOK APPROACH: {style_info['hook_style']}
@@ -372,9 +420,9 @@ ASK APPROACH: {style_info['soft_ask']}
 
 STRUCTURE (you must include all 5 parts in this order):
 1. GREETING: Use exactly "{greeting}"
-2. MICRO HOOK: One sentence referencing the company or role. Use the contextual hook as inspiration but rephrase naturally. {"Put this before the candidate signal." if order_seed == "hook_first" else "You may weave this into the candidate signal sentence."}
-3. CANDIDATE SIGNAL: One sentence with a concrete signal from the sender's background. Mention something specific (a project, a skill, what they've been building). Use the sender signal as raw material.
-4. RELEVANCE BRIDGE: One short sentence explaining why they're emailing THIS person specifically.
+2. MICRO HOOK: One sentence about the company or what they do. {hook_instruction} {"Put this before the candidate signal." if order_seed == "hook_first" else "You may weave this into the candidate signal sentence."}
+3. CANDIDATE SIGNAL: One sentence with a concrete signal from the sender's background. {signal_instruction}
+4. RELEVANCE BRIDGE: One short sentence using WHY THIS PERSON — explain why you're emailing this specific person, not just the company.
 5. SOFT ASK + CLOSING: End with "{closing}" or a similar casual line. Sign off with "{signoff}".
 
 HARD RULES:
@@ -391,7 +439,7 @@ ABSOLUTELY FORBIDDEN (instant fail if any appear):
 - "I believe my skills align"
 - Any corporate or formal phrasing
 - Praising or summarizing the company ("Your company's commitment to...")
-- Starting any sentence with "As a..."  or "With my experience in..."
+- Starting any sentence with "As a..." or "With my experience in..."
 - "I would be honored" or "contribute to your team"
 - Bullet points or numbered lists
 - Perfect grammar that sounds robotic. Use contractions naturally.

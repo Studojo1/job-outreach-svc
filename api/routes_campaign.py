@@ -152,6 +152,10 @@ async def api_create_campaign(
     Otherwise, uses legacy template substitution.
     """
     try:
+        # Default to AI styles if none provided — never silently fall back to blank template
+        if not request.selected_styles:
+            request.selected_styles = ["warm_intro", "value_prop"]
+
         # Use AI generation if styles are selected
         if request.selected_styles:
             result = create_campaign(

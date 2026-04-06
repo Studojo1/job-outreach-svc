@@ -573,5 +573,32 @@ async def get_candidate_leads(
     results.sort(key=lambda x: (x["score"]["overall"] if x["score"] else 0), reverse=True)
 
     logger.info(f"[LeadSearch] Returning {len(results)} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
-
     return {"leads": results, "total": len(results)}
+
+
+class FlexNotesRequest(BaseModel):
+    best_project: str
+    outcome: str
+
+
+@router.put("/{candidate_id}/flex")
+async def save_flex_notes(
+    candidate_id: int,
+    request: FlexNotesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save post-payment flex notes (best project + outcome) used to personalise email copy."""
+    candidate = db.query(Candidate).filter(
+        Candidate.id == candidate_id,
+        Candidate.user_id == current_user.id,
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    candidate.flex_notes = {
+        "best_project": request.best_project.strip(),
+        "outcome": request.outcome.strip(),
+    }
+    db.commit()
+    return {"ok": True}

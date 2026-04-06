@@ -66,6 +66,7 @@ class Candidate(Base):
     psychometric_profile = Column(JSONB)  # 4-dimension scoring + traits + confidence
     target_roles = Column(JSONB)
     target_industries = Column(JSONB)
+    flex_notes = Column(JSONB)  # post-payment: best_project + outcome answers for email personalisation
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="candidates")
@@ -88,6 +89,7 @@ class Lead(Base):
     company_size = Column(String(50))
     email_verified = Column(Boolean, default=False)
     enrichment_fail_count = Column(Integer, default=0)
+    company_description = Column(Text)  # Apollo organization.short_description for email hook
     status = Column(String(50), default="new")
     created_at = Column(DateTime, default=datetime.utcnow)
 
