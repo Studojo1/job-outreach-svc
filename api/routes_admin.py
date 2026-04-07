@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, text
+from sqlalchemy import case, func, select as sa_select, text
 from sqlalchemy.orm import Session
 
 from api.dependencies import get_admin_user
@@ -202,12 +202,18 @@ async def outreach_users(
         )
 
     total = users_q.count()
-    # Sort by most recent order activity so newest active users appear first
+    # Correlated subquery: max updated_at across all orders per user.
+    # Secondary sort by User.id ensures deterministic pagination even when
+    # multiple users share the same updated_at (e.g. batch-backfilled orders).
+    latest_update_sq = (
+        sa_select(func.max(OutreachOrder.updated_at))
+        .where(OutreachOrder.user_id == User.id)
+        .correlate(User)
+        .scalar_subquery()
+    )
     users = (
         users_q
-        .outerjoin(OutreachOrder, OutreachOrder.user_id == User.id)
-        .group_by(User.id)
-        .order_by(func.max(OutreachOrder.updated_at).desc().nullslast())
+        .order_by(latest_update_sq.desc().nullslast(), User.id.desc())
         .offset(offset)
         .limit(limit)
         .all()
