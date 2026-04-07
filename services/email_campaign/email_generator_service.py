@@ -58,8 +58,8 @@ STYLE_STRUCTURES = {
         "Genuine personal discovery — not flattery, not a company summary. {hook_instruction}\n"
         "3. One understated sentence about your background. Mention your work briefly. "
         "Don't open with it. {signal_instruction}\n"
-        "4. One natural sentence using: {why_this_person}.\n"
-        "5. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\". "
+        "No separate closing pleasantry needed.\n\n"
         "Word target: 75-95 words. Humble, warm, conversational. Company hook comes before credentials."
     ),
     "value_prop": (
@@ -69,8 +69,7 @@ STYLE_STRUCTURES = {
         "State the concrete thing you built and its outcome metric. {signal_instruction}\n"
         "3. Connect your work to what {company} does in one sentence. "
         "Why does your background matter to them specifically? {hook_instruction}\n"
-        "4. One brief phrase: {why_this_person}.\n"
-        "5. Ask who the right person to talk to is. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
         "Word target: 85-110 words. Specific, confident. Your work leads — company hook is the bridge."
     ),
     "company_curiosity": (
@@ -80,9 +79,7 @@ STYLE_STRUCTURES = {
         "This is 60-70% of the email. Genuine curiosity about their work — "
         "not a compliment about the company. {hook_instruction}\n"
         "3. One brief sentence about yourself: what you've built or your field. Keep it minimal.\n"
-        "4. Ask if they have 10 minutes to talk about what their team is working on. "
-        "Frame it as wanting to LEARN, not asking for a job.\n"
-        "5. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
         "Word target: 80-100 words. The candidate barely features — this email is mostly about their work."
     ),
     "peer_to_peer": (
@@ -92,8 +89,7 @@ STYLE_STRUCTURES = {
         "or a tool/problem in the space. Write like a Slack DM, not a job application. {hook_instruction}\n"
         "3. Introduce yourself briefly as a peer — what you work on. One sentence. "
         "Do NOT say you're looking for a job or opportunities.\n"
-        "4. Suggest a quick 15-minute chat to compare notes.\n"
-        "5. Sign off with \"{signoff}\". No formal closing line.\n\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
         "Word target: 65-85 words. Zero job-seeker language. Peer-to-peer only."
     ),
     "direct_ask": (
@@ -102,9 +98,7 @@ STYLE_STRUCTURES = {
         "2. One sentence only: what you built + key impact metric. "
         "Start with 'I built' or 'I worked on'. {signal_instruction}\n"
         "3. One sentence: why you're reaching out to {lead_name} at {company} specifically.\n"
-        "4. One direct ask: do they know of open {job_interest} roles, or who to contact? "
-        "Be explicit, not roundabout.\n"
-        "5. Sign off with \"{signoff}\". No closing pleasantry.\n\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
         "Word target: 50-70 words ONLY. Deliberately short. Busy people appreciate brevity."
     ),
 }
@@ -358,22 +352,17 @@ def _infer_department(title: str) -> str:
 
 
 def _build_why_this_person(department: str) -> str:
-    """Build a short reason why the sender is emailing THIS specific person."""
-    if department == "leadership":
-        return "reaching out directly since you'd know the team better than a careers page would"
-    if department == "engineering":
-        return "figured you'd have more context on hiring than the recruiter would"
+    """Build the closing ask question — direct and natural, no preamble reasoning."""
     if department == "people":
-        return "saw you handle recruiting and wanted to reach out directly"
+        return "Would you be open to a quick chat, or know who's the right person to loop in?"
     if department == "data":
-        return "thought you'd be the right person given you're on the data side"
+        return "Would you know if there's an opening on the data side, or who I should reach out to?"
     if department == "product":
-        return "thought you'd be a good person to ask given your product role"
-    if department == "marketing":
-        return "thought you'd be the right person given your marketing background"
+        return "Would you know if there's an opening, or who on the product side to talk to?"
     if department == "sales":
-        return "thought you might know who handles hiring on your side"
-    return "thought you might know who the right person to connect with is"
+        return "Would you know if there's an opening, or who handles that on your side?"
+    # engineering, leadership, marketing, design, general
+    return "Would you know if there's an opening, or who I should reach out to?"
 
 
 def _build_contextual_hook(company: str, role: str, industry: str, department: str, company_size: str = "") -> str:
