@@ -4,14 +4,8 @@ Generates emails through a multi-stage pipeline:
   candidate_profile_extraction -> lead_profile_extraction -> template_selection
   -> structured_email_generation -> tone_cleaner -> final_email
 
-Every email follows a strict 5-part structure:
-  1. Greeting
-  2. Micro hook (company/role reference)
-  3. Candidate signal (one concrete resume signal)
-  4. Relevance bridge (why this person)
-  5. Soft ask + human closing
-
-Hard rules: 70-120 words, 3-5 sentences, no em dashes, no AI phrasing.
+Each style has a distinct email skeleton — not just a tone change.
+Hard rules: no em dashes, no AI phrasing, no copy-pasted resume language.
 """
 
 import random
@@ -52,6 +46,67 @@ STYLE_DESCRIPTIONS = {
         "hook_style": "state directly why you're reaching out to them specifically",
         "soft_ask": "ask clearly if they know of any open roles or who to contact",
     },
+}
+
+# Per-style email skeletons — each style has a genuinely different structure, not just a tone change.
+# Variables filled via .format() in _build_generation_prompt().
+STYLE_STRUCTURES = {
+    "warm_intro": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. One casual observational sentence about {company} or {lead_name}'s team. "
+        "Genuine personal discovery — not flattery, not a company summary. {hook_instruction}\n"
+        "3. One understated sentence about your background. Mention your work briefly. "
+        "Don't open with it. {signal_instruction}\n"
+        "4. One natural sentence using: {why_this_person}.\n"
+        "5. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "Word target: 75-95 words. Humble, warm, conversational. Company hook comes before credentials."
+    ),
+    "value_prop": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Lead with YOUR work — this is the FIRST sentence after the greeting. "
+        "State the concrete thing you built and its outcome metric. {signal_instruction}\n"
+        "3. Connect your work to what {company} does in one sentence. "
+        "Why does your background matter to them specifically? {hook_instruction}\n"
+        "4. One brief phrase: {why_this_person}.\n"
+        "5. Ask who the right person to talk to is. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "Word target: 85-110 words. Specific, confident. Your work leads — company hook is the bridge."
+    ),
+    "company_curiosity": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Spend 2 sentences on what {company} is doing or building. "
+        "This is 60-70% of the email. Genuine curiosity about their work — "
+        "not a compliment about the company. {hook_instruction}\n"
+        "3. One brief sentence about yourself: what you've built or your field. Keep it minimal.\n"
+        "4. Ask if they have 10 minutes to talk about what their team is working on. "
+        "Frame it as wanting to LEARN, not asking for a job.\n"
+        "5. Close with \"{closing}\". Sign off with \"{signoff}\".\n\n"
+        "Word target: 80-100 words. The candidate barely features — this email is mostly about their work."
+    ),
+    "peer_to_peer": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Open with a collegial observation about their role, their team's work, "
+        "or a tool/problem in the space. Write like a Slack DM, not a job application. {hook_instruction}\n"
+        "3. Introduce yourself briefly as a peer — what you work on. One sentence. "
+        "Do NOT say you're looking for a job or opportunities.\n"
+        "4. Suggest a quick 15-minute chat to compare notes.\n"
+        "5. Sign off with \"{signoff}\". No formal closing line.\n\n"
+        "Word target: 65-85 words. Zero job-seeker language. Peer-to-peer only."
+    ),
+    "direct_ask": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. One sentence only: what you built + key impact metric. "
+        "Start with 'I built' or 'I worked on'. {signal_instruction}\n"
+        "3. One sentence: why you're reaching out to {lead_name} at {company} specifically.\n"
+        "4. One direct ask: do they know of open {job_interest} roles, or who to contact? "
+        "Be explicit, not roundabout.\n"
+        "5. Sign off with \"{signoff}\". No closing pleasantry.\n\n"
+        "Word target: 50-70 words ONLY. Deliberately short. Busy people appreciate brevity."
+    ),
 }
 
 # ── Variation pools ────────────────────────────────────────────────────────────
@@ -160,6 +215,18 @@ def extract_candidate_profile(candidate: Candidate) -> dict:
         signal = flex["best_project"].strip()
         if flex.get("outcome"):
             signal += ". Outcome: " + flex["outcome"].strip()
+        # Normalize: if signal starts with a bare past-tense verb (no subject),
+        # prepend "I" so the LLM reads it as an action the person did, not their identity.
+        _verb_starts = {
+            "built", "created", "developed", "designed", "launched", "led",
+            "worked", "shipped", "wrote", "managed", "ran", "grew", "reduced",
+            "increased", "automated", "scaled", "migrated", "deployed",
+            "architected", "implemented", "owned", "drove", "delivered",
+            "helped", "rebuilt", "spearheaded", "streamlined", "optimized",
+        }
+        first_word = signal.split()[0].lower().rstrip(",.")
+        if first_word in _verb_starts:
+            signal = "I " + signal[0].lower() + signal[1:]
     else:
         signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
@@ -245,11 +312,13 @@ def extract_lead_profile(lead: Lead) -> dict:
     # Infer department from title
     department_hint = _infer_department(lead_role)
 
-    # Use real company description from Apollo if available, else fall back to generated hook
-    if lead.company_description:
-        company_context = lead.company_description
+    # Use real company description from Apollo if available and substantive (>50 chars)
+    # Short descriptions like "Software company" add no value — use size-aware fallback instead
+    company_size = lead.company_size or ""
+    if lead.company_description and len(lead.company_description.strip()) > 50:
+        company_context = lead.company_description.strip()
     else:
-        company_context = _build_contextual_hook(company_name, lead_role, industry, department_hint)
+        company_context = _build_contextual_hook(company_name, lead_role, industry, department_hint, company_size)
 
     # Build a "why this person" line tailored to their role
     why_this_person = _build_why_this_person(department_hint)
@@ -262,7 +331,7 @@ def extract_lead_profile(lead: Lead) -> dict:
         "department_hint": department_hint,
         "contextual_hook": company_context,
         "why_this_person": why_this_person,
-        "has_company_description": bool(lead.company_description),
+        "has_company_description": bool(lead.company_description and len(lead.company_description.strip()) > 50),
     }
 
 
@@ -307,23 +376,45 @@ def _build_why_this_person(department: str) -> str:
     return "thought you might know who the right person to connect with is"
 
 
-def _build_contextual_hook(company: str, role: str, industry: str, department: str) -> str:
+def _build_contextual_hook(company: str, role: str, industry: str, department: str, company_size: str = "") -> str:
     """Build a natural-sounding hook about how the sender discovered this person.
 
-    Must sound like a real person stumbling on the company, NOT flattery.
+    Uses company size to write more targeted hooks — small company hooks feel
+    different from large-company hooks. Must sound like a real person, not flattery.
     """
+    size = company_size.lower() if company_size else ""
+    is_small = any(s in size for s in ["1-10", "11-50"])
+    is_mid = any(s in size for s in ["51-200", "201-500", "201-1000"])
+    is_large = any(s in size for s in ["1001", "5001", "10001"])
+
     hooks = []
-    if industry:
-        hooks.append(f"came across {company} while looking at companies in the {industry} space")
-        hooks.append(f"was reading about teams working in {industry} and noticed {company}")
-        hooks.append(f"saw {company} mentioned in a few {industry} discussions recently")
-    if company:
+
+    if is_small and company:
+        hooks.append(f"noticed {company} came up when I was looking at smaller teams in {industry or 'the space'}")
+        hooks.append(f"saw {company} is a small team and wanted to reach out before you've fully built out")
+        if industry:
+            hooks.append(f"was looking at early-stage {industry} teams and came across {company}")
+    elif is_large and company:
+        hooks.append(f"saw {company}'s {department} team and wanted to reach out directly")
+        hooks.append(f"noticed {company} has a large {department} org and wanted to find the right person")
+        if industry:
+            hooks.append(f"came across {company} while looking at established {industry} companies")
+    elif is_mid and company:
         hooks.append(f"noticed {company} has been growing and looked into the team")
-        hooks.append(f"saw some interesting things about what {company} is working on")
-    if department == "engineering":
-        hooks.append(f"was looking at engineering teams in the area and came across {company}")
+        if industry:
+            hooks.append(f"saw {company} while researching {industry} companies at your scale")
+
+    # Fallbacks when size unknown or nothing above matched
     if not hooks:
-        hooks.append(f"came across {company} recently and wanted to reach out")
+        if industry:
+            hooks.append(f"came across {company} while looking at {industry} companies")
+            hooks.append(f"saw {company} come up a few times when researching {industry} teams")
+        if company:
+            hooks.append(f"noticed {company} came up when I was researching companies in the space")
+        if department == "engineering":
+            hooks.append(f"was looking at engineering teams and {company} caught my attention")
+        if not hooks:
+            hooks.append(f"came across {company} recently and wanted to reach out")
 
     return random.choice(hooks)
 
@@ -377,30 +468,61 @@ def _build_generation_prompt(
 ) -> str:
     """Build the structured prompt for email generation.
 
-    The prompt enforces the 5-part email structure and all hard rules.
+    Each style gets its own structural skeleton — not just a tone change.
     """
-    style_info = STYLE_DESCRIPTIONS.get(style, STYLE_DESCRIPTIONS["warm_intro"])
     greeting = random.choice(GREETINGS).replace("{name}", lead_profile["lead_name"].split()[0])
     closing = random.choice(CLOSINGS)
-    signoff = random.choice(SIGNOFFS).replace("{name}", candidate_profile["candidate_name"].split()[0] if candidate_profile["candidate_name"] else "Me")
-
-    # Vary sentence order
-    order_seed = random.choice(["hook_first", "signal_first"])
+    signoff = random.choice(SIGNOFFS).replace(
+        "{name}", candidate_profile["candidate_name"].split()[0] if candidate_profile["candidate_name"] else "Me"
+    )
 
     has_flex = candidate_profile.get("has_flex_notes", False)
     has_company_desc = lead_profile.get("has_company_description", False)
+
     signal_instruction = (
-        "Use the SENDER SIGNAL verbatim as the basis — it's what they actually built and achieved, not a resume summary."
+        "SENDER SIGNAL describes something the sender BUILT or DID — it is NOT their job title. "
+        "Frame it as 'I built...' or 'I worked on...' — never as identity ('I am a...'). "
+        "Use it as the basis for one concrete sentence about their work and impact."
         if has_flex else
-        "Use the SENDER SIGNAL as raw material — reference a specific skill or project, not generic phrases."
+        "Reference a specific skill or project from SENDER SIGNAL — not generic phrases like 'background in X'."
     )
     hook_instruction = (
-        "Use the COMPANY CONTEXT as the basis for your hook — it describes what the company actually does."
+        "Use the COMPANY CONTEXT as the basis — it's what the company actually does. "
+        "Show you know what they're about, don't just name-drop the company."
         if has_company_desc else
-        "Use the CONTEXTUAL HOOK as inspiration but rephrase it naturally in your own words."
+        "Rephrase the COMPANY CONTEXT naturally — make it sound like something you personally noticed, "
+        "not a templated observation. Be specific to the company, not just the industry."
     )
 
-    prompt = f"""Write a short cold outreach email. You must follow EVERY rule below exactly.
+    # Build the per-style structural template
+    structure_tmpl = STYLE_STRUCTURES.get(style, STYLE_STRUCTURES["warm_intro"])
+    structure = structure_tmpl.format(
+        greeting=greeting,
+        closing=closing,
+        signoff=signoff,
+        hook_instruction=hook_instruction,
+        signal_instruction=signal_instruction,
+        why_this_person=lead_profile["why_this_person"],
+        company=lead_profile["company_name"],
+        lead_role=lead_profile["lead_role"],
+        lead_name=lead_profile["lead_name"].split()[0],
+        job_interest=candidate_profile["job_interest"],
+    )
+
+    # Synthesis note — make the connection between signal and company explicit
+    synthesis = (
+        "SYNTHESIS: Don't just list your background and then ask. "
+        "Make the connection: why would someone who built what you built be valuable to a company that does what "
+        f"{lead_profile['company_name']} does? One sentence that links your work to their context is worth more "
+        "than two sentences that don't connect. The email must feel written specifically for this company."
+    )
+    if has_company_desc:
+        synthesis += (
+            f" You have real context about what {lead_profile['company_name']} does — use it to show you did "
+            "your homework, not just to prove you know what they do."
+        )
+
+    prompt = f"""Write a short cold outreach email. Follow EVERY rule below exactly.
 
 SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
@@ -414,35 +536,25 @@ COMPANY CONTEXT: {lead_profile['contextual_hook']}
 DEPARTMENT: {lead_profile['department_hint']}
 WHY THIS PERSON: {lead_profile['why_this_person']}
 
-STYLE: {style_info['tone']}
-HOOK APPROACH: {style_info['hook_style']}
-ASK APPROACH: {style_info['soft_ask']}
+{structure}
 
-STRUCTURE (you must include all 5 parts in this order):
-1. GREETING: Use exactly "{greeting}"
-2. MICRO HOOK: One sentence about the company or what they do. {hook_instruction} {"Put this before the candidate signal." if order_seed == "hook_first" else "You may weave this into the candidate signal sentence."}
-3. CANDIDATE SIGNAL: One sentence with a concrete signal from the sender's background. {signal_instruction}
-4. RELEVANCE BRIDGE: One short sentence using WHY THIS PERSON — explain why you're emailing this specific person, not just the company.
-5. SOFT ASK + CLOSING: End with "{closing}" or a similar casual line. Sign off with "{signoff}".
+{synthesis}
 
 HARD RULES:
-- Total body: 70-120 words. Count carefully.
-- 3-5 sentences total (not counting greeting and signoff).
-- Use simple, casual language. Write like a real person typing quickly.
-- Subject line: lowercase, casual, under 40 chars. Like a text message. Examples: "quick question", "saw your team at {{company}}", "curious about {{company}}"
-- Use \\n\\n between paragraphs. Keep to 2-3 short paragraphs max.
+- Use simple, casual language. Write like a real person typing quickly, not a template.
+- Subject line: lowercase, casual, under 40 chars. Like a text message subject.
+- Use \\n\\n between paragraphs. 2-3 short paragraphs max.
+- SENDER SIGNAL is something the sender BUILT or ACHIEVED — never interpret it as their job title.
 
-ABSOLUTELY FORBIDDEN (instant fail if any appear):
-- Em dashes (the -- or \u2014 character)
+ABSOLUTELY FORBIDDEN:
+- Em dashes (-- or \u2014)
 - "I hope this email finds you well"
-- "I am passionate about" or "excited to apply"
-- "I believe my skills align"
-- Any corporate or formal phrasing
-- Praising or summarizing the company ("Your company's commitment to...")
+- "I am passionate about" / "excited to apply" / "I believe my skills align"
+- Corporate phrasing, flattery, praising the company
 - Starting any sentence with "As a..." or "With my experience in..."
-- "I would be honored" or "contribute to your team"
+- "I would be honored" / "contribute to your team" / "make a meaningful impact"
 - Bullet points or numbered lists
-- Perfect grammar that sounds robotic. Use contractions naturally.
+- "I am a [thing from the signal]" — the signal is a project, not an identity
 
 Return valid JSON only: {{"subject": "...", "body": "..."}}
 Body must use \\n\\n between paragraphs."""
