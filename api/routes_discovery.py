@@ -14,6 +14,7 @@ from services.lead_discovery.lead_collector_service import collect_leads, collec
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.candidate_schema import CandidateProfile
 from api.dependencies import get_current_user
+from core.analytics import capture
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,10 @@ async def search_leads(
         logger.info(f"[DISCOVERY] target_leads={request.target_leads} below minimum, enforcing 500")
         request.target_leads = 500
     logger.info(f"[DISCOVERY] POST /discovery/search — candidate_id={request.candidate_id}, target={request.target_leads}")
+    capture("lead_discovery_started", str(current_user.id), {
+        "candidate_id": request.candidate_id,
+        "target_leads": request.target_leads,
+    })
 
     candidate = db.query(Candidate).filter_by(
         id=request.candidate_id, user_id=current_user.id
@@ -237,7 +242,15 @@ async def search_leads(
             logger.error(f"[LeadSearch] Scoring failed (non-fatal): {score_err}", exc_info=True)
 
         t_end = time.perf_counter()
-        logger.info(f"[LeadSearch] Pipeline complete: {(t_end - t_start)*1000:.0f}ms total, leads={count}, scored={scored_count}")
+        duration = round(t_end - t_start, 1)
+        logger.info(f"[LeadSearch] Pipeline complete: {duration*1000:.0f}ms total, leads={count}, scored={scored_count}")
+        capture("lead_discovery_completed", str(current_user.id), {
+            "candidate_id": request.candidate_id,
+            "leads_found": count,
+            "leads_scored": scored_count,
+            "dream_company_leads": dream_count,
+            "duration_seconds": duration,
+        })
 
         return {"status": "success", "leads_collected": count, "leads_scored": scored_count}
     except Exception as e:

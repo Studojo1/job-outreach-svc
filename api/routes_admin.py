@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,14 @@ STUCK_THRESHOLD_HOURS = 6
 ACTIVE_STATUSES = [
     "leads_generating", "leads_ready", "enriching", "enrichment_complete",
     "campaign_setup", "email_connected", "campaign_running",
+]
+# Only flag stuck for states where the system is doing automated work.
+# User-action states (leads_ready, enrichment_complete, campaign_setup,
+# email_connected) wait for user input and should never be marked stuck.
+SYSTEM_PROCESSING_STATUSES = [
+    "leads_generating",
+    "enriching",
+    "campaign_running",
 ]
 
 
@@ -47,12 +55,12 @@ async def outreach_overview(
     active_orders = sum(orders_by_status.get(s, 0) for s in ACTIVE_STATUSES)
     completed_orders = orders_by_status.get("completed", 0)
 
-    # Stuck orders
+    # Stuck orders (only system-processing states — not user-action states)
     stuck_orders = (
         db.query(func.count())
         .select_from(OutreachOrder)
         .filter(
-            OutreachOrder.status.in_(ACTIVE_STATUSES),
+            OutreachOrder.status.in_(SYSTEM_PROCESSING_STATUSES),
             OutreachOrder.updated_at < stuck_cutoff,
         )
         .scalar()
@@ -194,13 +202,23 @@ async def outreach_users(
         )
 
     total = users_q.count()
-    users = users_q.order_by(User.created_at.desc()).offset(offset).limit(limit).all()
+    # Sort by most recent order activity so newest active users appear first
+    users = (
+        users_q
+        .outerjoin(OutreachOrder, OutreachOrder.user_id == User.id)
+        .group_by(User.id)
+        .order_by(func.max(OutreachOrder.updated_at).desc().nullslast())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     result = []
     for u in users:
-        # Orders
+        # Orders — latest order for display, active order for stuck detection
         orders = db.query(OutreachOrder).filter(OutreachOrder.user_id == u.id).all()
         active_order = next((o for o in orders if o.status in ACTIVE_STATUSES), None)
+        latest_order = max(orders, key=lambda o: o.updated_at or o.created_at, default=None) if orders else None
 
         # Payment
         total_paid = (
@@ -243,6 +261,7 @@ async def outreach_users(
 
         is_stuck = (
             active_order is not None
+            and active_order.status in SYSTEM_PROCESSING_STATUSES
             and active_order.updated_at
             and active_order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
@@ -252,10 +271,10 @@ async def outreach_users(
             "user_name": u.name,
             "user_email": u.email,
             "total_orders": len(orders),
-            "active_order_status": active_order.status if active_order else None,
-            "active_order_id": active_order.id if active_order else None,
+            "active_order_status": latest_order.status if latest_order else None,
+            "active_order_id": latest_order.id if latest_order else None,
             "active_order_updated_at": (
-                active_order.updated_at.isoformat() if active_order and active_order.updated_at else None
+                latest_order.updated_at.isoformat() if latest_order and latest_order.updated_at else None
             ),
             "is_stuck": is_stuck,
             "total_paid_cents": total_paid,
@@ -349,7 +368,7 @@ async def outreach_user_detail(
                 }
 
         is_stuck = (
-            order.status in ACTIVE_STATUSES
+            order.status in SYSTEM_PROCESSING_STATUSES
             and order.updated_at
             and order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
@@ -417,4 +436,49 @@ async def outreach_user_detail(
         ],
         "orders": orders_data,
         "lead_summary": lead_summary,
+    }
+
+
+@router.get("/signups")
+async def signups_by_date(
+    start: str = Query(..., description="Start date YYYY-MM-DD (inclusive)"),
+    end: str = Query(..., description="End date YYYY-MM-DD (inclusive)"),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Return signup counts from the User table for a date range.
+    Used by the analytics dashboard for accurate new-signup metrics.
+    """
+    try:
+        start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start date, expected YYYY-MM-DD")
+    try:
+        end_dt = (datetime.fromisoformat(end) + timedelta(days=1)).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid end date, expected YYYY-MM-DD")
+
+    total = (
+        db.query(func.count(User.id))
+        .filter(User.created_at >= start_dt, User.created_at < end_dt)
+        .scalar()
+    ) or 0
+
+    daily_rows = (
+        db.query(
+            func.date_trunc("day", User.created_at).label("day"),
+            func.count(User.id).label("signups"),
+        )
+        .filter(User.created_at >= start_dt, User.created_at < end_dt)
+        .group_by("day")
+        .order_by("day")
+        .all()
+    )
+
+    return {
+        "count": total,
+        "daily": [
+            {"day": row.day.strftime("%Y-%m-%d"), "signups": row.signups}
+            for row in daily_rows
+        ],
     }

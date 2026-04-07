@@ -25,6 +25,7 @@ import pytz
 from sqlalchemy import func
 
 from core.logger import get_logger
+from core.analytics import capture as ph_capture
 from database.session import SessionLocal
 from database.models import (
     Campaign, EmailSent, EmailAccount, Lead, LeadScore,
@@ -482,6 +483,13 @@ def _send_ready(db) -> tuple:
 
             logger.info("[SENDER] Email %d sent successfully (gmail_id=%s, thread_id=%s)",
                         email.id, result.get("id"), result.get("threadId"))
+            candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+            if candidate:
+                ph_capture("email_sent", str(candidate.user_id), {
+                    "campaign_id": email.campaign_id,
+                    "assigned_style": email.assigned_style,
+                    "is_jit_enriched": email.enrichment_status == "enriched",
+                })
 
         except Exception as e:
             logger.error("[SENDER] Email %d failed: %s", email.id, e)
@@ -489,6 +497,12 @@ def _send_ready(db) -> tuple:
             email.error_message = str(e)[:500]
             db.commit()
             failed_count += 1
+            candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+            if candidate:
+                ph_capture("email_failed", str(candidate.user_id), {
+                    "campaign_id": email.campaign_id,
+                    "error_type": type(e).__name__,
+                })
 
     return sent_count, failed_count
 

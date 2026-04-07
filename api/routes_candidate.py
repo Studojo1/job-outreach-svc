@@ -12,6 +12,7 @@ from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
 from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
+from core.analytics import capture, identify
 
 import logging
 import time
@@ -53,6 +54,11 @@ async def upload_resume(
             candidate_id=new_candidate.id,
             db_session_factory=SessionLocal,
         )
+
+        capture("resume_uploaded", str(current_user.id), {
+            "candidate_id": new_candidate.id,
+            "file_type": (file.filename or "").rsplit(".", 1)[-1].lower(),
+        })
 
         return {
             "status": "success",
@@ -267,6 +273,13 @@ async def candidate_chat_stream(
         else:
             candidate.dream_companies = []
 
+        # Persist flex notes (email personalisation signals from psychometric phase)
+        best_project = (answers.get("flex_best_project") or "").strip()
+        outcome = (answers.get("flex_outcome") or "").strip()
+        if best_project:
+            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
+            logger.info(f"[STREAM] Stored flex_notes for candidate {candidate_id}")
+
         # ── Run psychometric profiling ────────────────────────────────
         psych_profile = {}
         try:
@@ -280,6 +293,12 @@ async def candidate_chat_stream(
             logger.error(f"[STREAM] Psychometric profiling failed (non-fatal): {psych_err}", exc_info=True)
 
         db.commit()
+
+        capture("profile_quiz_completed", str(current_user.id), {
+            "candidate_id": candidate_id,
+            "questions_answered": q_index,
+            "has_dream_companies": bool(candidate.dream_companies),
+        })
 
         payload = {
             "type": "complete",
@@ -315,6 +334,7 @@ async def candidate_chat_stream(
         "current_state": "MCQ" if mcq else "TEXT",
         "mcq": mcq,
         "text_input": q_def.get("text_input", False),
+        "input_placeholder": q_def.get("input_placeholder") or None,
         "is_complete": False,
         "questions_asked_so_far": q_index + 1,
     }
@@ -561,5 +581,32 @@ async def get_candidate_leads(
     results.sort(key=lambda x: (x["score"]["overall"] if x["score"] else 0), reverse=True)
 
     logger.info(f"[LeadSearch] Returning {len(results)} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
-
     return {"leads": results, "total": len(results)}
+
+
+class FlexNotesRequest(BaseModel):
+    best_project: str
+    outcome: str
+
+
+@router.put("/{candidate_id}/flex")
+async def save_flex_notes(
+    candidate_id: int,
+    request: FlexNotesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save post-payment flex notes (best project + outcome) used to personalise email copy."""
+    candidate = db.query(Candidate).filter(
+        Candidate.id == candidate_id,
+        Candidate.user_id == current_user.id,
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    candidate.flex_notes = {
+        "best_project": request.best_project.strip(),
+        "outcome": request.outcome.strip(),
+    }
+    db.commit()
+    return {"ok": True}
