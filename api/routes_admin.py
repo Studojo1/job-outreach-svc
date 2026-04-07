@@ -202,13 +202,23 @@ async def outreach_users(
         )
 
     total = users_q.count()
-    users = users_q.order_by(User.created_at.desc()).offset(offset).limit(limit).all()
+    # Sort by most recent order activity so newest active users appear first
+    users = (
+        users_q
+        .outerjoin(OutreachOrder, OutreachOrder.user_id == User.id)
+        .group_by(User.id)
+        .order_by(func.max(OutreachOrder.updated_at).desc().nullslast())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     result = []
     for u in users:
-        # Orders
+        # Orders — latest order for display, active order for stuck detection
         orders = db.query(OutreachOrder).filter(OutreachOrder.user_id == u.id).all()
         active_order = next((o for o in orders if o.status in ACTIVE_STATUSES), None)
+        latest_order = max(orders, key=lambda o: o.updated_at or o.created_at, default=None) if orders else None
 
         # Payment
         total_paid = (
@@ -261,10 +271,10 @@ async def outreach_users(
             "user_name": u.name,
             "user_email": u.email,
             "total_orders": len(orders),
-            "active_order_status": active_order.status if active_order else None,
-            "active_order_id": active_order.id if active_order else None,
+            "active_order_status": latest_order.status if latest_order else None,
+            "active_order_id": latest_order.id if latest_order else None,
             "active_order_updated_at": (
-                active_order.updated_at.isoformat() if active_order and active_order.updated_at else None
+                latest_order.updated_at.isoformat() if latest_order and latest_order.updated_at else None
             ),
             "is_stuck": is_stuck,
             "total_paid_cents": total_paid,
