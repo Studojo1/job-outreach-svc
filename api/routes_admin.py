@@ -22,8 +22,8 @@ router = APIRouter(prefix="/admin/outreach", tags=["admin"])
 
 STUCK_THRESHOLD_HOURS = 6
 ACTIVE_STATUSES = [
-    "leads_generating", "leads_ready", "enriching", "enrichment_complete",
-    "campaign_setup", "email_connected", "campaign_running",
+    "profile_complete", "leads_generating", "leads_ready", "enriching",
+    "enrichment_complete", "campaign_setup", "email_connected", "campaign_running",
 ]
 # Only flag stuck for states where the system is doing automated work.
 # User-action states (leads_ready, enrichment_complete, campaign_setup,
@@ -33,6 +33,25 @@ SYSTEM_PROCESSING_STATUSES = [
     "enriching",
     "campaign_running",
 ]
+
+
+def _meaningful_ts(order, fallback_dt) -> str | None:
+    """Return the most meaningful 'last active' timestamp for an order.
+
+    If updated_at ≈ created_at (within 2s) the order was never genuinely
+    progressed by user action (e.g. batch-backfilled or just created).
+    In that case fall back to the user's own created_at so the admin panel
+    shows when the person actually signed up rather than a batch-op timestamp.
+    """
+    ts = order.updated_at or order.created_at
+    if ts is None:
+        return fallback_dt.isoformat() if fallback_dt else None
+    created = order.created_at
+    if created:
+        delta = abs((ts - created).total_seconds())
+        if delta < 2:
+            ts = fallback_dt or ts
+    return ts.isoformat() if ts else None
 
 
 @router.get("/overview")
@@ -280,7 +299,7 @@ async def outreach_users(
             "active_order_status": latest_order.status if latest_order else None,
             "active_order_id": latest_order.id if latest_order else None,
             "active_order_updated_at": (
-                latest_order.updated_at.isoformat() if latest_order and latest_order.updated_at else None
+                _meaningful_ts(latest_order, u.created_at) if latest_order else None
             ),
             "is_stuck": is_stuck,
             "total_paid_cents": total_paid,
