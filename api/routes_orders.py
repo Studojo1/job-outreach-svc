@@ -9,8 +9,9 @@ from typing import Optional
 
 from database.session import get_db
 from database.models import (
-    User, OutreachOrder, Candidate, Campaign, EmailAccount,
+    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead,
 )
+from sqlalchemy import func
 from api.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 
 # Valid state transitions (JIT: enrichment happens during campaign_running, not as a separate step)
 VALID_TRANSITIONS = {
-    "created": ["leads_generating"],
+    "created": ["leads_generating", "profile_complete"],
+    "profile_complete": ["leads_generating", "leads_ready"],
     "leads_generating": ["leads_ready"],
     "leads_ready": ["campaign_setup"],
     "campaign_setup": ["email_connected"],
@@ -64,6 +66,20 @@ async def create_order(
         status="created",
     )
     _append_log(order, "Order created")
+
+    # Auto-advance status based on what the candidate has already completed
+    if request.candidate_id:
+        candidate = db.query(Candidate).filter(Candidate.id == request.candidate_id).first()
+        if candidate:
+            lead_count = db.query(func.count()).select_from(Lead)\
+                .filter(Lead.candidate_id == request.candidate_id).scalar() or 0
+            if lead_count > 0:
+                order.status = "leads_ready"
+                _append_log(order, f"Auto-advanced to leads_ready ({lead_count} leads found)")
+            else:
+                order.status = "profile_complete"
+                _append_log(order, "Auto-advanced to profile_complete (onboarding done, no leads yet)")
+
     db.add(order)
     db.commit()
     db.refresh(order)
