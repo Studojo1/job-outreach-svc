@@ -12,6 +12,7 @@ from api.routes_gmail import router as gmail_router
 from api.routes_orders import router as orders_router
 from api.routes_payment import router as payment_router
 from api.routes_admin import router as admin_router
+from api.routes_linkedin import router as linkedin_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -67,6 +68,7 @@ app.include_router(gmail_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(payment_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(linkedin_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

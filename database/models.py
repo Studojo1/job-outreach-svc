@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -248,3 +248,56 @@ class UserCredit(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="user_credits")
+
+
+class LinkedInToken(Base):
+    __tablename__ = "linkedin_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), unique=True, nullable=False)
+    li_at_enc = Column(Text, nullable=False)       # base64(AES-256-GCM ciphertext)
+    jsessionid_enc = Column(Text, nullable=False)  # base64(AES-256-GCM ciphertext)
+    nonce = Column(Text, nullable=False)           # base64 GCM nonce (12 bytes)
+    linkedin_name = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+    search_jobs = relationship("LinkedInSearchJob", back_populates="token_user", cascade="all, delete-orphan",
+                               foreign_keys="LinkedInSearchJob.user_id",
+                               primaryjoin="LinkedInToken.user_id == LinkedInSearchJob.user_id")
+
+
+class LinkedInSearchJob(Base):
+    __tablename__ = "linkedin_search_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    target_role = Column(Text, nullable=False)
+    target_companies = Column(ARRAY(Text), default=[])
+    location = Column(Text)
+    status = Column(String(20), default="queued", nullable=False)  # queued|running|done|failed
+    result_count = Column(Integer, default=0)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    token_user = relationship("LinkedInToken", back_populates="search_jobs",
+                              foreign_keys=[user_id],
+                              primaryjoin="LinkedInSearchJob.user_id == LinkedInToken.user_id")
+    leads = relationship("LinkedInOutreachLead", back_populates="search_job", cascade="all, delete-orphan")
+
+
+class LinkedInOutreachLead(Base):
+    __tablename__ = "linkedin_outreach_leads"
+    id = Column(Integer, primary_key=True, index=True)
+    search_job_id = Column(Integer, ForeignKey("linkedin_search_jobs.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    headline = Column(Text)
+    company = Column(Text)
+    profile_url = Column(Text, nullable=False)
+    profile_image_url = Column(Text)
+    suggested_message = Column(Text)
+    message_copied_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    search_job = relationship("LinkedInSearchJob", back_populates="leads")

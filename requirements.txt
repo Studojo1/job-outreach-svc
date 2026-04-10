@@ -24,3 +24,4 @@ razorpay==1.4.2
 dodopayments>=0.11.0
 standardwebhooks>=1.0.0
 pytz==2024.1
+cryptography==43.0.3

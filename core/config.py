@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     POSTHOG_KEY: str = ""
     POSTHOG_HOST: str = "https://eu.i.posthog.com"
 
+    # LINKEDIN OUTREACH
+    # Generate: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+    LINKEDIN_ENCRYPTION_KEY: str = ""  # base64-encoded 32-byte AES key
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
         env_file_encoding="utf-8",
