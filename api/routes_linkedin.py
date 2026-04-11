@@ -136,7 +136,8 @@ async def start_search(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Start an async people search. Returns a job ID to poll for status/results."""
+    """Create a search job. The extension does the actual LinkedIn search and
+    submits results via POST /search/{job_id}/submit-results."""
     token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected. Install the extension first.")
@@ -155,17 +156,8 @@ async def start_search(
     db.commit()
     db.refresh(job)
 
-    background_tasks.add_task(
-        _run_search,
-        job_id=job.id,
-        user_id=current_user.id,
-        user_name=current_user.name,
-        li_at_enc=token_row.li_at_enc,
-        jsessionid_enc=token_row.jsessionid_enc,
-        nonce=token_row.nonce,
-        target_role=body.target_role.strip(),
-        location=body.location,
-    )
+    # Search is done by the Chrome extension (browser context, real IP + cookies).
+    # Extension will POST results to /search/{job_id}/submit-results.
 
     return SearchJobResponse(
         id=job.id,
@@ -174,6 +166,47 @@ async def start_search(
         result_count=0,
         created_at=job.created_at.isoformat(),
     )
+
+
+class SubmitResultsRequest(BaseModel):
+    people: list[dict]
+
+
+@router.post("/search/{job_id}/submit-results")
+async def submit_search_results(
+    job_id: int,
+    body: SubmitResultsRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Called by the Chrome extension with raw people data from LinkedIn Voyager.
+    Triggers async message generation and saves leads."""
+    job = (
+        db.query(LinkedInSearchJob)
+        .filter(LinkedInSearchJob.id == job_id, LinkedInSearchJob.user_id == current_user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Search job not found")
+
+    if job.status not in ("queued", "running"):
+        raise HTTPException(status_code=400, detail=f"Job is already {job.status}")
+
+    job.status = "running"
+    job.updated_at = datetime.utcnow()
+    db.commit()
+
+    background_tasks.add_task(
+        _process_extension_results,
+        job_id=job.id,
+        user_id=current_user.id,
+        user_name=current_user.name,
+        target_role=job.target_role,
+        people=body.people,
+    )
+
+    return {"ok": True}
 
 
 @router.get("/search/{job_id}", response_model=SearchJobResponse)
@@ -289,41 +322,21 @@ async def list_searches(
 
 # ── Background task ────────────────────────────────────────────────────────────
 
-async def _run_search(
+async def _process_extension_results(
     job_id: int,
     user_id: str,
     user_name: str,
-    li_at_enc: str,
-    jsessionid_enc: str,
-    nonce: str,
     target_role: str,
-    location: Optional[str],
+    people: list[dict],
 ):
-    """Background task: run LinkedIn search, generate messages, save leads."""
+    """Background task: receive people from extension, generate messages, save leads."""
     from database.session import SessionLocal
 
     db = SessionLocal()
     try:
-        # Mark as running
         job = db.query(LinkedInSearchJob).filter(LinkedInSearchJob.id == job_id).first()
         if not job:
             return
-        job.status = "running"
-        job.updated_at = datetime.utcnow()
-        db.commit()
-
-        # Decrypt tokens
-        li_at = decrypt(li_at_enc, nonce)
-        jsessionid = decrypt(jsessionid_enc, nonce)
-
-        # Search LinkedIn
-        people = await search_people(
-            li_at=li_at,
-            jsessionid=jsessionid,
-            keywords=target_role,
-            location=location,
-            count=10,
-        )
 
         if not people:
             job.status = "done"
@@ -360,20 +373,12 @@ async def _run_search(
 
         logger.info("Search job %d completed: %d leads", job_id, len(people_with_messages))
 
-    except ValueError as e:
-        logger.warning("LinkedIn search job %d failed (user error): %s", job_id, e)
-        job = db.query(LinkedInSearchJob).filter(LinkedInSearchJob.id == job_id).first()
-        if job:
-            job.status = "failed"
-            job.error = str(e)
-            job.updated_at = datetime.utcnow()
-            db.commit()
     except Exception as e:
-        logger.error("LinkedIn search job %d failed: %s", job_id, e, exc_info=True)
+        logger.error("LinkedIn process results job %d failed: %s", job_id, e, exc_info=True)
         job = db.query(LinkedInSearchJob).filter(LinkedInSearchJob.id == job_id).first()
         if job:
             job.status = "failed"
-            job.error = "Search failed. Please try again."
+            job.error = "Processing failed. Please try again."
             job.updated_at = datetime.utcnow()
             db.commit()
     finally:
