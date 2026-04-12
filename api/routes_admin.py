@@ -298,6 +298,7 @@ async def outreach_users(
             "total_orders": len(orders),
             "active_order_status": latest_order.status if latest_order else None,
             "active_order_id": latest_order.id if latest_order else None,
+            "active_campaign_id": latest_order.campaign_id if latest_order else None,
             "active_order_updated_at": (
                 _meaningful_ts(latest_order, u.created_at) if latest_order else None
             ),
@@ -506,4 +507,62 @@ async def signups_by_date(
             {"day": row.day.strftime("%Y-%m-%d"), "signups": row.signups}
             for row in daily_rows
         ],
+    }
+
+
+@router.get("/campaign/{campaign_id}/emails")
+async def admin_campaign_emails(
+    campaign_id: int,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Admin-only: return all emails for any campaign, bypassing user ownership check."""
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    emails = (
+        db.query(EmailSent)
+        .filter(EmailSent.campaign_id == campaign_id)
+        .order_by(func.coalesce(EmailSent.scheduled_at, EmailSent.created_at).asc())
+        .all()
+    )
+
+    result = []
+    for email in emails:
+        lead = db.query(Lead).filter_by(id=email.lead_id).first() if email.lead_id else None
+        result.append({
+            "id": email.id,
+            "lead_name": lead.name if lead else "Unknown",
+            "lead_company": lead.company if lead else "",
+            "lead_title": lead.title if lead else "",
+            "to_email": email.to_email,
+            "subject": email.subject,
+            "body": email.body,
+            "status": email.status,
+            "assigned_style": email.assigned_style,
+            "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+            "reply_text": email.reply_text,
+            "reply_sentiment": email.reply_sentiment,
+            "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
+            "bounce_reason": email.bounce_reason,
+        })
+
+    # Resolve the campaign owner via the linked order
+    order = db.query(OutreachOrder).filter(OutreachOrder.campaign_id == campaign_id).first()
+    owner = db.query(User).filter(User.id == order.user_id).first() if order else None
+
+    return {
+        "campaign": {
+            "id": campaign.id,
+            "name": campaign.name,
+            "status": campaign.status,
+            "daily_limit": campaign.daily_limit,
+        },
+        "owner": {
+            "id": owner.id if owner else None,
+            "name": owner.name if owner else "Unknown",
+            "email": owner.email if owner else "",
+        },
+        "emails": result,
     }
