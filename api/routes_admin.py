@@ -298,7 +298,10 @@ async def outreach_users(
             "total_orders": len(orders),
             "active_order_status": latest_order.status if latest_order else None,
             "active_order_id": latest_order.id if latest_order else None,
-            "active_campaign_id": latest_order.campaign_id if latest_order else None,
+            "active_campaign_id": next(
+                (o.campaign_id for o in sorted(orders, key=lambda o: o.updated_at or o.created_at, reverse=True) if o.campaign_id),
+                None,
+            ),
             "active_order_updated_at": (
                 _meaningful_ts(latest_order, u.created_at) if latest_order else None
             ),
