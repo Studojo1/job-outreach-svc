@@ -165,7 +165,12 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     career = parsed.get("career_analysis", {})
     prefs = parsed.get("preferences", {})
 
-    name = personal.get("name") or parsed.get("name") or fallback_name or ""
+    _DEGREE_WORDS = {"bachelor", "master", "phd", "doctorate", "mba", "bsc", "msc", "b.tech", "m.tech", "b.e", "m.e", "associate"}
+    def _is_valid_name(n: str) -> bool:
+        return bool(n) and not any(w in n.lower() for w in _DEGREE_WORDS)
+
+    raw_name = personal.get("name") or parsed.get("name") or ""
+    name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
 
     # Skills
     skills = personal.get("skills_detected", []) or parsed.get("skills", [])
