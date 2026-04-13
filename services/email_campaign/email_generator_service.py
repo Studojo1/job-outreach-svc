@@ -152,7 +152,7 @@ FORBIDDEN_PHRASES = [
 
 # ── Stage 1: Candidate Profile Extraction ──────────────────────────────────────
 
-def extract_candidate_profile(candidate: Candidate) -> dict:
+def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> dict:
     """Extract a structured profile from the candidate's parsed resume JSON.
 
     Returns:
@@ -165,7 +165,7 @@ def extract_candidate_profile(candidate: Candidate) -> dict:
     career = parsed.get("career_analysis", {})
     prefs = parsed.get("preferences", {})
 
-    name = personal.get("name") or parsed.get("name") or ""
+    name = personal.get("name") or parsed.get("name") or fallback_name or ""
 
     # Skills
     skills = personal.get("skills_detected", []) or parsed.get("skills", [])
@@ -612,7 +612,7 @@ def clean_tone(text: str) -> str:
 
 # ── Main Pipeline ──────────────────────────────────────────────────────────────
 
-def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str) -> Tuple[str, str]:
+def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_name: str = "") -> Tuple[str, str]:
     """Generate a human-sounding outreach email through the structured pipeline.
 
     Pipeline stages:
@@ -623,11 +623,16 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str) -> Tup
       5. Clean tone
       6. Validate
 
+    Args:
+        user_name: The sender's display name (e.g. from User.name). Used as
+                   fallback when the resume parser doesn't extract a name,
+                   preventing the sign-off from defaulting to "Me".
+
     Returns:
         Tuple of (subject, body) strings.
     """
     # Stage 1: Candidate profile extraction
-    candidate_profile = extract_candidate_profile(candidate)
+    candidate_profile = extract_candidate_profile(candidate, fallback_name=user_name)
 
     # Stage 2: Lead profile extraction
     lead_profile = extract_lead_profile(lead)

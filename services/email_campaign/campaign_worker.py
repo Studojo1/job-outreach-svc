@@ -29,7 +29,7 @@ from core.analytics import capture as ph_capture
 from database.session import SessionLocal
 from database.models import (
     Campaign, EmailSent, EmailAccount, Lead, LeadScore,
-    Candidate, OutreachOrder, UserCredit,
+    Candidate, OutreachOrder, UserCredit, User,
 )
 from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 from services.email_campaign.gmail_inbox_service import (
@@ -365,10 +365,13 @@ def _generate_pending(db) -> int:
         if not candidate:
             continue
 
+        user = db.query(User).filter_by(id=campaign.user_id).first()
+        user_name = user.name if user else ""
+
         style = email.assigned_style or "warm_intro"
 
         try:
-            subject, body = generate_email_for_lead(lead, candidate, style)
+            subject, body = generate_email_for_lead(lead, candidate, style, user_name=user_name)
             email.subject = subject
             email.body = body
             email.status = "queued"  # Ready for Phase 3 (send)

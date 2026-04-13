@@ -549,6 +549,7 @@ async def admin_campaign_emails(
             "reply_sentiment": email.reply_sentiment,
             "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
             "bounce_reason": email.bounce_reason,
+            "error_message": email.error_message,
         })
 
     # Resolve the campaign owner via the linked order

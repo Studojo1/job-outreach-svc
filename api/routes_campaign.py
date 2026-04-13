@@ -262,11 +262,11 @@ async def preview_email(
 
     try:
         style = assign_style(sample_lead, request.selected_styles)
-        # Hard 12s timeout — prevents the 30s frontend timeout being hit 3x (= 90s hang).
-        # If Azure OpenAI is slow, we fail fast with a clear message.
+        # 25s timeout — gives Azure OpenAI enough time on slow days while still
+        # failing fast with a clear message rather than hanging the frontend.
         subject, body = await asyncio.wait_for(
-            asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style),
-            timeout=12.0,
+            asyncio.to_thread(generate_email_for_lead, sample_lead, candidate, style, current_user.name or ""),
+            timeout=25.0,
         )
         return {
             "subject": subject,
