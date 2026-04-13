@@ -64,7 +64,7 @@ def generate_json(prompt: str, schema: Dict[str, Any], temperature: float = 0.0)
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info("[AI] Sending request to Azure OpenAI (attempt %d/%d)", attempt, MAX_RETRIES)
-            resp = requests.post(url, headers=headers, json=payload, timeout=45)
+            resp = requests.post(url, headers=headers, json=payload, timeout=90)
             
             if not resp.ok:
                 logger.error("[AI] HTTP Error %d: %s", resp.status_code, resp.text)
