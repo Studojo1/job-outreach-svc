@@ -365,7 +365,7 @@ def _generate_pending(db) -> int:
         if not candidate:
             continue
 
-        user = db.query(User).filter_by(id=campaign.user_id).first()
+        user = db.query(User).filter_by(id=candidate.user_id).first()
         user_name = user.name if user else ""
 
         style = email.assigned_style or "warm_intro"
