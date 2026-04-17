@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from typing import Optional
 
 import httpx
@@ -189,56 +190,91 @@ def _auth_check(resp: httpx.Response) -> None:
 
 
 def _extract_urn_id(urn: str) -> str:
-    """Pull the ID fragment from any LinkedIn URN, e.g. 'urn:li:fsd_profile:ACoAA' → 'ACoAA'."""
+    """Pull the ID fragment from any LinkedIn URN."""
     if urn and ":" in urn:
         fragment = urn.rsplit(":", 1)[-1]
-        if len(fragment) > 4:  # skip short/garbage values
+        if len(fragment) > 4:
             return fragment
     return ""
 
 
-async def _get_profile_id(
+async def _resolve_member_urns(
     client: httpx.AsyncClient,
     headers: dict,
     slug: str,
-) -> str:
-    """Resolve a public LinkedIn slug to its internal profile ID.
+) -> tuple[str, str]:
+    """Return (member_numeric_id, fsd_profile_id) for a LinkedIn slug.
 
-    Uses three strategies in order, stopping at the first success.
+    member_numeric_id is a plain integer string like "123456789" — used as
+    urn:li:member:{id} which is the most compatible recipient format for messaging.
+    fsd_profile_id is the base64 token from urn:li:fsd_profile:{id}.
+
+    Either value may be empty string if not found via that strategy.
     """
+    member_id = ""
+    fsd_id = ""
     ref_headers = {**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"}
 
-    # ── Strategy 1: dash/profiles (newest, most stable as of 2024) ────────────
+    # ── Strategy 1: fetch the profile page HTML and regex out URNs ────────────
+    # The rendered page reliably embeds urn:li:member:{numericId} in the JSON blobs.
+    try:
+        page_resp = await client.get(
+            f"https://www.linkedin.com/in/{slug}/",
+            headers={
+                "Cookie": headers["Cookie"],
+                "User-Agent": _USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.linkedin.com/feed/",
+            },
+        )
+        if page_resp.status_code == 200:
+            html = page_resp.text
+            # Numeric member ID — most useful for messaging
+            m = re.search(r'"objectUrn"\s*:\s*"urn:li:member:(\d+)"', html)
+            if not m:
+                m = re.search(r'urn:li:member:(\d+)', html)
+            if m:
+                member_id = m.group(1)
+            # fsd_profile token as fallback
+            f = re.search(r'urn:li:fsd_profile:([A-Za-z0-9_-]{10,})', html)
+            if f:
+                fsd_id = f.group(1)
+    except Exception:
+        pass
+
+    if member_id or fsd_id:
+        return member_id, fsd_id
+
+    # ── Strategy 2: dash profiles API ─────────────────────────────────────────
     try:
         resp = await client.get(
             f"{VOYAGER_BASE}/identity/dash/profiles",
-            params={"q": "memberIdentity", "memberIdentity": slug,
-                    "decorationId": "com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-93"},
+            params={"q": "memberIdentity", "memberIdentity": slug},
             headers=ref_headers,
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Dash format: data.identityDashProfilesByMemberIdentity.elements[]
-            elements = (
+            all_entities = data.get("included", []) + (
                 data.get("data", {})
                     .get("identityDashProfilesByMemberIdentity", {})
                     .get("elements", [])
-            ) or data.get("elements", [])
-            for el in elements:
-                uid = _extract_urn_id(el.get("entityUrn", ""))
-                if uid:
-                    return uid
-            # Also check included[]
-            for entity in data.get("included", []):
+            )
+            for entity in all_entities:
+                obj_urn = entity.get("objectUrn", "")
+                if obj_urn and "member:" in obj_urn:
+                    m = re.search(r'member:(\d+)', obj_urn)
+                    if m:
+                        member_id = m.group(1)
                 urn = entity.get("entityUrn", "")
-                if any(t in urn for t in ("fsd_profile", "fs_profile", "fs_miniProfile")):
-                    uid = _extract_urn_id(urn)
-                    if uid:
-                        return uid
+                if "fsd_profile" in urn and not fsd_id:
+                    fsd_id = _extract_urn_id(urn)
+            if member_id or fsd_id:
+                return member_id, fsd_id
     except Exception:
         pass
 
-    # ── Strategy 2: basic identity/profiles (older endpoint, often still works) ─
+    # ── Strategy 3: basic identity/profiles ───────────────────────────────────
     try:
         resp = await client.get(
             f"{VOYAGER_BASE}/identity/profiles/{slug}",
@@ -246,41 +282,26 @@ async def _get_profile_id(
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Top-level entityUrn
-            for key in ("entityUrn", "objectUrn"):
-                uid = _extract_urn_id(data.get(key, "") or data.get("data", {}).get(key, ""))
-                if uid:
-                    return uid
-            # included[]
-            for entity in data.get("included", []):
-                etype = entity.get("$type", "")
-                if "profile" in etype.lower() or "miniProfile" in etype.lower():
-                    uid = _extract_urn_id(entity.get("entityUrn", ""))
-                    if uid:
-                        return uid
-    except Exception:
-        pass
-
-    # ── Strategy 3: networkinfo (light endpoint, returns entityUrn) ────────────
-    try:
-        resp = await client.get(
-            f"{VOYAGER_BASE}/identity/profiles/{slug}/networkinfo",
-            headers=ref_headers,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            uid = _extract_urn_id(
-                data.get("entityUrn", "")
-                or data.get("data", {}).get("entityUrn", "")
-            )
-            if uid:
-                return uid
+            all_entities = [data] + data.get("included", [])
+            for entity in all_entities:
+                for key in ("objectUrn", "entityUrn"):
+                    urn = entity.get(key, "")
+                    if "member:" in urn:
+                        m = re.search(r'member:(\d+)', urn)
+                        if m:
+                            member_id = m.group(1)
+                    if "fsd_profile" in urn and not fsd_id:
+                        fsd_id = _extract_urn_id(urn)
+                    if "fs_miniProfile" in urn and not fsd_id:
+                        fsd_id = _extract_urn_id(urn)
+            if member_id or fsd_id:
+                return member_id, fsd_id
     except Exception:
         pass
 
     raise ValueError(
         f"Could not resolve LinkedIn profile '{slug}'. "
-        "Check the URL is correct and the profile is publicly visible."
+        "Ensure the URL is correct and the account is logged into LinkedIn."
     )
 
 
@@ -299,12 +320,22 @@ async def send_linkedin_message(
 
     await asyncio.sleep(random.uniform(1.0, 2.0))
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
-        profile_id = await _get_profile_id(client, headers, slug)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(30.0)) as client:
+        member_id, fsd_id = await _resolve_member_urns(client, headers, slug)
 
-        # Try both URN formats — LinkedIn changed the accepted format over time
+        # Build candidate recipient URNs — numeric member URN is most reliable
+        recipients: list[str] = []
+        if member_id:
+            recipients.append(f"urn:li:member:{member_id}")
+        if fsd_id:
+            recipients.append(f"urn:li:fsd_profile:{fsd_id}")
+            recipients.append(f"urn:li:fs_miniProfile:{fsd_id}")
+
+        if not recipients:
+            raise ValueError(f"Could not resolve any URN for '{slug}'")
+
         last_err: Exception | None = None
-        for urn_prefix in ("urn:li:fsd_profile", "urn:li:fs_miniProfile"):
+        for recipient in recipients:
             payload = {
                 "keyVersion": "LEGACY_INBOX",
                 "conversationCreate": {
@@ -316,7 +347,7 @@ async def send_linkedin_message(
                             }
                         }
                     },
-                    "recipients": [f"{urn_prefix}:{profile_id}"],
+                    "recipients": [recipient],
                     "subtype": "MEMBER_TO_MEMBER",
                 },
             }
@@ -327,13 +358,15 @@ async def send_linkedin_message(
                     headers=headers,
                 )
                 if resp.status_code in (200, 201):
-                    logger.info("Message sent to %s via %s", slug, urn_prefix)
+                    logger.info("Message sent to %s via %s", slug, recipient)
                     return {"ok": True}
-                last_err = Exception(f"LinkedIn returned {resp.status_code}: {resp.text[:200]}")
+                last_err = Exception(
+                    f"LinkedIn {resp.status_code} with {recipient}: {resp.text[:300]}"
+                )
             except Exception as e:
                 last_err = e
 
-        raise ValueError(f"Could not send message: {last_err}")
+        raise ValueError(str(last_err))
 
 
 # ── Connection request ────────────────────────────────────────────────────────
@@ -351,37 +384,45 @@ async def send_linkedin_connection(
 
     await asyncio.sleep(random.uniform(1.0, 2.0))
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
-        profile_id = await _get_profile_id(client, headers, slug)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(30.0)) as client:
+        member_id, fsd_id = await _resolve_member_urns(client, headers, slug)
 
-        # Try newer dash invitations endpoint first, fall back to normInvitations
         last_err: Exception | None = None
-        attempts = [
-            # Newer format
-            (f"{VOYAGER_BASE}/growth/normInvitations", {
+        attempts: list[dict] = []
+
+        if fsd_id:
+            attempts.append({
                 "invitee": {
                     "com.linkedin.voyager.growth.invitation.InviteeProfile": {
-                        "profileId": profile_id,
+                        "profileId": fsd_id,
                     }
                 },
                 **({"customMessage": note[:300]} if note else {}),
-            }),
-            # Alternate format with trackingId
-            (f"{VOYAGER_BASE}/growth/normInvitations", {
-                "inviteeUrn": f"urn:li:fsd_profile:{profile_id}",
+            })
+            attempts.append({
+                "inviteeUrn": f"urn:li:fsd_profile:{fsd_id}",
                 **({"customMessage": note[:300]} if note else {}),
-            }),
-        ]
-        for url, payload in attempts:
+            })
+        if member_id:
+            attempts.append({
+                "inviteeUrn": f"urn:li:member:{member_id}",
+                **({"customMessage": note[:300]} if note else {}),
+            })
+
+        for payload in attempts:
             try:
                 resp = await client.post(
-                    url, content=json.dumps(payload), headers=headers,
+                    f"{VOYAGER_BASE}/growth/normInvitations",
+                    content=json.dumps(payload),
+                    headers=headers,
                 )
                 if resp.status_code in (200, 201):
                     logger.info("Connection request sent to %s", slug)
                     return {"ok": True}
-                last_err = Exception(f"LinkedIn returned {resp.status_code}: {resp.text[:200]}")
+                last_err = Exception(
+                    f"LinkedIn {resp.status_code}: {resp.text[:300]}"
+                )
             except Exception as e:
                 last_err = e
 
-        raise ValueError(f"Could not send connection request: {last_err}")
+        raise ValueError(str(last_err))
