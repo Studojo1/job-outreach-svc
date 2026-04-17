@@ -13,7 +13,7 @@ from api.dependencies import get_current_user
 from database.models import User, LinkedInToken, LinkedInSearchJob, LinkedInOutreachLead
 from database.session import get_db
 from services.linkedin_outreach.crypto import encrypt_pair, decrypt
-from services.linkedin_outreach.voyager import search_people
+from services.linkedin_outreach.voyager import search_people, send_linkedin_message, send_linkedin_connection
 from services.linkedin_outreach.message_gen import generate_messages_for_leads
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,68 @@ async def delete_token(
     db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).delete()
     db.commit()
     return {"ok": True}
+
+
+# ── Direct message / connection endpoints ─────────────────────────────────────
+
+class SendMessageRequest(BaseModel):
+    profile_url: str
+    content: str
+
+
+class SendConnectionRequest(BaseModel):
+    profile_url: str
+    note: Optional[str] = ""
+
+
+def _get_decrypted_tokens(user_id: str, db: Session) -> tuple[str, str]:
+    """Retrieve and decrypt stored li_at + jsessionid for a user. Raises 400 if not connected."""
+    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
+    if not token_row:
+        raise HTTPException(status_code=400, detail="LinkedIn not connected. Install the extension and connect first.")
+    li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+    jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+    return li_at, jsessionid
+
+
+@router.post("/message")
+async def send_message(
+    body: SendMessageRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a direct LinkedIn message to a profile URL using the user's stored session."""
+    if not body.profile_url or not body.content:
+        raise HTTPException(status_code=400, detail="profile_url and content are required")
+    li_at, jsessionid = _get_decrypted_tokens(current_user.id, db)
+    try:
+        result = await send_linkedin_message(li_at, jsessionid, body.profile_url, body.content)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("send_message failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to send message. LinkedIn may have rejected the request.")
+
+
+@router.post("/connect-request")
+async def send_connection(
+    body: SendConnectionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a LinkedIn connection request to a profile URL using the user's stored session."""
+    if not body.profile_url:
+        raise HTTPException(status_code=400, detail="profile_url is required")
+    li_at, jsessionid = _get_decrypted_tokens(current_user.id, db)
+    try:
+        result = await send_linkedin_connection(li_at, jsessionid, body.profile_url, body.note or "")
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("send_connection failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to send connection request.")
 
 
 # ── Search endpoints ───────────────────────────────────────────────────────────

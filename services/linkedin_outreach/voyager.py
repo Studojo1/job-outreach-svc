@@ -1,6 +1,7 @@
-"""LinkedIn Voyager API client — authenticated people search using li_at session."""
+"""LinkedIn Voyager API client — authenticated people search and messaging using li_at session."""
 
 import asyncio
+import json
 import logging
 import random
 from typing import Optional
@@ -167,3 +168,144 @@ async def search_people(
     people = _parse_search_results(data)
     logger.info("LinkedIn search '%s' returned %d people", keywords, len(people))
     return people
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_slug(profile_url: str) -> str:
+    """Extract the LinkedIn public identifier (slug) from any profile URL or bare slug."""
+    url = profile_url.strip().rstrip("/")
+    if "/in/" in url:
+        return url.split("/in/")[-1].split("/")[0].split("?")[0]
+    return url.split("/")[-1].split("?")[0]
+
+
+def _auth_check(resp: httpx.Response) -> None:
+    if resp.status_code in (401, 403):
+        raise ValueError("LinkedIn session expired. Reconnect via the extension.")
+    if resp.status_code == 429:
+        raise ValueError("LinkedIn rate limited. Wait a few minutes and try again.")
+    resp.raise_for_status()
+
+
+async def _get_mini_profile_urn(
+    client: httpx.AsyncClient,
+    headers: dict,
+    slug: str,
+) -> str:
+    """Return the fs_miniProfile URN for a public slug, e.g. 'ACoAABcd...'."""
+    resp = await client.get(
+        f"{VOYAGER_BASE}/identity/profiles/{slug}/profileView",
+        headers={**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"},
+    )
+    _auth_check(resp)
+    data = resp.json()
+
+    # Voyager normalised JSON — look in included[] for miniProfile entity
+    for entity in data.get("included", []):
+        etype = entity.get("$type", "")
+        if "miniProfile" in etype or "MiniProfile" in etype:
+            urn = entity.get("entityUrn", "")
+            if urn:
+                return urn.split(":")[-1]
+
+    # Fallback: check top-level profile entityUrn
+    profile = data.get("data", {})
+    entity_urn = profile.get("entityUrn", "")
+    if entity_urn:
+        return entity_urn.split(":")[-1]
+
+    raise ValueError(f"Could not resolve LinkedIn profile for slug: {slug}")
+
+
+# ── Message sending ───────────────────────────────────────────────────────────
+
+async def send_linkedin_message(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    content: str,
+) -> dict:
+    """Send a direct message to a LinkedIn member via Voyager API.
+
+    Returns {"ok": True} on success or raises ValueError with a user-facing message.
+    """
+    slug = _extract_slug(profile_url)
+    headers = _build_headers(li_at, jsessionid)
+    headers["Content-Type"] = "application/json"
+
+    await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
+        mini_urn = await _get_mini_profile_urn(client, headers, slug)
+
+        payload = {
+            "keyVersion": "LEGACY_INBOX",
+            "conversationCreate": {
+                "eventCreate": {
+                    "value": {
+                        "com.linkedin.voyager.messaging.create.MessageCreate": {
+                            "attributedBody": {
+                                "text": content,
+                                "attributes": [],
+                            },
+                            "attachments": [],
+                        }
+                    }
+                },
+                "recipients": [f"urn:li:fs_miniProfile:{mini_urn}"],
+                "subtype": "MEMBER_TO_MEMBER",
+            },
+        }
+
+        resp = await client.post(
+            f"{VOYAGER_BASE}/messaging/conversations",
+            content=json.dumps(payload),
+            headers=headers,
+        )
+
+    _auth_check(resp)
+    logger.info("Message sent to %s", slug)
+    return {"ok": True}
+
+
+# ── Connection request ────────────────────────────────────────────────────────
+
+async def send_linkedin_connection(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    note: str = "",
+) -> dict:
+    """Send a LinkedIn connection request, optionally with a personalised note.
+
+    Returns {"ok": True} on success or raises ValueError with a user-facing message.
+    """
+    slug = _extract_slug(profile_url)
+    headers = _build_headers(li_at, jsessionid)
+    headers["Content-Type"] = "application/json"
+
+    await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
+        mini_urn = await _get_mini_profile_urn(client, headers, slug)
+
+        payload: dict = {
+            "invitee": {
+                "com.linkedin.voyager.growth.invitation.InviteeProfile": {
+                    "profileId": mini_urn,
+                }
+            },
+        }
+        if note:
+            payload["customMessage"] = note[:300]
+
+        resp = await client.post(
+            f"{VOYAGER_BASE}/growth/normInvitations",
+            content=json.dumps(payload),
+            headers=headers,
+        )
+
+    _auth_check(resp)
+    logger.info("Connection request sent to %s", slug)
+    return {"ok": True}
