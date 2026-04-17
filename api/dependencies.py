@@ -23,11 +23,25 @@ async def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-    """Extract BetterAuth session token from cookie, look up in shared DB.
+    """Authenticate request via either:
+    1. X-User-Id header injected by the control-plane after JWT validation (extension / API clients)
+    2. BetterAuth session cookie (browser-based clients)
 
     Raises:
-        HTTPException 401 if cookie is missing, session expired, or user not found.
+        HTTPException 401 if no valid auth is found.
     """
+    # ── Path 1: X-User-Id from control-plane (JWT already validated upstream) ──
+    user_id = request.headers.get("X-User-Id")
+    if user_id:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+        return user
+
+    # ── Path 2: BetterAuth session cookie (browser) ──────────────────────────
     token = None
     for name in COOKIE_NAMES:
         token = request.cookies.get(name)
