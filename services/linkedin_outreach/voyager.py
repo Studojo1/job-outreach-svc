@@ -193,29 +193,60 @@ async def _get_mini_profile_urn(
     headers: dict,
     slug: str,
 ) -> str:
-    """Return the fs_miniProfile URN for a public slug, e.g. 'ACoAABcd...'."""
-    resp = await client.get(
-        f"{VOYAGER_BASE}/identity/profiles/{slug}/profileView",
-        headers={**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"},
-    )
-    _auth_check(resp)
-    data = resp.json()
+    """Return the profile ID token for a public slug.
 
-    # Voyager normalised JSON — look in included[] for miniProfile entity
-    for entity in data.get("included", []):
-        etype = entity.get("$type", "")
-        if "miniProfile" in etype or "MiniProfile" in etype:
-            urn = entity.get("entityUrn", "")
-            if urn:
+    Tries multiple Voyager endpoints in order and returns the first usable URN fragment.
+    """
+    profile_headers = {**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"}
+
+    # Strategy 1: basic profile endpoint (more reliable, lighter payload)
+    try:
+        resp = await client.get(
+            f"{VOYAGER_BASE}/identity/profiles/{slug}",
+            headers=profile_headers,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # Look in included[] first
+            for entity in data.get("included", []):
+                etype = entity.get("$type", "")
+                if "miniProfile" in etype.lower() or "MiniProfile" in etype:
+                    urn = entity.get("entityUrn", "")
+                    if urn and ":" in urn:
+                        return urn.split(":")[-1]
+            # Top-level entityUrn
+            urn = data.get("entityUrn", "") or data.get("data", {}).get("entityUrn", "")
+            if urn and ":" in urn:
                 return urn.split(":")[-1]
+    except Exception:
+        pass
 
-    # Fallback: check top-level profile entityUrn
-    profile = data.get("data", {})
-    entity_urn = profile.get("entityUrn", "")
-    if entity_urn:
-        return entity_urn.split(":")[-1]
+    # Strategy 2: profileView endpoint
+    try:
+        resp = await client.get(
+            f"{VOYAGER_BASE}/identity/profiles/{slug}/profileView",
+            headers=profile_headers,
+        )
+        _auth_check(resp)
+        data = resp.json()
+        for entity in data.get("included", []):
+            etype = entity.get("$type", "")
+            if "miniProfile" in etype.lower() or "Profile" in etype:
+                urn = entity.get("entityUrn", "")
+                if urn and ":" in urn:
+                    candidate = urn.split(":")[-1]
+                    # fs_miniProfile URNs start with "ACoAA" or similar base64-ish string
+                    if len(candidate) > 5:
+                        return candidate
+        # Fallback to data.entityUrn
+        for key in ("entityUrn", "objectUrn"):
+            urn = data.get("data", {}).get(key, "")
+            if urn and ":" in urn:
+                return urn.split(":")[-1]
+    except Exception as e:
+        raise ValueError(f"Could not resolve profile '{slug}': {e}") from e
 
-    raise ValueError(f"Could not resolve LinkedIn profile for slug: {slug}")
+    raise ValueError(f"Could not find member URN for profile: {slug}")
 
 
 # ── Message sending ───────────────────────────────────────────────────────────

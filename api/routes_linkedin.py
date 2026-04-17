@@ -166,7 +166,7 @@ async def send_message(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error("send_message failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=502, detail="Failed to send message. LinkedIn may have rejected the request.")
+        raise HTTPException(status_code=400, detail=f"Send failed: {e}")
 
 
 @router.post("/connect-request")
@@ -186,7 +186,7 @@ async def send_connection(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error("send_connection failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=502, detail="Failed to send connection request.")
+        raise HTTPException(status_code=400, detail=f"Send failed: {e}")
 
 
 # ── Search endpoints ───────────────────────────────────────────────────────────
