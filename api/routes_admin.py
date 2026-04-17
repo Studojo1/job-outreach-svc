@@ -20,6 +20,31 @@ from database.session import get_db
 
 router = APIRouter(prefix="/admin/outreach", tags=["admin"])
 
+
+@router.get("/recent-signups")
+def recent_signups(
+    days: int = Query(2, ge=1, le=30),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Return all users who signed up in the last N days (default 2)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    users = (
+        db.query(User)
+        .filter(User.created_at >= cutoff)
+        .order_by(User.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "email": u.email,
+            "name": u.name,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "role": "candidate",
+        }
+        for u in users
+    ]
+
 STUCK_THRESHOLD_HOURS = 6
 ACTIVE_STATUSES = [
     "profile_complete", "leads_generating", "leads_ready", "enriching",
