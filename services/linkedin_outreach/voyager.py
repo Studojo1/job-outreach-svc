@@ -188,65 +188,100 @@ def _auth_check(resp: httpx.Response) -> None:
     resp.raise_for_status()
 
 
-async def _get_mini_profile_urn(
+def _extract_urn_id(urn: str) -> str:
+    """Pull the ID fragment from any LinkedIn URN, e.g. 'urn:li:fsd_profile:ACoAA' → 'ACoAA'."""
+    if urn and ":" in urn:
+        fragment = urn.rsplit(":", 1)[-1]
+        if len(fragment) > 4:  # skip short/garbage values
+            return fragment
+    return ""
+
+
+async def _get_profile_id(
     client: httpx.AsyncClient,
     headers: dict,
     slug: str,
 ) -> str:
-    """Return the profile ID token for a public slug.
+    """Resolve a public LinkedIn slug to its internal profile ID.
 
-    Tries multiple Voyager endpoints in order and returns the first usable URN fragment.
+    Uses three strategies in order, stopping at the first success.
     """
-    profile_headers = {**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"}
+    ref_headers = {**headers, "Referer": f"https://www.linkedin.com/in/{slug}/"}
 
-    # Strategy 1: basic profile endpoint (more reliable, lighter payload)
+    # ── Strategy 1: dash/profiles (newest, most stable as of 2024) ────────────
     try:
         resp = await client.get(
-            f"{VOYAGER_BASE}/identity/profiles/{slug}",
-            headers=profile_headers,
+            f"{VOYAGER_BASE}/identity/dash/profiles",
+            params={"q": "memberIdentity", "memberIdentity": slug,
+                    "decorationId": "com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-93"},
+            headers=ref_headers,
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Look in included[] first
+            # Dash format: data.identityDashProfilesByMemberIdentity.elements[]
+            elements = (
+                data.get("data", {})
+                    .get("identityDashProfilesByMemberIdentity", {})
+                    .get("elements", [])
+            ) or data.get("elements", [])
+            for el in elements:
+                uid = _extract_urn_id(el.get("entityUrn", ""))
+                if uid:
+                    return uid
+            # Also check included[]
             for entity in data.get("included", []):
-                etype = entity.get("$type", "")
-                if "miniProfile" in etype.lower() or "MiniProfile" in etype:
-                    urn = entity.get("entityUrn", "")
-                    if urn and ":" in urn:
-                        return urn.split(":")[-1]
-            # Top-level entityUrn
-            urn = data.get("entityUrn", "") or data.get("data", {}).get("entityUrn", "")
-            if urn and ":" in urn:
-                return urn.split(":")[-1]
+                urn = entity.get("entityUrn", "")
+                if any(t in urn for t in ("fsd_profile", "fs_profile", "fs_miniProfile")):
+                    uid = _extract_urn_id(urn)
+                    if uid:
+                        return uid
     except Exception:
         pass
 
-    # Strategy 2: profileView endpoint
+    # ── Strategy 2: basic identity/profiles (older endpoint, often still works) ─
     try:
         resp = await client.get(
-            f"{VOYAGER_BASE}/identity/profiles/{slug}/profileView",
-            headers=profile_headers,
+            f"{VOYAGER_BASE}/identity/profiles/{slug}",
+            headers=ref_headers,
         )
-        _auth_check(resp)
-        data = resp.json()
-        for entity in data.get("included", []):
-            etype = entity.get("$type", "")
-            if "miniProfile" in etype.lower() or "Profile" in etype:
-                urn = entity.get("entityUrn", "")
-                if urn and ":" in urn:
-                    candidate = urn.split(":")[-1]
-                    # fs_miniProfile URNs start with "ACoAA" or similar base64-ish string
-                    if len(candidate) > 5:
-                        return candidate
-        # Fallback to data.entityUrn
-        for key in ("entityUrn", "objectUrn"):
-            urn = data.get("data", {}).get(key, "")
-            if urn and ":" in urn:
-                return urn.split(":")[-1]
-    except Exception as e:
-        raise ValueError(f"Could not resolve profile '{slug}': {e}") from e
+        if resp.status_code == 200:
+            data = resp.json()
+            # Top-level entityUrn
+            for key in ("entityUrn", "objectUrn"):
+                uid = _extract_urn_id(data.get(key, "") or data.get("data", {}).get(key, ""))
+                if uid:
+                    return uid
+            # included[]
+            for entity in data.get("included", []):
+                etype = entity.get("$type", "")
+                if "profile" in etype.lower() or "miniProfile" in etype.lower():
+                    uid = _extract_urn_id(entity.get("entityUrn", ""))
+                    if uid:
+                        return uid
+    except Exception:
+        pass
 
-    raise ValueError(f"Could not find member URN for profile: {slug}")
+    # ── Strategy 3: networkinfo (light endpoint, returns entityUrn) ────────────
+    try:
+        resp = await client.get(
+            f"{VOYAGER_BASE}/identity/profiles/{slug}/networkinfo",
+            headers=ref_headers,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            uid = _extract_urn_id(
+                data.get("entityUrn", "")
+                or data.get("data", {}).get("entityUrn", "")
+            )
+            if uid:
+                return uid
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Could not resolve LinkedIn profile '{slug}'. "
+        "Check the URL is correct and the profile is publicly visible."
+    )
 
 
 # ── Message sending ───────────────────────────────────────────────────────────
@@ -257,10 +292,7 @@ async def send_linkedin_message(
     profile_url: str,
     content: str,
 ) -> dict:
-    """Send a direct message to a LinkedIn member via Voyager API.
-
-    Returns {"ok": True} on success or raises ValueError with a user-facing message.
-    """
+    """Send a direct message to a LinkedIn member via Voyager API."""
     slug = _extract_slug(profile_url)
     headers = _build_headers(li_at, jsessionid)
     headers["Content-Type"] = "application/json"
@@ -268,36 +300,40 @@ async def send_linkedin_message(
     await asyncio.sleep(random.uniform(1.0, 2.0))
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
-        mini_urn = await _get_mini_profile_urn(client, headers, slug)
+        profile_id = await _get_profile_id(client, headers, slug)
 
-        payload = {
-            "keyVersion": "LEGACY_INBOX",
-            "conversationCreate": {
-                "eventCreate": {
-                    "value": {
-                        "com.linkedin.voyager.messaging.create.MessageCreate": {
-                            "attributedBody": {
-                                "text": content,
-                                "attributes": [],
-                            },
-                            "attachments": [],
+        # Try both URN formats — LinkedIn changed the accepted format over time
+        last_err: Exception | None = None
+        for urn_prefix in ("urn:li:fsd_profile", "urn:li:fs_miniProfile"):
+            payload = {
+                "keyVersion": "LEGACY_INBOX",
+                "conversationCreate": {
+                    "eventCreate": {
+                        "value": {
+                            "com.linkedin.voyager.messaging.create.MessageCreate": {
+                                "attributedBody": {"text": content, "attributes": []},
+                                "attachments": [],
+                            }
                         }
-                    }
+                    },
+                    "recipients": [f"{urn_prefix}:{profile_id}"],
+                    "subtype": "MEMBER_TO_MEMBER",
                 },
-                "recipients": [f"urn:li:fs_miniProfile:{mini_urn}"],
-                "subtype": "MEMBER_TO_MEMBER",
-            },
-        }
+            }
+            try:
+                resp = await client.post(
+                    f"{VOYAGER_BASE}/messaging/conversations",
+                    content=json.dumps(payload),
+                    headers=headers,
+                )
+                if resp.status_code in (200, 201):
+                    logger.info("Message sent to %s via %s", slug, urn_prefix)
+                    return {"ok": True}
+                last_err = Exception(f"LinkedIn returned {resp.status_code}: {resp.text[:200]}")
+            except Exception as e:
+                last_err = e
 
-        resp = await client.post(
-            f"{VOYAGER_BASE}/messaging/conversations",
-            content=json.dumps(payload),
-            headers=headers,
-        )
-
-    _auth_check(resp)
-    logger.info("Message sent to %s", slug)
-    return {"ok": True}
+        raise ValueError(f"Could not send message: {last_err}")
 
 
 # ── Connection request ────────────────────────────────────────────────────────
@@ -308,10 +344,7 @@ async def send_linkedin_connection(
     profile_url: str,
     note: str = "",
 ) -> dict:
-    """Send a LinkedIn connection request, optionally with a personalised note.
-
-    Returns {"ok": True} on success or raises ValueError with a user-facing message.
-    """
+    """Send a LinkedIn connection request, optionally with a personalised note."""
     slug = _extract_slug(profile_url)
     headers = _build_headers(li_at, jsessionid)
     headers["Content-Type"] = "application/json"
@@ -319,24 +352,36 @@ async def send_linkedin_connection(
     await asyncio.sleep(random.uniform(1.0, 2.0))
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(25.0)) as client:
-        mini_urn = await _get_mini_profile_urn(client, headers, slug)
+        profile_id = await _get_profile_id(client, headers, slug)
 
-        payload: dict = {
-            "invitee": {
-                "com.linkedin.voyager.growth.invitation.InviteeProfile": {
-                    "profileId": mini_urn,
-                }
-            },
-        }
-        if note:
-            payload["customMessage"] = note[:300]
+        # Try newer dash invitations endpoint first, fall back to normInvitations
+        last_err: Exception | None = None
+        attempts = [
+            # Newer format
+            (f"{VOYAGER_BASE}/growth/normInvitations", {
+                "invitee": {
+                    "com.linkedin.voyager.growth.invitation.InviteeProfile": {
+                        "profileId": profile_id,
+                    }
+                },
+                **({"customMessage": note[:300]} if note else {}),
+            }),
+            # Alternate format with trackingId
+            (f"{VOYAGER_BASE}/growth/normInvitations", {
+                "inviteeUrn": f"urn:li:fsd_profile:{profile_id}",
+                **({"customMessage": note[:300]} if note else {}),
+            }),
+        ]
+        for url, payload in attempts:
+            try:
+                resp = await client.post(
+                    url, content=json.dumps(payload), headers=headers,
+                )
+                if resp.status_code in (200, 201):
+                    logger.info("Connection request sent to %s", slug)
+                    return {"ok": True}
+                last_err = Exception(f"LinkedIn returned {resp.status_code}: {resp.text[:200]}")
+            except Exception as e:
+                last_err = e
 
-        resp = await client.post(
-            f"{VOYAGER_BASE}/growth/normInvitations",
-            content=json.dumps(payload),
-            headers=headers,
-        )
-
-    _auth_check(resp)
-    logger.info("Connection request sent to %s", slug)
-    return {"ok": True}
+        raise ValueError(f"Could not send connection request: {last_err}")
