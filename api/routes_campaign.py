@@ -152,6 +152,24 @@ async def api_create_campaign(
     Otherwise, uses legacy template substitution.
     """
     try:
+        # Block duplicate campaigns — one active campaign per candidate at a time
+        from database.models import Campaign as _Campaign, Candidate as _Candidate
+        candidate = db.query(_Candidate).filter_by(
+            id=request.candidate_id, user_id=current_user.id
+        ).first()
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+
+        existing_active = db.query(_Campaign).filter(
+            _Campaign.candidate_id == request.candidate_id,
+            _Campaign.status.in_(["running", "paused"]),
+        ).first()
+        if existing_active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"An active campaign already exists for this profile (campaign #{existing_active.id}, status: {existing_active.status}). Pause and cancel it before creating a new one.",
+            )
+
         # Default to AI styles if none provided — never silently fall back to blank template
         if not request.selected_styles:
             request.selected_styles = ["warm_intro", "value_prop"]
