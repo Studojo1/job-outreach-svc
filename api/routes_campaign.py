@@ -152,22 +152,16 @@ async def api_create_campaign(
     Otherwise, uses legacy template substitution.
     """
     try:
-        # Block duplicate campaigns — one active campaign per candidate at a time
-        from database.models import Campaign as _Campaign, Candidate as _Candidate
-        candidate = db.query(_Candidate).filter_by(
-            id=request.candidate_id, user_id=current_user.id
-        ).first()
-        if not candidate:
-            raise HTTPException(status_code=404, detail="Candidate not found")
-
-        existing_active = db.query(_Campaign).filter(
-            _Campaign.candidate_id == request.candidate_id,
-            _Campaign.status.in_(["running", "paused"]),
-        ).first()
-        if existing_active:
+        # Credit check — user must have enough available credits to cover this campaign
+        from api.routes_payment import deduct_credits
+        from database.models import UserCredit
+        credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
+        available = (credits.total_credits - credits.used_credits) if credits else 0
+        required = request.lead_limit or 200  # default campaign size
+        if available < required:
             raise HTTPException(
-                status_code=409,
-                detail=f"An active campaign already exists for this profile (campaign #{existing_active.id}, status: {existing_active.status}). Pause and cancel it before creating a new one.",
+                status_code=402,
+                detail=f"Insufficient credits. You need {required} credits to start a campaign but only have {available} available.",
             )
 
         # Default to AI styles if none provided — never silently fall back to blank template
