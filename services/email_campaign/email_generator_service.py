@@ -659,12 +659,14 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
                     lead.name, lead.title, lead.company, style)
 
         result = generate_json(prompt, schema, temperature=0.85)
-        subject = result.get("subject", "").strip()
         body = result.get("body", "").strip()
+
+        # Subject: always "quick question {first name}" — ignore LLM output
+        first_name = (lead.name or "").split()[0] if lead.name else ""
+        subject = f"quick question {first_name}".strip()
 
         # Stage 5: Tone cleaner
         body = clean_tone(body)
-        subject = clean_tone(subject)
 
         # Stage 6: Validation
         if not subject or len(subject) < 5:
