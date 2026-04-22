@@ -152,10 +152,13 @@ async def api_create_campaign(
     Otherwise, uses legacy template substitution.
     """
     try:
-        # Credit check — user must have enough available credits to cover this campaign
+        # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
+        # where two simultaneous requests both read the same balance and both pass.
+        # This allows multiple campaigns (e.g. 3x200 with 600 credits) but blocks double-clicks.
         from api.routes_payment import deduct_credits
         from database.models import UserCredit
-        credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
+        from sqlalchemy import text
+        credits = db.query(UserCredit).filter_by(user_id=current_user.id).with_for_update().first()
         available = (credits.total_credits - credits.used_credits) if credits else 0
         required = request.lead_limit or 200  # default campaign size
         if available < required:
@@ -163,6 +166,10 @@ async def api_create_campaign(
                 status_code=402,
                 detail=f"Insufficient credits. You need {required} credits to start a campaign but only have {available} available.",
             )
+        # Reserve credits immediately so concurrent requests see the updated balance
+        if credits:
+            credits.used_credits += required
+            db.flush()  # write to DB within transaction before slow AI generation
 
         # Default to AI styles if none provided — never silently fall back to blank template
         if not request.selected_styles:
@@ -230,9 +237,29 @@ async def api_create_campaign(
             "num_styles": len(request.selected_styles),
         })
         return {"status": "success", **result}
+    except HTTPException:
+        raise
     except ValueError as e:
+        # Refund the reserved credits if campaign creation failed
+        try:
+            from database.models import UserCredit
+            credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
+            if credits:
+                credits.used_credits = max(0, credits.used_credits - (request.lead_limit or 200))
+                db.commit()
+        except Exception:
+            pass
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        # Refund the reserved credits if campaign creation failed
+        try:
+            from database.models import UserCredit
+            credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
+            if credits:
+                credits.used_credits = max(0, credits.used_credits - (request.lead_limit or 200))
+                db.commit()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
