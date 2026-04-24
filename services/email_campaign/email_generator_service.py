@@ -688,3 +688,135 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
     except Exception as e:
         logger.error("[EmailGen] Failed for %s: %s", lead.name, e, exc_info=True)
         raise ValueError(f"Email generation failed for {lead.name}: {e}")
+
+
+# ── Follow-up Email Generation ────────────────────────────────────────────────
+
+def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str, str]:
+    """Pick one project from the candidate's resume that wasn't mentioned in the original email."""
+    body_lower = (parent_body or "").lower()
+
+    projects = []
+    parsed = candidate.parsed_json or {}
+    resume_profile = candidate.resume_profile or {}
+
+    for source in (resume_profile.get("projects"), parsed.get("projects")):
+        if isinstance(source, list):
+            for p in source:
+                if isinstance(p, dict):
+                    name = p.get("name") or p.get("title") or ""
+                    desc = p.get("description") or p.get("summary") or ""
+                    if name and desc:
+                        projects.append({"name": str(name).strip(), "description": str(desc).strip()})
+
+    for p in projects:
+        name_words = [w for w in p["name"].lower().split() if len(w) > 3]
+        if not any(w in body_lower for w in name_words):
+            return p
+
+    if projects:
+        return projects[0]
+
+    return {
+        "name": "recent coursework",
+        "description": "hands-on student projects focused on user research and interface design",
+    }
+
+
+def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, followup_number: int) -> str:
+    """Generate a follow-up email body.
+
+    followup_number=1 → Touch 2 (Day 5 bump): introduces one new project from the resume.
+    followup_number=2 → Touch 3 (Day 12 exit): short graceful close, no pitch.
+
+    Returns just the body (greeting + body + signoff). Subject inherits from parent.
+    """
+    candidate_name = "there"
+    parsed = candidate.parsed_json or {}
+    resume_profile = candidate.resume_profile or {}
+    for source in (resume_profile, parsed.get("personal_info", {}), parsed):
+        n = source.get("name") if isinstance(source, dict) else None
+        if n and isinstance(n, str) and " " in n:
+            candidate_name = n
+            break
+
+    first_name_candidate = candidate_name.split()[0] if candidate_name else "there"
+    lead_first = (lead.name or "").split()[0] if lead.name else "there"
+    lead_company = lead.company or ""
+    lead_title = lead.title or ""
+
+    schema = {
+        "type": "object",
+        "properties": {"body": {"type": "string"}},
+        "required": ["body"],
+    }
+
+    if followup_number == 1:
+        project = _extract_unused_project(candidate, parent_body)
+
+        prompt = f"""Ghostwriting a short follow-up email for {candidate_name}, a student looking for internship roles.
+
+The original email already introduced one project. This follow-up should feel like a quick human bump in the thread, not a sales email.
+
+ORIGINAL EMAIL (already sent, do NOT reference or repeat anything from it):
+---
+{parent_body}
+---
+
+ONE NEW PROJECT to mention (was NOT in the original email above):
+Name: {project['name']}
+What it was: {project['description']}
+
+Lead: {lead_first}, {lead_title} at {lead_company}
+
+Write the email body ONLY (greeting + 3 sentences + sign-off). Exactly 3 sentences between the greeting and sign-off:
+
+Sentence 1: Bump the thread in one casual line. Use something like "just bumping this up" or "wanted to resurface this". Do NOT say "following up on my previous note" or "just checking in".
+
+Sentence 2: Introduce the project above in one punchy sentence. State what it was and one concrete thing from it (a deliverable, outcome, or specific feature). Do NOT say "which might align" or "could be relevant" or "I recently". Just state it as a fact about past work.
+
+Sentence 3: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"
+
+Hard rules:
+- ABSOLUTELY NO em dashes. Use commas or periods instead.
+- No filler: no "I hope", "I wanted to", "as mentioned", "circling back"
+- Sound like a student, not a sales rep
+- Start with "Hi {lead_first},"
+- Sign off: "{first_name_candidate}" on its own line, nothing else
+- Body total under 55 words"""
+
+    else:
+        prompt = f"""Ghostwrite a 2-sentence final follow-up email for {candidate_name}, a student.
+
+Recipient: {lead_first} at {lead_company}. This is the last email in a 3-email sequence. No pitch, no skills, no projects.
+
+Write the email body ONLY (greeting + 2 sentences + sign-off). Exactly 2 sentences:
+
+Sentence 1: Say this is your last note. Be brief and direct. Do NOT say "I understand you're busy", "no worries if timing isn't right", "no bandwidth", "I completely understand". Just say something like "Last one from me." short.
+
+Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door open simply. Do NOT use "perhaps", "hopefully", "someday".
+
+Hard rules:
+- ABSOLUTELY NO em dashes at all.
+- Start with "Hi {lead_first},"
+- Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
+- Body total under 30 words
+
+Good example of tone:
+"Last one from me. Wishing you well at {lead_company}, and happy to connect if it's ever useful."
+
+Bad examples (do NOT write like this):
+"I completely understand if there's no bandwidth"
+"perhaps there's an opportunity to connect"
+"hopefully our paths align someday" """
+
+    result = generate_json(prompt, schema, temperature=0.85)
+    body = (result.get("body") or "").strip()
+    body = clean_tone(body)
+
+    if not body or len(body) < 20:
+        raise ValueError(f"Follow-up body too short for {lead.name}")
+
+    logger.info("[Followup] Generated touch %d for %s (%d words)",
+                followup_number + 1, lead.name, len(body.split()))
+    return body

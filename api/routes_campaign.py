@@ -736,6 +736,8 @@ async def get_campaign_emails(
             "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
             "bounce_reason": email.bounce_reason,
             "is_test": email.is_test or False,
+            "followup_number": email.followup_number or 0,
+            "parent_email_id": email.parent_email_id,
         })
 
     return {"emails": result}

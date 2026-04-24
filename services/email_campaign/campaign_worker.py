@@ -481,6 +481,29 @@ def _send_ready(db) -> tuple:
             email.sent_at = datetime.utcnow()
             email.message_id = result.get("id")
             email.thread_id = result.get("threadId")
+
+            # Fetch Message-ID header for follow-up In-Reply-To threading
+            try:
+                from services.email_campaign.gmail_send_service import fetch_message_id_header
+                email.message_id_header = fetch_message_id_header(access_token, result.get("id"))
+            except Exception as e:
+                logger.warning("[SENDER] Could not fetch Message-Id header for email %d: %s", email.id, e)
+
+            # Schedule Touch 2 follow-up (Day 5 after send) for non-test initial emails
+            if email.followup_number == 0 and not email.is_test:
+                followup = EmailSent(
+                    campaign_id=email.campaign_id,
+                    lead_id=email.lead_id,
+                    to_email=email.to_email,
+                    subject=email.subject,
+                    status="followup_pending",
+                    followup_number=1,
+                    parent_email_id=email.id,
+                    scheduled_at=email.sent_at + timedelta(days=5),
+                    enrichment_status="enriched",
+                )
+                db.add(followup)
+
             db.commit()
             sent_count += 1
 
@@ -510,6 +533,184 @@ def _send_ready(db) -> tuple:
     return sent_count, failed_count
 
 
+# ── JIT Phase 4: Send Follow-up Emails (thread replies) ─────────────────────
+
+def _process_followups(db) -> tuple:
+    """Send due follow-up emails as Gmail thread replies.
+
+    Skips any follow-up whose parent (Touch 1) already received a reply — those
+    are marked 'cancelled_reply'. After sending Touch 2, schedules Touch 3 for
+    7 days later. Touch 3 is terminal.
+
+    Returns (sent_count, cancelled_count, failed_count).
+    """
+    from services.email_campaign.gmail_send_service import fetch_message_id_header
+    from services.email_campaign.email_generator_service import generate_followup_email
+
+    sent_count = 0
+    cancelled_count = 0
+    failed_count = 0
+    now = datetime.utcnow()
+
+    pending = (
+        db.query(EmailSent)
+        .filter(
+            EmailSent.status == "followup_pending",
+            EmailSent.scheduled_at.isnot(None),
+            EmailSent.scheduled_at <= now,
+            EmailSent.followup_number > 0,
+        )
+        .order_by(EmailSent.scheduled_at.asc())
+        .limit(MAX_SEND_PER_CYCLE)
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+
+    if not pending:
+        return sent_count, cancelled_count, failed_count
+
+    logger.info("[FOLLOWUP] Found %d follow-ups ready to send", len(pending))
+
+    token_cache: dict = {}
+
+    for fu in pending:
+        # Fetch parent (Touch 1) for reply status, thread_id, Message-Id header
+        parent = db.query(EmailSent).filter_by(id=fu.parent_email_id).first()
+        if not parent:
+            fu.status = "failed"
+            fu.error_message = "Parent email not found"
+            db.commit()
+            failed_count += 1
+            continue
+
+        # If a reply came in on the thread, cancel this follow-up
+        if parent.reply_received_at is not None or parent.status == "replied":
+            fu.status = "cancelled_reply"
+            db.commit()
+            cancelled_count += 1
+            logger.info("[FOLLOWUP] Follow-up %d cancelled — parent %d received reply",
+                        fu.id, parent.id)
+            continue
+
+        # Skip if parent bounced or failed
+        if parent.status in ("bounced", "failed"):
+            fu.status = "cancelled_reply"
+            fu.error_message = f"Parent status: {parent.status}"
+            db.commit()
+            cancelled_count += 1
+            continue
+
+        campaign = db.query(Campaign).filter_by(id=fu.campaign_id).first()
+        if not campaign or campaign.status != "running":
+            # Leave pending — will retry when campaign resumes
+            continue
+
+        account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
+        if not account:
+            fu.status = "failed"
+            fu.error_message = "Email account not found"
+            db.commit()
+            failed_count += 1
+            continue
+
+        # Generate follow-up body
+        lead = db.query(Lead).filter_by(id=fu.lead_id).first()
+        candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
+        if not lead or not candidate:
+            fu.status = "failed"
+            fu.error_message = "Lead or candidate not found"
+            db.commit()
+            failed_count += 1
+            continue
+
+        try:
+            body = generate_followup_email(lead, candidate, parent.body or "", fu.followup_number)
+        except Exception as e:
+            logger.error("[FOLLOWUP] Generation failed for %d: %s", fu.id, e)
+            fu.status = "failed"
+            fu.error_message = f"Generation failed: {str(e)[:300]}"
+            db.commit()
+            failed_count += 1
+            continue
+
+        # Refresh token
+        acct_id = account.id
+        if acct_id not in token_cache:
+            try:
+                token_cache[acct_id] = _refresh_token_sync(account, db)
+            except Exception as e:
+                logger.error("[FOLLOWUP] Token refresh failed for account %d: %s", acct_id, e)
+                fu.status = "failed"
+                fu.error_message = f"Token refresh failed: {str(e)[:200]}"
+                db.commit()
+                failed_count += 1
+                continue
+        access_token = token_cache[acct_id]
+
+        # Lock this follow-up as sending
+        fu.status = "sending"
+        fu.body = body
+        db.commit()
+
+        try:
+            result = send_gmail_email(
+                access_token=access_token,
+                to_email=fu.to_email,
+                subject=parent.subject,
+                body=body,
+                from_email=account.email_address,
+                thread_id=parent.thread_id,
+                in_reply_to_header=parent.message_id_header,
+            )
+
+            fu.status = "sent"
+            fu.sent_at = datetime.utcnow()
+            fu.message_id = result.get("id")
+            fu.thread_id = result.get("threadId")
+            fu.subject = parent.subject
+
+            # Fetch Message-ID header for potential Touch 3
+            try:
+                fu.message_id_header = fetch_message_id_header(access_token, result.get("id"))
+            except Exception as e:
+                logger.warning("[FOLLOWUP] Could not fetch Message-Id for follow-up %d: %s", fu.id, e)
+
+            # If this was Touch 2, schedule Touch 3 for 7 days later
+            if fu.followup_number == 1:
+                touch3 = EmailSent(
+                    campaign_id=fu.campaign_id,
+                    lead_id=fu.lead_id,
+                    to_email=fu.to_email,
+                    subject=parent.subject,
+                    status="followup_pending",
+                    followup_number=2,
+                    parent_email_id=parent.id,
+                    scheduled_at=datetime.utcnow() + timedelta(days=7),
+                    enrichment_status="enriched",
+                )
+                db.add(touch3)
+
+            db.commit()
+            sent_count += 1
+            logger.info("[FOLLOWUP] Sent follow-up %d (touch %d) for campaign %d to %s",
+                        fu.id, fu.followup_number + 1, fu.campaign_id, fu.to_email)
+
+            if candidate:
+                ph_capture("followup_sent", str(candidate.user_id), {
+                    "campaign_id": fu.campaign_id,
+                    "followup_number": fu.followup_number,
+                })
+
+        except Exception as e:
+            logger.error("[FOLLOWUP] Send failed for %d: %s", fu.id, e)
+            fu.status = "failed"
+            fu.error_message = str(e)[:500]
+            db.commit()
+            failed_count += 1
+
+    return sent_count, cancelled_count, failed_count
+
+
 # ── Campaign Completion ──────────────────────────────────────────────────────
 
 def _check_campaign_completion(db):
@@ -522,7 +723,7 @@ def _check_campaign_completion(db):
 
         remaining = db.query(func.count(EmailSent.id)).filter(
             EmailSent.campaign_id == campaign.id,
-            EmailSent.status.in_(["pending_enrichment", "queued"]),
+            EmailSent.status.in_(["pending_enrichment", "queued", "followup_pending"]),
         ).scalar() or 0
 
         total = db.query(func.count(EmailSent.id)).filter(
@@ -741,7 +942,11 @@ def _process_cycle():
     Returns dict with counts from each phase.
     """
     db = SessionLocal()
-    result = {"enriched": 0, "generated": 0, "sent": 0, "failed": 0, "replies": 0, "bounces": 0}
+    result = {
+        "enriched": 0, "generated": 0, "sent": 0, "failed": 0,
+        "replies": 0, "bounces": 0,
+        "followups_sent": 0, "followups_cancelled": 0, "followups_failed": 0,
+    }
     try:
         # Phase 1: Enrich upcoming leads
         result["enriched"] = _enrich_upcoming(db)
@@ -749,19 +954,25 @@ def _process_cycle():
         # Phase 2: Generate email content for enriched leads
         result["generated"] = _generate_pending(db)
 
-        # Phase 3: Send ready emails
+        # Phase 3: Send ready emails (Touch 1)
         sent, failed = _send_ready(db)
         result["sent"] = sent
         result["failed"] = failed
 
-        # Post-cycle checks
-        _check_campaign_completion(db)
-        _check_credit_exhaustion(db)
+        # Phase 3b: Send due follow-ups as Gmail thread replies
+        fu_sent, fu_cancelled, fu_failed = _process_followups(db)
+        result["followups_sent"] = fu_sent
+        result["followups_cancelled"] = fu_cancelled
+        result["followups_failed"] = fu_failed
 
         # Phase 4: Check for replies and bounces (throttled to every 5 min)
         reply_result = _check_replies(db)
         result["replies"] = reply_result.get("replies_found", 0)
         result["bounces"] = reply_result.get("bounces_found", 0)
+
+        # Post-cycle checks (after reply check so replies cancel follow-ups promptly)
+        _check_campaign_completion(db)
+        _check_credit_exhaustion(db)
 
     finally:
         db.close()

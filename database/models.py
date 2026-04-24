@@ -156,6 +156,9 @@ class EmailSent(Base):
     reply_sentiment = Column(String(20))               # positive, negative, neutral
     bounce_reason = Column(Text)                       # Bounce reason if bounced
     is_test = Column(Boolean, default=False)           # True for "Send Test Emails" feature
+    followup_number = Column(Integer, nullable=False, default=0)  # 0 = Touch 1, 1 = Touch 2, 2 = Touch 3
+    parent_email_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="CASCADE"))  # Points to Touch 1 for follow-ups
+    message_id_header = Column(String(500))            # Gmail RFC 5322 Message-ID header for In-Reply-To threading
     created_at = Column(DateTime, default=datetime.utcnow)
 
     campaign = relationship("Campaign", back_populates="emails_sent")

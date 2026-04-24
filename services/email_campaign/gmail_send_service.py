@@ -2,7 +2,7 @@
 
 import base64
 from email.mime.text import MIMEText
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import requests
 
@@ -12,6 +12,7 @@ from core.metrics import EMAILS_SENT_TOTAL
 logger = get_logger(__name__)
 
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+GMAIL_MESSAGE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
 
 def send_gmail_email(
@@ -20,8 +21,14 @@ def send_gmail_email(
     subject: str,
     body: str,
     from_email: str = "me",
+    thread_id: Optional[str] = None,
+    in_reply_to_header: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send an email using the Gmail API.
+
+    For follow-ups: pass `thread_id` (from the original email) to reply in-thread.
+    Also pass `in_reply_to_header` so non-Gmail clients thread the conversation
+    correctly via RFC 5322 headers.
 
     Args:
         access_token: Valid OAuth2 access token for the sender's Gmail account.
@@ -29,6 +36,8 @@ def send_gmail_email(
         subject: Email subject line.
         body: Plain-text email body.
         from_email: Sender address (default "me" uses the authenticated account).
+        thread_id: Gmail threadId to reply into (optional, for follow-ups).
+        in_reply_to_header: The original Message-ID header value, e.g. "<abc@mail.gmail.com>".
 
     Returns:
         Dict with Gmail API response (id, threadId, labelIds).
@@ -36,7 +45,7 @@ def send_gmail_email(
     Raises:
         RuntimeError: If the API call fails.
     """
-    logger.info("Sending email to %s (subject: %s)", to_email, subject)
+    logger.info("Sending email to %s (subject: %s, thread_id=%s)", to_email, subject, thread_id)
 
     # ── Build MIME message ───────────────────────────────────────────────
     message = MIMEText(body)
@@ -44,6 +53,11 @@ def send_gmail_email(
     message["subject"] = subject
     if from_email != "me":
         message["from"] = from_email
+
+    # Threading headers for follow-up replies
+    if in_reply_to_header:
+        message["In-Reply-To"] = in_reply_to_header
+        message["References"] = in_reply_to_header
 
     # Gmail API expects URL-safe base64-encoded raw message
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
@@ -53,7 +67,9 @@ def send_gmail_email(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    payload = {"raw": raw_message}
+    payload: Dict[str, Any] = {"raw": raw_message}
+    if thread_id:
+        payload["threadId"] = thread_id
 
     resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers)
 
@@ -67,6 +83,38 @@ def send_gmail_email(
     logger.info("Email sent successfully (id=%s, threadId=%s)", result.get("id"), result.get("threadId"))
 
     return result
+
+
+def fetch_message_id_header(access_token: str, gmail_message_id: str) -> Optional[str]:
+    """Fetch the RFC 5322 Message-ID header for a sent Gmail message.
+
+    This header (e.g. "<CA+xyz@mail.gmail.com>") is needed as the In-Reply-To
+    header when sending follow-up replies so non-Gmail clients thread correctly.
+
+    Args:
+        access_token: Valid OAuth2 access token.
+        gmail_message_id: The Gmail API message ID returned by send (not the header).
+
+    Returns:
+        The Message-ID header value (including angle brackets), or None on failure.
+    """
+    url = f"{GMAIL_MESSAGE_URL}/{gmail_message_id}?format=metadata&metadataHeaders=Message-Id"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if not resp.ok:
+            logger.warning("Failed to fetch Message-Id header for %s: %d", gmail_message_id, resp.status_code)
+            return None
+
+        payload_headers = resp.json().get("payload", {}).get("headers", [])
+        for h in payload_headers:
+            if h.get("name", "").lower() == "message-id":
+                return h.get("value")
+        return None
+    except Exception as e:
+        logger.warning("Exception fetching Message-Id for %s: %s", gmail_message_id, e)
+        return None
 
 
 def _refresh_token_sync(email_account, db) -> str:
