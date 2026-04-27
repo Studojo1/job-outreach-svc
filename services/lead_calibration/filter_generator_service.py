@@ -16,10 +16,12 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Used only when generate_titles_by_company_size returns nothing AND the role
+# couldn't be classified. Kept generic-management; function-specific fallbacks
+# live in lead_collector_service._FUNCTION_FALLBACK_TITLES.
 FALLBACK_TITLES = [
-    "Engineering Manager", "Product Manager", "Head of Engineering",
-    "Director of Engineering", "Tech Lead", "Senior Software Engineer",
-    "VP of Engineering", "CTO", "Head of Product",
+    "Operations Manager", "Head of Operations", "Director of Operations",
+    "Chief of Staff", "General Manager", "Business Operations Manager",
 ]
 
 # Default exclusion titles — roles we should never target

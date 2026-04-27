@@ -27,14 +27,117 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Broad fallback titles that will always find results on Apollo
-FALLBACK_BROAD_TITLES = [
-    "Engineering Manager", "Product Manager", "Head of Engineering",
-    "Director of Engineering", "Tech Lead", "Senior Software Engineer",
-    "VP of Engineering", "CTO", "Head of Product", "Software Engineer",
-    "Senior Engineer", "Technical Lead", "Development Manager",
-    "Program Manager", "Project Manager",
-]
+# Per-function fallback titles. Picked when progressive loosening can't find
+# leads with the candidate's exact title list. Picking software titles for a
+# civil engineer or writer is what produced the wrong-leads bug — so each
+# function has its own broad-but-on-domain fallback set.
+_FUNCTION_FALLBACK_TITLES = {
+    "engineering": [
+        "Engineering Manager", "Software Engineering Manager", "Head of Engineering",
+        "Director of Engineering", "Tech Lead", "Technical Lead", "VP of Engineering",
+        "CTO", "Senior Software Engineer", "Software Engineer",
+    ],
+    "data": [
+        "Head of Data", "Director of Data", "Analytics Manager", "Data Science Manager",
+        "Head of Analytics", "VP of Data", "Senior Data Analyst", "Data Engineering Manager",
+    ],
+    "product": [
+        "Product Manager", "Senior Product Manager", "Head of Product",
+        "Director of Product", "VP of Product", "Group Product Manager",
+    ],
+    "marketing": [
+        "Marketing Manager", "Head of Marketing", "Director of Marketing",
+        "Growth Marketing Manager", "Digital Marketing Manager", "VP of Marketing",
+        "Brand Manager", "Head of Growth",
+    ],
+    "design": [
+        "Head of Design", "Design Lead", "Design Manager", "Director of Design",
+        "VP of Design", "Senior UX Designer", "Senior Product Designer",
+    ],
+    "civil_construction": [
+        "Construction Manager", "Project Manager", "Senior Project Manager",
+        "Head of Construction", "Director of Construction", "Civil Engineering Manager",
+        "Senior Civil Engineer", "Site Engineer", "Project Engineer",
+    ],
+    "hr": [
+        "HR Manager", "Head of People", "Head of HR", "Director of HR",
+        "VP of HR", "People Operations Manager", "Talent Acquisition Manager",
+    ],
+    "writing_content": [
+        "Content Manager", "Head of Content", "Editorial Director",
+        "Editor in Chief", "Managing Editor", "Director of Content",
+    ],
+    "customer_success": [
+        "Customer Success Manager", "Head of Customer Success",
+        "Director of Customer Success", "VP of Customer Success",
+    ],
+    "cloud_ops": [
+        "DevOps Manager", "Head of Platform", "Head of Infrastructure",
+        "Cloud Engineering Manager", "SRE Manager", "Director of Infrastructure",
+    ],
+    "finance": [
+        "Finance Manager", "Head of Finance", "Director of Finance",
+        "VP of Finance", "Controller", "FP&A Manager", "CFO",
+    ],
+    "legal": [
+        "Head of Legal", "Legal Director", "General Counsel",
+        "Senior Counsel", "VP of Legal",
+    ],
+    "sales": [
+        "Sales Manager", "Head of Sales", "Director of Sales",
+        "VP of Sales", "Account Executive", "Account Manager",
+    ],
+    "operations": [
+        "Operations Manager", "Head of Operations", "Director of Operations",
+        "VP of Operations", "Business Operations Manager", "COO",
+    ],
+    "security": [
+        "Security Manager", "Head of Security", "Director of Security",
+        "Information Security Manager", "CISO",
+    ],
+    "blockchain": [
+        "Engineering Manager", "Head of Engineering", "Senior Blockchain Developer",
+        "Director of Engineering",
+    ],
+    "business": [
+        "Operations Manager", "Strategy Manager", "Business Operations Manager",
+        "Head of Operations", "Director of Strategy", "Chief of Staff",
+    ],
+}
+
+
+def _fallback_titles_for_filter(filters) -> list:
+    """Pick broad fallback titles based on the candidate's classified function.
+
+    Inspects the existing filter's title segments to identify the function (by
+    looking for keyword overlap with each title family) and returns a sensible
+    on-domain fallback list. Defaults to engineering if nothing can be inferred.
+    """
+    from services.shared.title_family_service import _TITLE_FAMILIES
+
+    titles_seen = set()
+    for seg in getattr(filters, "target_segments", []) or []:
+        for t in seg.person_titles:
+            titles_seen.add(t)
+
+    # Score each function by how many of its family titles appear in the filter
+    scores = {}
+    for fn, family in _TITLE_FAMILIES.items():
+        family_titles = set(family.keys())
+        scores[fn] = len(titles_seen & family_titles)
+
+    if not scores:
+        return _FUNCTION_FALLBACK_TITLES["engineering"]
+
+    best_fn = max(scores.items(), key=lambda kv: kv[1])[0]
+    if scores[best_fn] == 0:
+        # Couldn't infer — use generic engineering as a safe default
+        return _FUNCTION_FALLBACK_TITLES["engineering"]
+    return _FUNCTION_FALLBACK_TITLES.get(best_fn, _FUNCTION_FALLBACK_TITLES["engineering"])
+
+
+# Backward-compat alias — older code paths still reference this name
+FALLBACK_BROAD_TITLES = _FUNCTION_FALLBACK_TITLES["engineering"]
 
 
 def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,10 +208,16 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
-    """Build a list of progressively looser filter variants."""
+    """Build a list of progressively looser filter variants.
+
+    Priority: keep TITLES (the role match) intact for as long as possible;
+    relax location and industry first. Only swap titles for function-specific
+    fallbacks at the very end — never swap them for software titles by default,
+    which is what produced the wrong-leads bug for civil engineers / writers.
+    """
     stages = []
 
-    # Stage 1: Remove industry filter
+    # Stage 1: Remove industry filter (keep titles + location)
     if filters.organization_industries:
         stages.append(LeadFilter(
             target_segments=filters.target_segments,
@@ -120,7 +229,7 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
         ))
         logger.info("[LOOSENING] Stage %d: Remove industry filter", len(stages))
 
-    # Stage 2: Remove org_locations (keep person_locations)
+    # Stage 2: Remove organization_locations (keep person_locations)
     if filters.organization_locations:
         stages.append(LeadFilter(
             target_segments=filters.target_segments,
@@ -132,19 +241,7 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
         ))
         logger.info("[LOOSENING] Stage %d: Remove org locations + industry", len(stages))
 
-    # Stage 3: Remove person_locations too
-    if filters.person_locations:
-        stages.append(LeadFilter(
-            target_segments=filters.target_segments,
-            person_titles_exclude=filters.person_titles_exclude,
-            person_locations=[],
-            organization_locations=None,
-            organization_industries=None,
-            email_status=filters.email_status,
-        ))
-        logger.info("[LOOSENING] Stage %d: Remove all location + industry filters", len(stages))
-
-    # Stage 4: Flatten company sizes into one broad segment
+    # Stage 3: Flatten company sizes into one segment (keep titles + location)
     all_titles = []
     seen = set()
     for seg in filters.target_segments:
@@ -161,29 +258,45 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
         organization_industries=None,
         email_status=filters.email_status,
     ))
-    logger.info("[LOOSENING] Stage %d: Flatten to single segment + remove industry", len(stages))
+    logger.info("[LOOSENING] Stage %d: Flatten company sizes (keep titles + location)", len(stages))
 
-    # Stage 5: Fallback broad titles, keep location
+    # Stage 4: Drop person_locations (keep ORIGINAL titles — DON'T swap to software fallback yet)
+    if filters.person_locations:
+        stages.append(LeadFilter(
+            target_segments=[TargetSegment(company_size_range="1,10000", person_titles=all_titles)],
+            person_titles_exclude=filters.person_titles_exclude,
+            person_locations=[],
+            organization_locations=None,
+            organization_industries=None,
+            email_status=filters.email_status,
+        ))
+        logger.info("[LOOSENING] Stage %d: Keep titles, drop location (global search)", len(stages))
+
+    # Stage 5: Function-specific fallback titles, KEEP location.
+    # This swaps in broader on-domain titles (e.g. for civil_construction,
+    # uses construction PMs / heads of construction — NOT software titles).
+    fallback_titles = _fallback_titles_for_filter(filters)
     stages.append(LeadFilter(
-        target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_BROAD_TITLES))],
+        target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(fallback_titles))],
         person_titles_exclude=filters.person_titles_exclude,
         person_locations=filters.person_locations,
         organization_locations=None,
         organization_industries=None,
         email_status=["verified"],
     ))
-    logger.info("[LOOSENING] Stage %d: Fallback broad titles + location only", len(stages))
+    logger.info("[LOOSENING] Stage %d: Function-specific fallback titles + location (titles=%s)",
+                len(stages), fallback_titles[:5])
 
-    # Stage 6: Nuclear — fallback titles, no constraints at all
+    # Stage 6: Nuclear — function-specific fallback titles, no constraints at all
     stages.append(LeadFilter(
-        target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_BROAD_TITLES))],
+        target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(fallback_titles))],
         person_titles_exclude=filters.person_titles_exclude,
         person_locations=[],
         organization_locations=None,
         organization_industries=None,
         email_status=["verified"],
     ))
-    logger.info("[LOOSENING] Stage %d: Nuclear fallback — no constraints", len(stages))
+    logger.info("[LOOSENING] Stage %d: Nuclear fallback (function-specific titles, no location)", len(stages))
 
     return stages
 
