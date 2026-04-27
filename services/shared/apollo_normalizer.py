@@ -144,23 +144,168 @@ _LOCATION_MAP = {
     "thiruvananthapuram": "Thiruvananthapuram, Kerala, India",
     "indore": "Indore, Madhya Pradesh, India",
     "chandigarh": "Chandigarh, India",
-    # International cities
+    # International cities — North America
     "san francisco": "San Francisco, California, United States",
     "sf": "San Francisco, California, United States",
     "new york": "New York, New York, United States",
     "nyc": "New York, New York, United States",
-    "london": "London, England, United Kingdom",
-    "singapore": "Singapore",
-    "dubai": "Dubai, United Arab Emirates",
+    "los angeles": "Los Angeles, California, United States",
+    "la": "Los Angeles, California, United States",
+    "boston": "Boston, Massachusetts, United States",
+    "chicago": "Chicago, Illinois, United States",
+    "seattle": "Seattle, Washington, United States",
+    "austin": "Austin, Texas, United States",
     "toronto": "Toronto, Ontario, Canada",
+    "vancouver": "Vancouver, British Columbia, Canada",
+    "montreal": "Montreal, Quebec, Canada",
+
+    # UK & Ireland
+    "london": "London, England, United Kingdom",
+    "manchester": "Manchester, England, United Kingdom",
+    "edinburgh": "Edinburgh, Scotland, United Kingdom",
+    "dublin": "Dublin, Ireland",
+
+    # France
+    "paris": "Paris, France",
+    "lyon": "Lyon, France",
+    "marseille": "Marseille, France",
+    "lille": "Lille, France",
+    "toulouse": "Toulouse, France",
+    "nice": "Nice, France",
+    "bordeaux": "Bordeaux, France",
+    "nantes": "Nantes, France",
+
+    # Germany
     "berlin": "Berlin, Germany",
+    "munich": "Munich, Bavaria, Germany",
+    "münchen": "Munich, Bavaria, Germany",
+    "muenchen": "Munich, Bavaria, Germany",
+    "frankfurt": "Frankfurt, Germany",
+    "hamburg": "Hamburg, Germany",
+    "cologne": "Cologne, Germany",
+    "köln": "Cologne, Germany",
+    "stuttgart": "Stuttgart, Germany",
+    "düsseldorf": "Düsseldorf, Germany",
+    "dusseldorf": "Düsseldorf, Germany",
+
+    # Benelux
     "amsterdam": "Amsterdam, North Holland, Netherlands",
+    "rotterdam": "Rotterdam, Netherlands",
+    "the hague": "The Hague, Netherlands",
+    "brussels": "Brussels, Belgium",
+    "antwerp": "Antwerp, Belgium",
+    "luxembourg": "Luxembourg",
+    "luxembourg city": "Luxembourg",
+
+    # Iberia
+    "madrid": "Madrid, Spain",
+    "barcelona": "Barcelona, Spain",
+    "valencia": "Valencia, Spain",
+    "lisbon": "Lisbon, Portugal",
+    "porto": "Porto, Portugal",
+
+    # Italy
+    "rome": "Rome, Italy",
+    "milan": "Milan, Italy",
+    "turin": "Turin, Italy",
+    "naples": "Naples, Italy",
+
+    # Nordics
+    "stockholm": "Stockholm, Sweden",
+    "copenhagen": "Copenhagen, Denmark",
+    "oslo": "Oslo, Norway",
+    "helsinki": "Helsinki, Finland",
+
+    # Central / Eastern Europe
+    "vienna": "Vienna, Austria",
+    "wien": "Vienna, Austria",
+    "zurich": "Zurich, Switzerland",
+    "geneva": "Geneva, Switzerland",
+    "warsaw": "Warsaw, Poland",
+    "prague": "Prague, Czechia",
+    "budapest": "Budapest, Hungary",
+
+    # Asia / Pacific
+    "singapore": "Singapore",
+    "hong kong": "Hong Kong",
+    "tokyo": "Tokyo, Japan",
+    "sydney": "Sydney, New South Wales, Australia",
+    "melbourne": "Melbourne, Victoria, Australia",
+
+    # Middle East
+    "dubai": "Dubai, United Arab Emirates",
+    "abu dhabi": "Abu Dhabi, United Arab Emirates",
+    "tel aviv": "Tel Aviv, Israel",
+
     "remote": "Remote",
 }
 
 
+def _llm_clean_locations(raw_locations: List[str]) -> List[str]:
+    """Use Azure OpenAI to clean up garbled / misspelled / compound location strings.
+
+    Examples:
+      "Paris — Luxembourgh"  → ["Paris", "Luxembourg"]
+      "Munchen"              → ["Munich"]
+      "NYC, SF"              → ["New York", "San Francisco"]
+      "anywhere"             → []  (not a city)
+
+    Returns canonical English city names (no country suffix). Empty list on failure.
+    """
+    if not raw_locations:
+        return []
+
+    try:
+        from services.shared.ai.azure_openai_client import generate_json
+    except Exception as e:
+        logger.warning("LLM client unavailable for location cleaning: %s", e)
+        return []
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "cities": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+        "required": ["cities"],
+    }
+
+    prompt = (
+        "You are normalizing user-entered city names for a job lead search.\n\n"
+        f"Input strings (may be misspelled, combined, or non-city values): {raw_locations}\n\n"
+        "Rules:\n"
+        "1. Split compound entries on em-dashes, slashes, commas, or 'and' "
+        "(e.g., 'Paris — Luxembourgh' becomes two cities).\n"
+        "2. Fix spelling (e.g., 'Luxembourgh' → 'Luxembourg', 'Munchen' → 'Munich').\n"
+        "3. Use the SHORTEST canonical English city name. "
+        "'NYC' → 'New York', not 'New York City'. "
+        "'SF' → 'San Francisco'. 'München' → 'Munich'. 'Köln' → 'Cologne'.\n"
+        "4. Drop entries that are not cities ('Remote', 'Anywhere', 'Europe', 'USA').\n"
+        "5. Deduplicate.\n"
+        "6. Return city name only — no country, no commas, no extra text.\n\n"
+        "Return as JSON: {\"cities\": [\"Paris\", \"Luxembourg\", ...]}"
+    )
+
+    try:
+        result = generate_json(prompt, schema, temperature=0.0)
+        cities = result.get("cities", []) if isinstance(result, dict) else []
+        cities = [c.strip() for c in cities if isinstance(c, str) and c.strip()]
+        logger.info("LLM cleaned locations %s → %s", raw_locations, cities)
+        return cities
+    except Exception as e:
+        logger.warning("LLM location cleaning failed: %s", e)
+        return []
+
+
 def normalize_locations(user_locations: List[str]) -> List[str]:
     """Convert user location names to Apollo-friendly location strings.
+
+    Two-pass strategy:
+      1. Direct map lookup — fast path, no LLM cost.
+      2. For anything still unmatched, send through LLM cleaner to fix
+         typos / split compound entries, then retry the map lookup.
 
     Args:
         user_locations: List of location names from the candidate profile.
@@ -173,10 +318,11 @@ def normalize_locations(user_locations: List[str]) -> List[str]:
 
     seen = set()
     normalized = []
+    unmatched: List[str] = []
 
+    # ── Pass 1: direct map lookup ────────────────────────────────────────
     for loc in user_locations:
         key = loc.strip().lower()
-        # Skip "remote" — it's not a filterable Apollo location
         if key == "remote":
             logger.info("Skipping 'Remote' location (not an Apollo filter)")
             continue
@@ -188,11 +334,27 @@ def normalize_locations(user_locations: List[str]) -> List[str]:
                 normalized.append(mapped)
             logger.info("Location '%s' → '%s'", loc, mapped)
         else:
-            # Pass through as-is
-            if loc not in seen:
-                seen.add(loc)
-                normalized.append(loc)
-            logger.info("Location '%s' passed through as-is", loc)
+            unmatched.append(loc)
+
+    # ── Pass 2: LLM cleanup for anything still unmatched ────────────────
+    if unmatched:
+        cleaned = _llm_clean_locations(unmatched)
+        for loc in cleaned:
+            key = loc.strip().lower()
+            if key == "remote":
+                continue
+            mapped = _LOCATION_MAP.get(key)
+            if mapped and mapped != "Remote":
+                if mapped not in seen:
+                    seen.add(mapped)
+                    normalized.append(mapped)
+                logger.info("LLM-corrected location '%s' → '%s'", loc, mapped)
+            else:
+                # LLM gave us a city not in the map — pass through with original casing.
+                if loc not in seen:
+                    seen.add(loc)
+                    normalized.append(loc)
+                logger.info("LLM-corrected location '%s' passed through (not in map)", loc)
 
     logger.info("Normalized %d user locations to %d Apollo locations: %s",
                 len(user_locations), len(normalized), normalized)
