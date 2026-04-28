@@ -233,11 +233,11 @@ def _enrich_upcoming(db) -> int:
             db.commit()
             continue
 
-        # Lead already enriched (e.g., by preview enrichment) — reuse email, still deduct credit
+        # Lead already enriched (e.g., by preview enrichment) — reuse the email.
+        # Credits are reserved up-front at campaign creation; no per-send deduction.
         if lead.email and lead.email_verified:
             email.to_email = lead.email
             email.enrichment_status = "enriched"
-            _deduct_single_credit(db, email)
             db.commit()
             enriched_count += 1
             continue
@@ -253,12 +253,10 @@ def _enrich_upcoming(db) -> int:
                 lead.email_verified = True
                 lead.status = "enriched"
 
-                # Update email record
+                # Update email record. Credits are reserved up-front at
+                # campaign creation; no per-send deduction is needed.
                 email.to_email = result["email"]
                 email.enrichment_status = "enriched"
-
-                # Deduct 1 credit
-                _deduct_single_credit(db, email)
 
                 db.commit()
                 enriched_count += 1
@@ -289,36 +287,11 @@ def _enrich_upcoming(db) -> int:
     return enriched_count
 
 
-def _deduct_single_credit(db, email: EmailSent):
-    """Deduct 1 credit for a successful enrichment. Updates OutreachOrder tracking."""
-    # Find the campaign's outreach order to get the user_id
-    campaign = db.query(Campaign).filter_by(id=email.campaign_id).first()
-    if not campaign or not campaign.candidate_id:
-        return
-
-    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
-    if not candidate:
-        return
-
-    user_id = candidate.user_id
-
-    # Deduct from UserCredit
-    credit = db.query(UserCredit).filter_by(user_id=user_id).first()
-    if credit and (credit.total_credits - credit.used_credits) >= 1:
-        credit.used_credits += 1
-    else:
-        logger.warning("[JIT-ENRICH] No credits available for user %s, skipping deduction", user_id)
-
-    # Update OutreachOrder tracking
-    order = (
-        db.query(OutreachOrder)
-        .filter_by(user_id=user_id, candidate_id=campaign.candidate_id)
-        .filter(OutreachOrder.status.in_(["campaign_running", "email_connected", "campaign_setup"]))
-        .order_by(OutreachOrder.created_at.desc())
-        .first()
-    )
-    if order:
-        order.credits_used = (order.credits_used or 0) + 1
+# NOTE: per-send credit deduction was removed. Credits are now reserved
+# up-front at campaign creation (see api/routes_campaign.py — uses
+# `with_for_update()` lock + `used_credits += required`). The reservation
+# IS the spend commitment, so deducting again per send was double-counting
+# and triggering false "Credits exhausted" failures (Kuber, Shreya).
 
 
 # ── JIT Phase 2: Generate Email Content ─────────────────────────────────────
@@ -748,41 +721,18 @@ def _check_campaign_completion(db):
 # ── Credit Exhaustion Check ──────────────────────────────────────────────────
 
 def _check_credit_exhaustion(db):
-    """If a running campaign's user has no credits left, skip remaining pending emails."""
-    running_campaigns = db.query(Campaign).filter_by(status="running").all()
-    for campaign in running_campaigns:
-        # Check if there are pending enrichment emails
-        pending_count = db.query(func.count(EmailSent.id)).filter(
-            EmailSent.campaign_id == campaign.id,
-            EmailSent.enrichment_status == "pending",
-        ).scalar() or 0
+    """No-op: kept as a stub for backwards compat with existing call sites.
 
-        if pending_count == 0:
-            continue
+    Credit accounting is now handled entirely by the reservation at campaign
+    creation (api/routes_campaign.py). After reservation, `used_credits`
+    legitimately equals `total_credits` for the duration of the campaign —
+    that's not exhaustion, that's the user's spend already committed.
 
-        # Get user's credit balance
-        candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
-        if not candidate:
-            continue
-
-        credit = db.query(UserCredit).filter_by(user_id=candidate.user_id).first()
-        if not credit:
-            continue
-
-        available = credit.total_credits - credit.used_credits
-        if available <= 0:
-            # Skip all remaining pending emails
-            db.query(EmailSent).filter(
-                EmailSent.campaign_id == campaign.id,
-                EmailSent.enrichment_status == "pending",
-            ).update({
-                EmailSent.enrichment_status: "skipped",
-                EmailSent.status: "failed",
-                EmailSent.error_message: "Credits exhausted",
-            }, synchronize_session="fetch")
-            db.commit()
-            logger.warning("[JIT] Credits exhausted for campaign %d (user %s), skipped %d emails",
-                           campaign.id, candidate.user_id, pending_count)
+    The previous implementation interpreted `available <= 0` as exhaustion
+    and marked all pending emails as `failed: Credits exhausted`, which was
+    a false positive that nuked Kuber's (335) and Shreya's (185) campaigns.
+    """
+    return
 
 
 # ── Reply & Bounce Check ─────────────────────────────────────────────────────

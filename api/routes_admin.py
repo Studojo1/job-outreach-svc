@@ -270,6 +270,18 @@ async def outreach_users(
         active_order = next((o for o in orders if o.status in ACTIVE_STATUSES), None)
         latest_order = max(orders, key=lambda o: o.updated_at or o.created_at, default=None) if orders else None
 
+        # Currently-running campaign for this user. Used to override the
+        # active_campaign_id below, because a user can have a paused dupe
+        # campaign whose order is more recent than the real running campaign
+        # (legacy state from before the Apr 22 dupe-block fix).
+        running_campaign = (
+            db.query(Campaign)
+            .join(OutreachOrder, OutreachOrder.candidate_id == Campaign.candidate_id)
+            .filter(OutreachOrder.user_id == u.id, Campaign.status == "running")
+            .order_by(Campaign.created_at.desc())
+            .first()
+        )
+
         # Payment
         total_paid = (
             db.query(func.coalesce(func.sum(PaymentOrder.amount_cents), 0))
@@ -321,11 +333,18 @@ async def outreach_users(
             "user_name": u.name,
             "user_email": u.email,
             "total_orders": len(orders),
-            "active_order_status": latest_order.status if latest_order else None,
+            # Prefer the running campaign's status/id over whatever the latest
+            # order points at — handles legacy users with a paused dupe order
+            # whose updated_at is newer than the real running campaign's order.
+            "active_order_status": (
+                "campaign_running" if running_campaign else (latest_order.status if latest_order else None)
+            ),
             "active_order_id": latest_order.id if latest_order else None,
-            "active_campaign_id": next(
-                (o.campaign_id for o in sorted(orders, key=lambda o: o.updated_at or o.created_at, reverse=True) if o.campaign_id),
-                None,
+            "active_campaign_id": (
+                running_campaign.id if running_campaign else next(
+                    (o.campaign_id for o in sorted(orders, key=lambda o: o.updated_at or o.created_at, reverse=True) if o.campaign_id),
+                    None,
+                )
             ),
             "active_order_updated_at": (
                 _meaningful_ts(latest_order, u.created_at) if latest_order else None

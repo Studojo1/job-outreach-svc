@@ -69,10 +69,24 @@ async def gmail_oauth_callback(
         granted_scopes = token_data.get("scope", "")
         logger.info(f"[GmailOAuth] Step 1 OK: got access_token={bool(access_token)}, refresh_token={bool(refresh_token)}, expires_in={expires_in}, scopes={granted_scopes}")
 
+        # Both scopes are required:
+        # - gmail.send: to send outreach emails on the user's behalf
+        # - gmail.readonly: to read inbox and detect replies/bounces
+        # Users can untick individual scopes in Google's consent screen, so
+        # we have to actually verify both came back.
+        missing_scopes = []
         if "gmail.send" not in granted_scopes:
-            logger.warning(f"[GmailOAuth] gmail.send scope NOT granted for user_id={user_id}. Granted: {granted_scopes}")
+            missing_scopes.append("gmail.send")
+        if "gmail.readonly" not in granted_scopes:
+            missing_scopes.append("gmail.readonly")
+
+        if missing_scopes:
+            logger.warning(
+                f"[GmailOAuth] Required scopes missing for user_id={user_id}: %s. Granted: %s",
+                missing_scopes, granted_scopes,
+            )
             return RedirectResponse(
-                url=f"{frontend_base}?status=error&message=missing_send_permission"
+                url=f"{frontend_base}?status=error&message=missing_permissions"
             )
 
         logger.info(f"[GmailOAuth] Step 2: Fetching Google user info")
