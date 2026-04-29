@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from api.dependencies import get_admin_user
 from database.models import (
     Campaign,
+    Coupon,
     EmailSent,
     Lead,
     OutreachOrder,
@@ -361,6 +362,100 @@ async def outreach_users(
         })
 
     return {"users": result, "total": total}
+
+
+_EXCLUDED_EMAILS = {
+    "businessconnect.pranav@gmail.com",
+    "pranav.hegde126@gmail.com",
+    "benjenstark.578239@gmail.com",
+}
+
+
+@router.get("/payments")
+async def admin_payments(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    status_filter: str = Query("paid", max_length=50),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """List all payment orders with user info, coupon codes, and outreach status."""
+
+    q = (
+        db.query(PaymentOrder, User, Coupon)
+        .join(User, PaymentOrder.user_id == User.id)
+        .outerjoin(Coupon, PaymentOrder.coupon_id == Coupon.id)
+        .filter(User.email.notin_(_EXCLUDED_EMAILS))
+    )
+
+    if status_filter == "paid":
+        q = q.filter(PaymentOrder.status == "paid")
+    elif status_filter == "abandoned":
+        q = q.filter(PaymentOrder.status == "created")
+    # "all" → no status filter
+
+    if search:
+        pattern = f"%{search}%"
+        q = q.filter(
+            (User.name.ilike(pattern)) | (User.email.ilike(pattern))
+        )
+
+    total = q.count()
+    rows = q.order_by(PaymentOrder.created_at.desc()).offset(offset).limit(limit).all()
+
+    # Stats (always over excluded-email-filtered, paid-only, all users)
+    stats_q = (
+        db.query(PaymentOrder, User)
+        .join(User, PaymentOrder.user_id == User.id)
+        .filter(User.email.notin_(_EXCLUDED_EMAILS))
+    )
+    paid_rows = stats_q.filter(PaymentOrder.status == "paid").all()
+    abandoned_count = stats_q.filter(PaymentOrder.status == "created").count()
+
+    total_inr = sum(r.PaymentOrder.amount_cents for r in paid_rows if r.PaymentOrder.currency == "INR")
+    total_usd = sum(r.PaymentOrder.amount_cents for r in paid_rows if r.PaymentOrder.currency == "USD")
+
+    result = []
+    for po, u, coupon in rows:
+        # Latest outreach order status for this user
+        latest_order = (
+            db.query(OutreachOrder)
+            .filter(OutreachOrder.user_id == u.id)
+            .order_by(OutreachOrder.updated_at.desc())
+            .first()
+        )
+        result.append({
+            "id": po.id,
+            "user_id": u.id,
+            "user_name": u.name,
+            "user_email": u.email,
+            "amount_cents": po.amount_cents,
+            "currency": po.currency,
+            "provider": po.provider,
+            "tier": po.tier,
+            "status": po.status,
+            "geo_country": po.geo_country,
+            "coupon_code": coupon.code if coupon else None,
+            "credits_granted": po.credits_granted,
+            "razorpay_order_id": po.razorpay_order_id,
+            "razorpay_payment_id": po.razorpay_payment_id,
+            "dodo_checkout_id": po.dodo_checkout_id,
+            "dodo_payment_id": po.dodo_payment_id,
+            "outreach_order_status": latest_order.status if latest_order else None,
+            "created_at": po.created_at.isoformat() if po.created_at else None,
+        })
+
+    return {
+        "payments": result,
+        "total": total,
+        "stats": {
+            "total_paid": len(paid_rows),
+            "total_inr_paise": total_inr,
+            "total_usd_cents": total_usd,
+            "total_abandoned": abandoned_count,
+        },
+    }
 
 
 @router.get("/users/{user_id}/detail")
