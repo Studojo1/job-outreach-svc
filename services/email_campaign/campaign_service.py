@@ -349,6 +349,7 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
         "campaign_id": campaign_id,
         "campaign_name": campaign.name,
         "status": campaign.status,
+        "user_timezone": campaign.user_timezone or "Asia/Kolkata",
         "emails_total": total,
         "emails_queued": queued,
         "emails_pending_enrichment": pending_enrichment,

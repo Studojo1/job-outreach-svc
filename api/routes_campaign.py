@@ -357,6 +357,45 @@ async def api_start_campaign(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class CampaignRescheduleRequest(BaseModel):
+    user_timezone: str
+
+
+@router.post("/{campaign_id}/reschedule")
+async def api_reschedule_campaign(
+    campaign_id: int,
+    request: CampaignRescheduleRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update a campaign's timezone and recompute all future email schedules."""
+    import pytz
+    from services.email_campaign.campaign_worker import compute_campaign_schedule
+
+    try:
+        pytz.timezone(request.user_timezone)
+    except pytz.exceptions.UnknownTimeZoneError:
+        raise HTTPException(status_code=400, detail=f"Unknown timezone: {request.user_timezone}")
+
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    from database.models import Candidate
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not your campaign")
+
+    if campaign.status not in ("running", "paused"):
+        raise HTTPException(status_code=400, detail="Can only reschedule running or paused campaigns")
+
+    campaign.user_timezone = request.user_timezone
+    db.commit()
+
+    compute_campaign_schedule(db, campaign_id)
+    return {"status": "success", "user_timezone": request.user_timezone}
+
+
 @router.get("/user/latest")
 async def get_user_latest_campaign(
     current_user: User = Depends(get_current_user),
