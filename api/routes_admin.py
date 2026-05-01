@@ -22,10 +22,11 @@ from database.session import get_db
 router = APIRouter(prefix="/admin/outreach", tags=["admin"])
 
 
-# 12-stage funnel — keeps order, label, and OutreachOrder column in sync.
-FUNNEL_STAGES = [
+# Linear main-flow stages — every user passes through these in order. Used
+# for monotonic funnel counting (a user counted at stage N is also counted
+# at every stage 0..N).
+MAIN_FLOW_STAGES = [
     ("resume_uploaded",       "Resume Uploaded",       "resume_uploaded_at"),
-    ("quiz_started",          "Quiz Started",          "quiz_started_at"),
     ("quiz_completed",        "Quiz Completed",        "quiz_completed_at"),
     ("leads_generated",       "Leads Generated",       "leads_generated_at"),
     ("payment_page_reached",  "Payment Page Reached",  "payment_page_reached_at"),
@@ -34,9 +35,14 @@ FUNNEL_STAGES = [
     ("email_style_selected",  "Email Style Selected",  "email_style_selected_at"),
     ("campaign_setup",        "Campaign Setup",        "campaign_setup_at"),
     ("campaign_launched",     "Campaign Launched",     "campaign_launched_at"),
-    ("campaign_paused",       "Campaign Paused",       "campaign_paused_at"),
     ("campaign_completed",    "Campaign Completed",    "campaign_completed_at"),
 ]
+# Side-branches that don't fit the linear waterfall. Counted independently.
+SIDE_STAGES = [
+    ("campaign_paused",       "Campaign Paused",       "campaign_paused_at"),
+]
+# Combined list (display order) — used for the per-user dot strip.
+FUNNEL_STAGES = MAIN_FLOW_STAGES[:9] + SIDE_STAGES + MAIN_FLOW_STAGES[9:]
 
 
 @router.get("/recent-signups")
@@ -217,18 +223,22 @@ async def outreach_overview(
         key=lambda x: x["month"],
     )
 
-    # ── Funnel aggregate: count of distinct users who reached each stage ────
-    # Counted from the new per-stage timestamps on outreach_orders. A user is
-    # considered to have "reached" a stage if any of their orders has the
-    # corresponding timestamp set. We deliberately count *users*, not orders,
-    # so a user with multiple orders only contributes once per stage.
+    # ── Funnel aggregate ────────────────────────────────────────────────────
+    # MONOTONIC counting: a user is counted at stage N if they have a timestamp
+    # for stage N OR any later main-flow stage. This guarantees the chart is
+    # provably non-increasing (you can't have more users at a later stage than
+    # at an earlier one), and corrects for backfill misses where a downstream
+    # timestamp is set but an upstream one isn't.
+    from sqlalchemy import or_
     funnel = []
     prev_count: int | None = None
-    for key, label, column in FUNNEL_STAGES:
-        col = getattr(OutreachOrder, column)
+    for i, (key, label, column) in enumerate(MAIN_FLOW_STAGES):
+        # "this stage or any later" — covers backfill gaps
+        cols_or_later = [getattr(OutreachOrder, c) for _, _, c in MAIN_FLOW_STAGES[i:]]
+        cond = or_(*[c.isnot(None) for c in cols_or_later])
         users_reached = (
             db.query(func.count(func.distinct(OutreachOrder.user_id)))
-            .filter(col.isnot(None))
+            .filter(cond)
             .scalar()
         ) or 0
         drop_off = None
@@ -236,17 +246,31 @@ async def outreach_overview(
         if prev_count is not None and prev_count > 0:
             drop_off = max(prev_count - users_reached, 0)
             drop_off_pct = round((drop_off / prev_count) * 100, 1)
-        funnel.append({
+        entry = {
             "stage": key,
             "label": label,
             "users_reached": users_reached,
             "drop_off_from_prev": drop_off,
             "drop_off_pct_from_prev": drop_off_pct,
-        })
-        # Pause/complete stages are terminal off the main flow; don't use them
-        # as the denominator for the next stage's drop-off.
-        if key not in ("campaign_paused", "campaign_completed"):
-            prev_count = users_reached
+        }
+        # Insert paused as a side-branch right before campaign_completed so
+        # the chart visually separates terminal off-ramps.
+        funnel.append(entry)
+        if key == "campaign_launched":
+            paused_col = getattr(OutreachOrder, "campaign_paused_at")
+            paused_count = (
+                db.query(func.count(func.distinct(OutreachOrder.user_id)))
+                .filter(paused_col.isnot(None))
+                .scalar()
+            ) or 0
+            funnel.append({
+                "stage": "campaign_paused",
+                "label": "Campaign Paused",
+                "users_reached": paused_count,
+                "drop_off_from_prev": None,
+                "drop_off_pct_from_prev": None,
+            })
+        prev_count = users_reached
 
     return {
         "total_orders": total_orders,
@@ -388,7 +412,23 @@ async def outreach_users(
                 v = getattr(o, _column, None)
                 if v is not None and (best is None or v < best):
                     best = v
-            stage_ts[_key] = best.isoformat() if best else None
+            stage_ts[_key] = best  # store as datetime, serialize below
+
+        # Current stage = the latest main-flow stage the user has reached.
+        # We walk MAIN_FLOW_STAGES in reverse and pick the first stage that
+        # has a timestamp. This is what the Status column displays — much
+        # more informative than the raw OutreachOrder.status, which doesn't
+        # capture pre-order stages (resume_uploaded, quiz_completed, etc.).
+        current_stage = None
+        current_stage_label = None
+        for _k, _l, _c in reversed(MAIN_FLOW_STAGES):
+            if stage_ts.get(_k) is not None:
+                current_stage = _k
+                current_stage_label = _l
+                break
+
+        # Now serialize stage_ts to ISO strings
+        stage_ts = {k: (v.isoformat() if v else None) for k, v in stage_ts.items()}
 
         result.append({
             "user_id": u.id,
@@ -396,6 +436,8 @@ async def outreach_users(
             "user_email": u.email,
             "total_orders": len(orders),
             "stage_timestamps": stage_ts,
+            "current_stage": current_stage,
+            "current_stage_label": current_stage_label,
             # Prefer the running campaign's status/id over whatever the latest
             # order points at — handles legacy users with a paused dupe order
             # whose updated_at is newer than the real running campaign's order.

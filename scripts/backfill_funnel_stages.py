@@ -150,24 +150,29 @@ def backfill_existing_orders(db: Session, apply_changes: bool) -> dict:
             if ts and _set_if_empty(order, column, ts):
                 counts[f"log:{column}"] += 1
 
-        # 2. Stage 1/3 from Candidate.
-        if order.candidate_id:
-            cand = db.query(Candidate).filter_by(id=order.candidate_id).first()
-            if cand and cand.created_at:
-                if _set_if_empty(order, "resume_uploaded_at", cand.created_at):
-                    counts["candidate:resume_uploaded_at"] += 1
-                # If we know they have a psychometric_profile, the quiz finished.
-                if cand.psychometric_profile and _set_if_empty(
-                    order, "quiz_completed_at", cand.created_at
-                ):
-                    counts["candidate:quiz_completed_at"] += 1
+        # 2. Stage 1/3 — derive from ALL of the user's candidates (not just
+        #    the one linked to this order). A user can have multiple Candidate
+        #    rows from re-uploads; their stage signal is the union across all
+        #    of them. Without this, an order linked to candidate_A misses
+        #    quiz/leads signals living on candidate_B for the same user.
+        user_candidates = db.query(Candidate).filter_by(user_id=order.user_id).all()
+        user_candidate_ids = [c.id for c in user_candidates]
 
-        # 3. Stage 4 — leads_generated. If candidate has any leads, we know it
-        #    happened; the best we have is the candidate's earliest lead timestamp.
-        if order.candidate_id and getattr(order, "leads_generated_at", None) is None:
+        if user_candidates:
+            earliest_resume = min((c.created_at for c in user_candidates if c.created_at), default=None)
+            if earliest_resume and _set_if_empty(order, "resume_uploaded_at", earliest_resume):
+                counts["candidate:resume_uploaded_at"] += 1
+            quiz_dates = [c.created_at for c in user_candidates if c.psychometric_profile and c.created_at]
+            if quiz_dates and _set_if_empty(order, "quiz_completed_at", min(quiz_dates)):
+                counts["candidate:quiz_completed_at"] += 1
+
+        # 3. Stage 4 — leads_generated via ANY of the user's candidates.
+        #    Previously this only checked the order's own candidate_id, which
+        #    missed 192 users whose leads lived under a different candidate row.
+        if user_candidate_ids and getattr(order, "leads_generated_at", None) is None:
             earliest_lead = (
                 db.query(Lead.created_at)
-                .filter(Lead.candidate_id == order.candidate_id)
+                .filter(Lead.candidate_id.in_(user_candidate_ids))
                 .order_by(Lead.created_at.asc())
                 .first()
             )
@@ -200,28 +205,44 @@ def backfill_existing_orders(db: Session, apply_changes: bool) -> dict:
             if ea and ea.created_at and _set_if_empty(order, "gmail_connected_at", ea.created_at):
                 counts["email_account:gmail_connected_at"] += 1
 
-        # 6. Stages 9/10/11/12 — from Campaign.
-        if order.campaign_id:
-            c = db.query(Campaign).filter_by(id=order.campaign_id).first()
-            if c:
-                if _set_if_empty(order, "campaign_setup_at", c.created_at):
-                    counts["campaign:campaign_setup_at"] += 1
-                if c.selected_styles and _set_if_empty(
-                    order, "email_style_selected_at", c.created_at
-                ):
-                    counts["campaign:email_style_selected_at"] += 1
-                # started_at preferred; fall back to created_at if status implies launch
-                launched_at = c.started_at or (c.created_at if c.status in ("running", "paused", "completed") else None)
-                if launched_at and _set_if_empty(order, "campaign_launched_at", launched_at):
-                    counts["campaign:campaign_launched_at"] += 1
-                if c.paused_at and _set_if_empty(order, "campaign_paused_at", c.paused_at):
-                    counts["campaign:campaign_paused_at"] += 1
-                if c.completed_at and _set_if_empty(order, "campaign_completed_at", c.completed_at):
-                    counts["campaign:campaign_completed_at"] += 1
-                elif c.status == "completed":
-                    fallback = c.completed_at or order.updated_at or c.created_at
-                    if fallback and _set_if_empty(order, "campaign_completed_at", fallback):
-                        counts["campaign:campaign_completed_at_fallback"] += 1
+        # 6. Stages 9/10/11/12 — derive from ALL of the user's campaigns,
+        #    not just the order's linked campaign_id. A user can have run
+        #    multiple campaigns; the earliest setup / launched timestamp
+        #    across all of them is the right signal.
+        user_campaigns: list = []
+        if user_candidate_ids:
+            user_campaigns = (
+                db.query(Campaign)
+                .filter(Campaign.candidate_id.in_(user_candidate_ids))
+                .all()
+            )
+        if user_campaigns:
+            earliest_setup = min((c.created_at for c in user_campaigns if c.created_at), default=None)
+            if earliest_setup and _set_if_empty(order, "campaign_setup_at", earliest_setup):
+                counts["campaign:campaign_setup_at"] += 1
+            style_dates = [c.created_at for c in user_campaigns if c.selected_styles and c.created_at]
+            if style_dates and _set_if_empty(order, "email_style_selected_at", min(style_dates)):
+                counts["campaign:email_style_selected_at"] += 1
+            launch_dates = [
+                c.started_at or c.created_at
+                for c in user_campaigns
+                if c.started_at or c.status in ("running", "paused", "completed")
+            ]
+            launch_dates = [d for d in launch_dates if d]
+            if launch_dates and _set_if_empty(order, "campaign_launched_at", min(launch_dates)):
+                counts["campaign:campaign_launched_at"] += 1
+            pause_dates = [c.paused_at for c in user_campaigns if c.paused_at]
+            if pause_dates and _set_if_empty(order, "campaign_paused_at", min(pause_dates)):
+                counts["campaign:campaign_paused_at"] += 1
+            complete_dates = [c.completed_at for c in user_campaigns if c.completed_at]
+            if not complete_dates:
+                # Status fallback for legacy campaigns whose completed_at was never recorded
+                for c in user_campaigns:
+                    if c.status == "completed":
+                        complete_dates.append(c.completed_at or order.updated_at or c.created_at)
+                complete_dates = [d for d in complete_dates if d]
+            if complete_dates and _set_if_empty(order, "campaign_completed_at", min(complete_dates)):
+                counts["campaign:campaign_completed_at"] += 1
 
         # 7. STATUS_FLOORS — for stages still null, use the order's own created_at
         #    as a last-resort floor based on what status proves they reached.
