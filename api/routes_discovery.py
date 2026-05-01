@@ -252,6 +252,12 @@ async def search_leads(
             "duration_seconds": duration,
         })
 
+        # Funnel: mark stage 4 if any leads were actually found.
+        if count > 0:
+            from services.stage_tracking import safe_mark_stage
+            safe_mark_stage(db, str(current_user.id), "leads_generated",
+                            candidate_id=request.candidate_id)
+
         return {"status": "success", "leads_collected": count, "leads_scored": scored_count}
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)

@@ -160,6 +160,14 @@ async def create_order(
     if amount <= 0:
         # Fully discounted — grant credits directly
         idem_key = str(uuid.uuid4())
+        # Funnel: free coupon path skips the gateway, so fire both
+        # payment_page_reached and payment_made and link the order.
+        from services.stage_tracking import safe_mark_stage, get_or_create_active_order
+        try:
+            outreach_order = get_or_create_active_order(db, str(current_user.id))
+            outreach_order_id = outreach_order.id
+        except Exception:
+            outreach_order_id = None
         order = PaymentOrder(
             user_id=current_user.id,
             provider="coupon",
@@ -167,6 +175,7 @@ async def create_order(
             currency=currency,
             tier=body.tier,
             coupon_id=coupon_id,
+            outreach_order_id=outreach_order_id,
             geo_country=country,
             status="paid",
             credits_granted=body.tier,
@@ -186,6 +195,8 @@ async def create_order(
             "currency": currency,
             "country": country,
         })
+        safe_mark_stage(db, str(current_user.id), "payment_page_reached")
+        safe_mark_stage(db, str(current_user.id), "payment_made")
         return {"free": True, "credits_granted": body.tier}
 
     idem_key = str(uuid.uuid4())
@@ -219,6 +230,13 @@ async def create_order(
             logger.error("[PAYMENT] Dodo checkout creation failed: %s", e)
             raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
 
+        # Funnel: link this PaymentOrder to the user's active outreach order.
+        from services.stage_tracking import safe_mark_stage, get_or_create_active_order
+        try:
+            outreach_order = get_or_create_active_order(db, str(current_user.id))
+            outreach_order_id = outreach_order.id
+        except Exception:
+            outreach_order_id = None
         order = PaymentOrder(
             user_id=current_user.id,
             provider="dodo",
@@ -227,6 +245,7 @@ async def create_order(
             currency=currency,
             tier=body.tier,
             coupon_id=coupon_id,
+            outreach_order_id=outreach_order_id,
             geo_country=country,
             status="created",
             idempotency_key=idem_key,
@@ -244,6 +263,9 @@ async def create_order(
             "coupon_applied": coupon_id is not None,
             "country": country,
         })
+
+        # Funnel: stage 5 — user reached the payment page (Dodo checkout opened).
+        safe_mark_stage(db, str(current_user.id), "payment_page_reached")
 
         return {
             "provider": "dodo",
@@ -271,6 +293,13 @@ async def create_order(
         logger.error("[PAYMENT] Razorpay order creation failed: %s", e)
         raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
 
+    # Funnel: link this PaymentOrder to the user's active outreach order.
+    from services.stage_tracking import safe_mark_stage, get_or_create_active_order
+    try:
+        outreach_order = get_or_create_active_order(db, str(current_user.id))
+        outreach_order_id = outreach_order.id
+    except Exception:
+        outreach_order_id = None
     order = PaymentOrder(
         user_id=current_user.id,
         provider="razorpay",
@@ -279,6 +308,7 @@ async def create_order(
         currency=currency,
         tier=body.tier,
         coupon_id=coupon_id,
+        outreach_order_id=outreach_order_id,
         geo_country=country,
         status="created",
         idempotency_key=idem_key,
@@ -296,6 +326,9 @@ async def create_order(
         "coupon_applied": coupon_id is not None,
         "country": country,
     })
+
+    # Funnel: stage 5 — user reached the payment page (Razorpay modal will open).
+    safe_mark_stage(db, str(current_user.id), "payment_page_reached")
 
     return {
         "provider": "razorpay",
@@ -372,6 +405,10 @@ async def verify_payment(
         "country": order.geo_country,
     })
 
+    # Funnel: stage 6 — money received (Razorpay).
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, str(current_user.id), "payment_made")
+
     return {"status": "verified", "credits": order.credits_granted}
 
 
@@ -428,6 +465,9 @@ async def verify_dodo_payment(
             "currency": order.currency,
             "country": order.geo_country,
         })
+        # Funnel: stage 6 — money received (Dodo, verified via API poll).
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, str(order.user_id), "payment_made")
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):
@@ -501,6 +541,10 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
         logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, granted %d credits to user %s",
                     checkout_id, order.tier, order.user_id)
 
+        # Funnel: stage 6 — money received (Dodo webhook).
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, str(order.user_id), "payment_made")
+
     elif event_type == "payment.failed":
         checkout_id = data.get("checkout_id", "")
         if checkout_id:
@@ -553,6 +597,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                     db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
                 db.commit()
                 logger.info("[PAYMENT_WEBHOOK] Payment captured: %s, granted %d credits", rz_order_id, order.tier)
+                # Funnel: stage 6 — money received (Razorpay webhook).
+                from services.stage_tracking import safe_mark_stage
+                safe_mark_stage(db, str(order.user_id), "payment_made")
 
     elif event == "payment.failed":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})

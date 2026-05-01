@@ -60,6 +60,13 @@ async def upload_resume(
             "file_type": (file.filename or "").rsplit(".", 1)[-1].lower(),
         })
 
+        # Funnel: create / advance the user's OutreachOrder to stage 1.
+        # This is the entry point to the funnel — every uploaded resume
+        # produces an order row so we can see drop-off from here on.
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, str(current_user.id), "resume_uploaded",
+                        candidate_id=new_candidate.id)
+
         return {
             "status": "success",
             "candidate_id": new_candidate.id,
@@ -262,6 +269,13 @@ async def candidate_chat_stream(
     sequence = build_question_sequence(state)
     q_index = len(answers)  # index of next question to serve
 
+    # Funnel: first turn of the quiz (no answers yet, plus the __start__
+    # bootstrap message) marks "quiz_started" on the user's order.
+    if q_index == 0 and (request.message == "__start__" or len(raw_user_msgs) == 0):
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, str(current_user.id), "quiz_started",
+                        candidate_id=candidate_id)
+
     # ── Quiz complete ──────────────────────────────────────────────────
     if q_index >= len(sequence):
         # Persist dream companies from quiz answers
@@ -299,6 +313,11 @@ async def candidate_chat_stream(
             "questions_answered": q_index,
             "has_dream_companies": bool(candidate.dream_companies),
         })
+
+        # Funnel: mark stage 3.
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, str(current_user.id), "quiz_completed",
+                        candidate_id=candidate_id)
 
         payload = {
             "type": "complete",

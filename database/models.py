@@ -128,6 +128,8 @@ class Campaign(Base):
     selected_styles = Column(JSONB)  # persist style choices for JIT email generation
     generation_mode = Column(String(20), default="ai")  # 'ai' or 'template'
     paused_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)     # set when status → running
+    completed_at = Column(DateTime, nullable=True)   # set when status → completed
     created_at = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("Candidate", back_populates="campaigns")
@@ -193,6 +195,23 @@ class OutreachOrder(Base):
     # Logs — JSONB array of timestamped action entries
     action_log = Column(JSONB, default=list)
 
+    # Per-stage funnel timestamps. The `status` column drives the state machine;
+    # these timestamps are append-only history of when the user reached each
+    # stage. Used by the admin dashboard to show drop-off across the whole
+    # journey, not just current state.
+    resume_uploaded_at      = Column(DateTime, nullable=True)
+    quiz_started_at         = Column(DateTime, nullable=True)
+    quiz_completed_at       = Column(DateTime, nullable=True)
+    leads_generated_at      = Column(DateTime, nullable=True)
+    payment_page_reached_at = Column(DateTime, nullable=True)
+    payment_made_at         = Column(DateTime, nullable=True)
+    gmail_connected_at      = Column(DateTime, nullable=True)
+    email_style_selected_at = Column(DateTime, nullable=True)
+    campaign_setup_at       = Column(DateTime, nullable=True)
+    campaign_launched_at    = Column(DateTime, nullable=True)
+    campaign_paused_at      = Column(DateTime, nullable=True)
+    campaign_completed_at   = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -231,6 +250,7 @@ class PaymentOrder(Base):
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)
     coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
+    outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="created", nullable=False)
     credits_granted = Column(Integer, default=0, nullable=False)
     idempotency_key = Column(String(255), unique=True)

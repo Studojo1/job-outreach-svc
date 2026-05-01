@@ -22,6 +22,23 @@ from database.session import get_db
 router = APIRouter(prefix="/admin/outreach", tags=["admin"])
 
 
+# 12-stage funnel — keeps order, label, and OutreachOrder column in sync.
+FUNNEL_STAGES = [
+    ("resume_uploaded",       "Resume Uploaded",       "resume_uploaded_at"),
+    ("quiz_started",          "Quiz Started",          "quiz_started_at"),
+    ("quiz_completed",        "Quiz Completed",        "quiz_completed_at"),
+    ("leads_generated",       "Leads Generated",       "leads_generated_at"),
+    ("payment_page_reached",  "Payment Page Reached",  "payment_page_reached_at"),
+    ("payment_made",          "Payment Made",          "payment_made_at"),
+    ("gmail_connected",       "Gmail Connected",       "gmail_connected_at"),
+    ("email_style_selected",  "Email Style Selected",  "email_style_selected_at"),
+    ("campaign_setup",        "Campaign Setup",        "campaign_setup_at"),
+    ("campaign_launched",     "Campaign Launched",     "campaign_launched_at"),
+    ("campaign_paused",       "Campaign Paused",       "campaign_paused_at"),
+    ("campaign_completed",    "Campaign Completed",    "campaign_completed_at"),
+]
+
+
 @router.get("/recent-signups")
 def recent_signups(
     days: int = Query(2, ge=1, le=30),
@@ -200,6 +217,37 @@ async def outreach_overview(
         key=lambda x: x["month"],
     )
 
+    # ── Funnel aggregate: count of distinct users who reached each stage ────
+    # Counted from the new per-stage timestamps on outreach_orders. A user is
+    # considered to have "reached" a stage if any of their orders has the
+    # corresponding timestamp set. We deliberately count *users*, not orders,
+    # so a user with multiple orders only contributes once per stage.
+    funnel = []
+    prev_count: int | None = None
+    for key, label, column in FUNNEL_STAGES:
+        col = getattr(OutreachOrder, column)
+        users_reached = (
+            db.query(func.count(func.distinct(OutreachOrder.user_id)))
+            .filter(col.isnot(None))
+            .scalar()
+        ) or 0
+        drop_off = None
+        drop_off_pct = None
+        if prev_count is not None and prev_count > 0:
+            drop_off = max(prev_count - users_reached, 0)
+            drop_off_pct = round((drop_off / prev_count) * 100, 1)
+        funnel.append({
+            "stage": key,
+            "label": label,
+            "users_reached": users_reached,
+            "drop_off_from_prev": drop_off,
+            "drop_off_pct_from_prev": drop_off_pct,
+        })
+        # Pause/complete stages are terminal off the main flow; don't use them
+        # as the denominator for the next stage's drop-off.
+        if key not in ("campaign_paused", "campaign_completed"):
+            prev_count = users_reached
+
     return {
         "total_orders": total_orders,
         "paid_orders": paid_orders,
@@ -213,6 +261,7 @@ async def outreach_overview(
         "reply_rate_pct": reply_rate_pct,
         "orders_by_status": orders_by_status,
         "monthly_metrics": monthly_metrics,
+        "funnel": funnel,
     }
 
 
@@ -329,11 +378,24 @@ async def outreach_users(
             and active_order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
 
+        # Funnel: collapse stage timestamps across all of a user's orders
+        # into a single per-stage earliest-reached timestamp. This is what
+        # the admin panel uses to render the per-user journey timeline.
+        stage_ts = {}
+        for _key, _label, _column in FUNNEL_STAGES:
+            best = None
+            for o in orders:
+                v = getattr(o, _column, None)
+                if v is not None and (best is None or v < best):
+                    best = v
+            stage_ts[_key] = best.isoformat() if best else None
+
         result.append({
             "user_id": u.id,
             "user_name": u.name,
             "user_email": u.email,
             "total_orders": len(orders),
+            "stage_timestamps": stage_ts,
             # Prefer the running campaign's status/id over whatever the latest
             # order points at — handles legacy users with a paused dupe order
             # whose updated_at is newer than the real running campaign's order.
@@ -541,6 +603,14 @@ async def outreach_user_detail(
             and order.updated_at.replace(tzinfo=timezone.utc) < stuck_cutoff
         )
 
+        # Per-stage timestamps for this specific order (per-user detail view
+        # shows each order's individual journey, so we don't collapse across
+        # multiple orders here).
+        stage_ts = {
+            key: (getattr(order, column).isoformat() if getattr(order, column, None) else None)
+            for key, _label, column in FUNNEL_STAGES
+        }
+
         orders_data.append({
             "id": order.id,
             "status": order.status,
@@ -548,6 +618,7 @@ async def outreach_user_detail(
             "leads_target": order.leads_target,
             "is_stuck": is_stuck,
             "action_log": order.action_log or [],
+            "stage_timestamps": stage_ts,
             "created_at": order.created_at.isoformat() if order.created_at else None,
             "updated_at": order.updated_at.isoformat() if order.updated_at else None,
             "campaign": campaign_data,

@@ -210,8 +210,17 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
 
     if target_status == "running":
         CAMPAIGNS_RUNNING.inc()
+        # First time the campaign actually launches — record started_at
+        # (kept across pause/resume cycles so we always know the original launch).
+        if campaign.started_at is None:
+            campaign.started_at = datetime.utcnow()
+            db.commit()
     elif old_status == "running":
         CAMPAIGNS_RUNNING.dec()
+
+    if target_status == "completed" and campaign.completed_at is None:
+        campaign.completed_at = datetime.utcnow()
+        db.commit()
 
     # Record pause time when pausing
     if old_status == "running" and target_status == "paused":
@@ -249,9 +258,10 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
         logger.info("[CAMPAIGN] Resumed campaign #%d, shifted schedule by %.0f seconds",
                     campaign_id, pause_duration)
 
-    # Sync order status
+    # Sync order status + record funnel stage timestamps (10/11/12).
     try:
         from database.models import OutreachOrder
+        from services.stage_tracking import safe_mark_stage
         order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
         if order:
             order_status_map = {
@@ -267,6 +277,17 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
                 order.action_log = log
                 order.updated_at = datetime.utcnow()
                 db.commit()
+
+            # Funnel stages — recorded on the order regardless of status mapping.
+            stage_map = {
+                "running": "campaign_launched",
+                "paused": "campaign_paused",
+                "completed": "campaign_completed",
+            }
+            funnel_stage = stage_map.get(target_status)
+            if funnel_stage:
+                safe_mark_stage(db, str(order.user_id), funnel_stage,
+                                campaign_id=campaign_id)
     except Exception as e:
         logger.error("[CAMPAIGN] Failed to sync order status: %s", e)
 

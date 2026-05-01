@@ -710,9 +710,22 @@ def _check_campaign_completion(db):
 
         if remaining == 0 and total > 0:
             campaign.status = "completed"
+            if campaign.completed_at is None:
+                campaign.completed_at = datetime.utcnow()
             db.commit()
             logger.info("[SENDER] Campaign %d completed — total=%d sent=%d remaining=%d",
                         campaign.id, total, sent, remaining)
+
+            # Funnel: stage 12 — also mark on the linked OutreachOrder.
+            try:
+                from database.models import OutreachOrder as _OO
+                from services.stage_tracking import safe_mark_stage
+                _order = db.query(_OO).filter_by(campaign_id=campaign.id).first()
+                if _order:
+                    safe_mark_stage(db, str(_order.user_id), "campaign_completed",
+                                    campaign_id=campaign.id)
+            except Exception:
+                logger.exception("[SENDER] Funnel stage marking failed for campaign %d", campaign.id)
         elif remaining > 0:
             logger.debug("[SENDER] Campaign %d still active — remaining=%d (total=%d sent=%d)",
                          campaign.id, remaining, total, sent)

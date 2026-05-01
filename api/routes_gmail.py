@@ -112,6 +112,18 @@ async def gmail_oauth_callback(
             "provider": "gmail",
         })
 
+        # Funnel: stage 7 — link the EmailAccount to the active OutreachOrder.
+        try:
+            from services.stage_tracking import safe_mark_stage
+            from database.models import EmailAccount as _EmailAccount
+            account = db.query(_EmailAccount).filter_by(email_address=email_address, user_id=user_id).first()
+            safe_mark_stage(
+                db, user_id, "gmail_connected",
+                email_account_id=account.id if account else None,
+            )
+        except Exception:
+            logger.exception("[GmailOAuth] Funnel stage marking failed (non-fatal)")
+
         redirect_url = f"{frontend_base}?status=success"
         logger.info(f"[GmailOAuth] SUCCESS — redirecting to {redirect_url}")
         return RedirectResponse(url=redirect_url)

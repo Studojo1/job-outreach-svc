@@ -209,26 +209,36 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
-        # Auto-create an outreach order for tracking
+        # Funnel: prefer the user's *active* OutreachOrder (created at resume
+        # upload) and advance it to campaign_setup. Falls back to creating a
+        # new row only if none exists, so we don't fragment a user's history.
         try:
-            from database.models import OutreachOrder
             from datetime import datetime
-            order = OutreachOrder(
-                user_id=current_user.id,
-                candidate_id=request.candidate_id,
-                campaign_id=result["campaign_id"],
-                email_account_id=request.email_account_id,
-                status="campaign_setup",
-                leads_collected=result.get("queued_messages", 0),
-            )
-            order.action_log = [{"ts": datetime.utcnow().isoformat(), "msg": f"Campaign '{request.name}' created with {result.get('queued_messages', 0)} emails"}]
-            db.add(order)
+            from services.stage_tracking import get_or_create_active_order, safe_mark_stage
+            order = get_or_create_active_order(db, str(current_user.id), candidate_id=request.candidate_id)
+            order.candidate_id = order.candidate_id or request.candidate_id
+            order.campaign_id = result["campaign_id"]
+            order.email_account_id = order.email_account_id or request.email_account_id
+            order.status = "campaign_setup"
+            order.leads_collected = result.get("queued_messages", 0)
+            log = list(order.action_log or [])
+            log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Campaign '{request.name}' created with {result.get('queued_messages', 0)} emails"})
+            order.action_log = log
             db.commit()
             db.refresh(order)
             result["order_id"] = order.id
-            logger.info("[CAMPAIGN] Auto-created order #%d for campaign #%d", order.id, result["campaign_id"])
+            logger.info("[CAMPAIGN] Linked campaign #%d to order #%d", result["campaign_id"], order.id)
+
+            # Funnel: stages 8 & 9 — selecting styles and reaching campaign setup
+            # both happen at this endpoint. Stage 8 only if styles are non-empty.
+            if request.selected_styles:
+                safe_mark_stage(db, str(current_user.id), "email_style_selected",
+                                campaign_id=result["campaign_id"])
+            safe_mark_stage(db, str(current_user.id), "campaign_setup",
+                            campaign_id=result["campaign_id"],
+                            email_account_id=request.email_account_id)
         except Exception as oe:
-            logger.error("[CAMPAIGN] Failed to auto-create order: %s", oe)
+            logger.error("[CAMPAIGN] Failed to link funnel order: %s", oe)
 
         capture("campaign_created", str(current_user.id), {
             "campaign_id": result["campaign_id"],
