@@ -260,6 +260,41 @@ async def resume_order(
     }
 
 
+class FunnelStageRequest(BaseModel):
+    """Request body for the generic funnel-stage ping. The frontend uses this
+    to mark stages that don't have a natural backend trigger (e.g., 'user
+    landed on the pricing page', which is a pure frontend event)."""
+    stage: str
+
+
+# Whitelist of stages the frontend is allowed to ping. Other stages are
+# authoritatively set by the backend (leads_generated, payment_made, etc.)
+# and shouldn't be settable from the client.
+_FRONTEND_SETTABLE_STAGES = {"payment_page_reached"}
+
+
+@router.post("/funnel/mark")
+async def mark_funnel_stage(
+    request: FunnelStageRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a frontend-driven funnel stage on the user's active OutreachOrder.
+
+    Used for stages that fire on a page-mount or button-click rather than a
+    backend operation. Idempotent — safe to call repeatedly. Only stages on
+    the whitelist may be set this way; others are server-authoritative.
+    """
+    if request.stage not in _FRONTEND_SETTABLE_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stage '{request.stage}' is not frontend-settable",
+        )
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, str(current_user.id), request.stage)
+    return {"ok": True, "stage": request.stage}
+
+
 def _serialize_order(order: OutreachOrder) -> dict:
     return {
         "order": {
