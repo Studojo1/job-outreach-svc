@@ -90,6 +90,7 @@ class Lead(Base):
     email_verified = Column(Boolean, default=False)
     enrichment_fail_count = Column(Integer, default=0)
     company_description = Column(Text)  # Apollo organization.short_description for email hook
+    company_domain = Column(Text, index=True)  # join key for company_profiles enrichment cache
     status = Column(String(50), default="new")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -109,9 +110,36 @@ class LeadScore(Base):
     seniority_relevance = Column(Integer, nullable=False)
     location_relevance = Column(Integer, nullable=False)
     explanation = Column(Text)
+    justification_json = Column(JSONB)  # LLM-generated per-lead reasoning for top-K
     created_at = Column(DateTime, default=datetime.utcnow)
 
     lead = relationship("Lead", back_populates="scores")
+
+
+class CompanyProfile(Base):
+    """Globally cached company enrichment data — Apollo /organizations/enrich
+    plus optional homepage scrape. Keyed by domain so the same company doesn't
+    get re-enriched per user."""
+    __tablename__ = "company_profiles"
+    id = Column(Integer, primary_key=True, index=True)
+    domain = Column(Text, unique=True, nullable=False, index=True)
+    name = Column(Text)
+    apollo_org_id = Column(Text, index=True)
+    short_description = Column(Text)
+    industries = Column(JSONB)
+    keywords = Column(JSONB)
+    technologies = Column(JSONB)
+    employee_count = Column(Integer)
+    founded_year = Column(Integer)
+    headquarters_city = Column(Text)
+    website_summary = Column(Text)
+    scrape_meta_title = Column(Text)
+    scrape_meta_description = Column(Text)
+    scrape_hero_text = Column(Text)
+    last_apollo_enriched_at = Column(DateTime)
+    last_scraped_at = Column(DateTime)
+    scrape_failed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Campaign(Base):

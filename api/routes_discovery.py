@@ -13,8 +13,16 @@ from database.models import User, Candidate, Lead, LeadScore
 from services.lead_discovery.lead_collector_service import collect_leads, collect_dream_company_leads
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.candidate_schema import CandidateProfile
+from services.company_intelligence.company_enrichment_service import (
+    bulk_enrich_top_companies,
+    profile_to_llm_dict,
+)
+from services.lead_scoring.llm_justifier import justify_leads
 from api.dependencies import get_current_user
 from core.analytics import capture
+
+# Top-K leads that get LLM-generated per-lead justifications
+JUSTIFY_TOP_K = 100
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +99,8 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             "location": lead.location,
             "company_size": lead.company_size,
             "linkedin_url": lead.linkedin_url,
+            "company_domain": lead.company_domain,
+            "company_description": lead.company_description,
         }
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
@@ -104,23 +114,70 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         dream_companies=candidate.dream_companies or [],
     )
 
-    # Store scores in DB using actual component scores from the scorer
+    # Build LeadScore rows in memory first so we can attach justification_json
+    # to the top-K before commit.
+    score_rows: dict[int, LeadScore] = {}
+    fallback_explanation = f"Scored against {', '.join(preferred_roles[:3])} (seniority={candidate_seniority})"
     count = 0
     for lead_dict in scored:
         lead_id = lead_dict.get("id")
-        if lead_id:
-            ls = LeadScore(
-                lead_id=lead_id,
-                overall_score=lead_dict.get("score", 0),
-                title_relevance=lead_dict.get("_title_score", 0),
-                department_relevance=lead_dict.get("_dept_score", 0),
-                industry_relevance=lead_dict.get("_industry_score", 0),
-                seniority_relevance=lead_dict.get("_seniority_score", 0),
-                location_relevance=lead_dict.get("_location_score", 0),
-                explanation=f"Scored against {', '.join(preferred_roles[:3])} (seniority={candidate_seniority})",
+        if not lead_id:
+            continue
+        ls = LeadScore(
+            lead_id=lead_id,
+            overall_score=lead_dict.get("score", 0),
+            title_relevance=lead_dict.get("_title_score", 0),
+            department_relevance=lead_dict.get("_dept_score", 0),
+            industry_relevance=lead_dict.get("_industry_score", 0),
+            seniority_relevance=lead_dict.get("_seniority_score", 0),
+            location_relevance=lead_dict.get("_location_score", 0),
+            explanation=fallback_explanation,
+        )
+        db.add(ls)
+        score_rows[lead_id] = ls
+        count += 1
+
+    # ── Top-K LLM justification ───────────────────────────────────────────
+    # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
+    top_leads = sorted(
+        [ld for ld in scored if ld.get("id") in score_rows],
+        key=lambda ld: ld.get("score", 0),
+        reverse=True,
+    )[:JUSTIFY_TOP_K]
+
+    if top_leads:
+        try:
+            top_domains = [ld.get("company_domain") for ld in top_leads if ld.get("company_domain")]
+            logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
+                        len(set(top_domains)), len(top_leads))
+
+            profiles = bulk_enrich_top_companies(db, top_domains, enable_scrape=True)
+            company_payloads = {d: profile_to_llm_dict(p) for d, p in profiles.items()}
+
+            candidate_context = {
+                "name": (parsed.get("personal_info") or {}).get("name"),
+                "target_roles": candidate.target_roles or preferred_roles,
+                "niche_keywords": prefs.get("niche_keywords") or [],
+                "tech_stack": prefs.get("tech_stack") or [],
+                "career_stage": prefs.get("career_stage"),
+                "locations": prefs.get("locations") or [],
+                "flex_notes": candidate.flex_notes or {},
+            }
+
+            justifications = justify_leads(
+                leads_with_scores=top_leads,
+                candidate_context=candidate_context,
+                company_profiles=company_payloads,
             )
-            db.add(ls)
-            count += 1
+
+            for lid, payload in justifications.items():
+                row = score_rows.get(lid)
+                if row is not None:
+                    row.justification_json = payload
+            logger.info("[JUSTIFY] attached %d/%d justifications to top-K LeadScores",
+                        len(justifications), len(top_leads))
+        except Exception as e:
+            logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)
 
     db.commit()
     return count

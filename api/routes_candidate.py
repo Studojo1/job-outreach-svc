@@ -521,6 +521,7 @@ async def get_candidate_leads(
                 "seniority_relevance": score.seniority_relevance,
                 "location_relevance": score.location_relevance,
                 "explanation": score.explanation,
+                "justification": score.justification_json,
             } if score else None,
         })
 

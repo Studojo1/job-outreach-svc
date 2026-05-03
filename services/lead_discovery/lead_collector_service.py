@@ -193,6 +193,10 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
 
     company_description = (organization.get("short_description") or "")[:500] or None
 
+    # Capture domain — preferred for company-level enrichment (Apollo /organizations/enrich,
+    # site scrape). Apollo returns it as primary_domain or website_url; normalize.
+    company_domain = _extract_domain(organization)
+
     return {
         "apollo_person_id": apollo_person_id,
         "name": name,
@@ -203,8 +207,23 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
         "industry": industry,
         "company_size": company_size,
         "company_description": company_description,
+        "company_domain": company_domain,
         "email": email,
     }
+
+
+def _extract_domain(organization: dict) -> str | None:
+    """Pull a clean lowercase domain from Apollo organization payload."""
+    raw = organization.get("primary_domain") or organization.get("website_url") or ""
+    if not raw:
+        return None
+    raw = raw.strip().lower()
+    if raw.startswith(("http://", "https://")):
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    return raw or None
 
 
 def _clone_filters(base: LeadFilter, **overrides) -> LeadFilter:
@@ -458,6 +477,7 @@ def _store_people(
             industry=parsed_data.get("industry"),
             company_size=parsed_data.get("company_size"),
             company_description=parsed_data.get("company_description"),
+            company_domain=parsed_data.get("company_domain"),
             email=apollo_email,
             email_verified=bool(apollo_email),
             status="discovered",
