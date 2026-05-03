@@ -173,6 +173,17 @@ async def search_leads(
             logger.info(f"[LeadSearch] Locations: {prefs.get('locations', [])}")
             logger.info(f"[LeadSearch] Industries: {prefs.get('industry_interests', [])}")
 
+            # Compute clarity score from existing signals (no extra question)
+            from services.candidate_intelligence.question_engine import _clarity_score
+            # Reconstruct partial answers dict for clarity scoring
+            _answers_for_clarity = {
+                "career_stage": (prefs.get("company_stage") or "") + " " + (prefs.get("seniority") or ""),
+                "dream_companies": ", ".join(candidate.dream_companies or []),
+            }
+            _resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+            clarity = _clarity_score(_answers_for_clarity, _resume_profile)
+            logger.info(f"[LeadSearch] Computed clarity score: {clarity}")
+
             # Build CandidateProfile from the LLM-generated payload
             profile = CandidateProfile(
                 user_id=str(candidate.user_id),
@@ -186,7 +197,13 @@ async def search_leads(
                     "company_stage": [prefs.get("company_stage", "any")],
                     "company_size": [prefs.get("company_size", "1,10000")],
                     "industries": prefs.get("industry_interests", []),
+                    "niche_keywords": prefs.get("niche_keywords", []),
                 },
+                work_preferences={
+                    "work_mode": prefs.get("work_mode", "flexible"),
+                },
+                tech_stack=prefs.get("tech_stack", []),
+                clarity_score=clarity,
             )
 
             logger.info(f"[LeadSearch] Built CandidateProfile: roles={profile.preferred_roles}, locations={profile.location_preferences}")

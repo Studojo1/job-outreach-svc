@@ -3,6 +3,7 @@
 Includes Apollo-normalized industry names and location formats.
 """
 
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,23 @@ from services.shared.apollo_normalizer import normalize_industries, normalize_lo
 from core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Per Phase A audit (May 2026): organization_industries dropped from default —
+# kept off unless caller explicitly passes industries. Niche keywords
+# (q_organization_keyword_tags) are the preferred vertical filter.
+APPLY_INDUSTRY_FILTER_BY_DEFAULT = False
+
+# Default job-posting recency window. Phase A confirmed 30d ≈ 60d ≈ 90d in
+# volume but 30d gives sharpest signal.
+JOB_POSTED_RECENCY_DAYS = 30
+
+
+def _today_iso() -> str:
+    return datetime.utcnow().date().isoformat()
+
+
+def _days_ago_iso(days: int) -> str:
+    return (datetime.utcnow().date() - timedelta(days=days)).isoformat()
 
 # Used only when generate_titles_by_company_size returns nothing AND the role
 # couldn't be classified. Kept generic-management; function-specific fallbacks
@@ -108,11 +126,69 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
     normalized_locs = normalize_locations(raw_locations)
     logger.info("[LeadSearch] Location filter: raw=%s, normalized=%s", raw_locations, normalized_locs)
 
-    # ── Step 5: Industries (NORMALIZED) ──────────────────────────────────
+    # ── Step 5: Industries — DROPPED as default per Phase A audit ────────
+    # Niche keywords (q_organization_keyword_tags) deliver the same intent
+    # with better quality lift on Indian companies. Kept opt-in if caller
+    # explicitly enables APPLY_INDUSTRY_FILTER_BY_DEFAULT.
     company_prefs = candidate_profile.company_preferences or {}
-    raw_industries = company_prefs.get("industries") or []
-    normalized_industries = normalize_industries(raw_industries)
-    logger.info("[LeadSearch] Industry filter: raw=%s, normalized=%s", raw_industries, normalized_industries)
+    normalized_industries = None
+    if APPLY_INDUSTRY_FILTER_BY_DEFAULT:
+        raw_industries = company_prefs.get("industries") or []
+        normalized_industries = normalize_industries(raw_industries) or None
+        logger.info("[LeadSearch] Industry filter: raw=%s, normalized=%s", raw_industries, normalized_industries)
+    else:
+        logger.info("[LeadSearch] Industry filter: skipped (per Phase A audit — niche keywords used instead)")
+
+    # ── Step 6: New Phase A audit-passed filters ─────────────────────────
+    clarity = candidate_profile.clarity_score or 0
+    work_prefs = candidate_profile.work_preferences or {}
+    work_mode = (work_prefs.get("work_mode") or "").lower()
+
+    # 6a. Currently-hiring-for: feed candidate's preferred roles as posting titles
+    q_org_job_titles = list(roles)[:8] if roles else None
+    if q_org_job_titles:
+        logger.info("[LeadSearch] q_organization_job_titles: %s", q_org_job_titles)
+
+    # 6b. Posting recency — pair with currently-hiring
+    org_job_posted_at_range = None
+    if q_org_job_titles:
+        org_job_posted_at_range = {
+            "min": _days_ago_iso(JOB_POSTED_RECENCY_DAYS),
+            "max": _today_iso(),
+        }
+        logger.info("[LeadSearch] organization_job_posted_at_range: %s", org_job_posted_at_range)
+
+    # 6c. Niche keywords — gated on clarity ≥ 0 (medium + high). OR'd up to 3.
+    niche_keywords = None
+    if clarity >= 0:
+        raw_niches = company_prefs.get("niche_keywords") or []
+        if raw_niches:
+            # Normalize: lowercase, strip whitespace, take first 3
+            niche_keywords = [k.strip().lower() for k in raw_niches if k and k.strip()][:3]
+            if not niche_keywords:
+                niche_keywords = None
+        if niche_keywords:
+            logger.info("[LeadSearch] q_organization_keyword_tags (OR): %s", niche_keywords)
+
+    # 6d. Tech stack — gated on clarity ≥ 3 (high) AND populated
+    tech_stack = None
+    if clarity >= 3 and candidate_profile.tech_stack:
+        tech_stack = [t.strip().lower().replace(" ", "_") for t in candidate_profile.tech_stack if t.strip()][:3]
+        if not tech_stack:
+            tech_stack = None
+        if tech_stack:
+            logger.info("[LeadSearch] currently_using_any_of_technology_uids: %s", tech_stack)
+
+    # 6e. Job-posting location — only for in-office / hybrid candidates
+    org_job_locations = None
+    if work_mode in ("onsite", "hybrid") and normalized_locs:
+        org_job_locations = normalized_locs
+        logger.info("[LeadSearch] organization_job_locations (work_mode=%s): %s", work_mode, org_job_locations)
+
+    # 6f. Past titles — free win, derived from preferred_roles
+    person_past_titles = list(roles)[:5] if roles else None
+    if person_past_titles:
+        logger.info("[LeadSearch] person_past_titles (managers who came up through role): %s", person_past_titles)
 
     # ── Build filter ─────────────────────────────────────────────────────
     filters = LeadFilter(
@@ -122,6 +198,12 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
         organization_locations=normalized_locs,
         organization_industries=normalized_industries,
         email_status=["verified"],  # Always require verified emails
+        q_organization_job_titles=q_org_job_titles,
+        organization_job_posted_at_range=org_job_posted_at_range,
+        q_organization_keyword_tags=niche_keywords,
+        currently_using_any_of_technology_uids=tech_stack,
+        organization_job_locations=org_job_locations,
+        person_past_titles=person_past_titles,
     )
-    logger.info("Production filters generated successfully")
+    logger.info("Production filters generated successfully (clarity=%s)", clarity)
     return filters

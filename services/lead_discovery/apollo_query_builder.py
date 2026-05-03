@@ -60,6 +60,20 @@ def build_apollo_query(filters: LeadFilter, page: int = 1) -> Dict[str, Any]:
     if filters.q_organization_name:
         payload["q_organization_name"] = filters.q_organization_name
 
+    # ── Phase A audit-passed filter passthrough (May 2026) ───────────────
+    if getattr(filters, "q_organization_job_titles", None):
+        payload["q_organization_job_titles"] = filters.q_organization_job_titles
+    if getattr(filters, "organization_job_posted_at_range", None):
+        payload["organization_job_posted_at_range"] = filters.organization_job_posted_at_range
+    if getattr(filters, "q_organization_keyword_tags", None):
+        payload["q_organization_keyword_tags"] = filters.q_organization_keyword_tags
+    if getattr(filters, "currently_using_any_of_technology_uids", None):
+        payload["currently_using_any_of_technology_uids"] = filters.currently_using_any_of_technology_uids
+    if getattr(filters, "organization_job_locations", None):
+        payload["organization_job_locations"] = filters.organization_job_locations
+    if getattr(filters, "person_past_titles", None):
+        payload["person_past_titles"] = filters.person_past_titles
+
     # ── Apollo query guardrails ──────────────────────────────────────────
     # Note: Do NOT trim person_titles here. The search_people_chunked()
     # function in apollo_service.py handles automatic chunking for large

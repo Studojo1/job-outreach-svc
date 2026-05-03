@@ -485,8 +485,6 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     career_stage  = answers.get("career_stage", "")
     job_type      = answers.get("job_type", "")
     company_stage = answers.get("company_stage", "")
-    salary_text   = answers.get("salary", "")
-    timeline_raw  = answers.get("timeline", "")
     career_goal   = answers.get("career_goal", "")
 
     locations = _parse_multi(answers.get("location", ""))
@@ -494,35 +492,31 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     if resume_city and resume_city not in locations and not locations:
         locations = [resume_city]
 
-    # Industries: quiz answer first, then resume_profile target_industries as fallback
-    industry_answers = _parse_multi(answers.get("industry", ""))
-    industry_interests = [
-        i.split(" / ")[0].strip() for i in industry_answers
-        if i and i.lower() not in ("other", "skip")
+    # Industries: now derived only from resume_profile (quiz no longer asks).
+    # Niche keywords from quiz are stored separately as `niche_keywords`.
+    industry_interests = resume_profile.get("target_industries", []) or []
+
+    # New quiz fields (post Phase A audit)
+    niche_keywords = _parse_multi(answers.get("niche_keywords", ""))
+    niche_keywords = [
+        n.split(" / ")[0].strip() for n in niche_keywords
+        if n and n.lower() not in ("none", "no strong preference", "skip")
     ]
-    if not industry_interests:
-        industry_interests = resume_profile.get("target_industries", [])
+    tech_stack = _parse_multi(answers.get("tech_stack", ""))
+    tech_stack = [t.strip() for t in tech_stack if t.strip()]
 
     seniority      = _map_seniority(career_stage)
     # Resume profile seniority is more accurate (based on actual experience)
     if not career_stage and resume_profile.get("seniority"):
         seniority = resume_profile["seniority"]
 
-    work_mode      = _map_work_mode(answers.get("work_style", ""))
+    # work_mode now comes from the new work_mode question (replaces legacy work_style)
+    work_mode      = _map_work_mode(answers.get("work_mode", ""))
     company_size   = _map_company_size(company_stage)
-    salary         = _parse_salary(salary_text)
     risk_tolerance = _map_risk_tolerance(company_stage)
-
-    timeline = timeline_raw
-    tl = timeline_raw.lower()
-    if "immediately" in tl or "1 month" in tl:
-        timeline = "Immediately (within 1 month)"
-    elif "1-3" in tl:
-        timeline = "In 1-3 months"
-    elif "3-6" in tl:
-        timeline = "In 3-6 months"
-    elif "6+" in tl or "exploring" in tl:
-        timeline = "6+ months (exploring)"
+    # Salary + timeline are no longer collected by the quiz; defaults.
+    salary         = {"min_annual_ctc": 0, "max_annual_ctc": 0, "currency": "INR"}
+    timeline       = ""
 
     # ── Career analysis ─────────────────────────────────────────────────────
     primary_cluster   = _build_primary_cluster(answers, resume_profile)
@@ -560,6 +554,8 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
             "company_size": company_size,
             "company_stage": company_stage,
             "industry_interests": industry_interests,
+            "niche_keywords": niche_keywords,
+            "tech_stack": tech_stack,
             "salary_expectations": salary,
             "risk_tolerance": risk_tolerance,
             "timeline": timeline,
@@ -581,6 +577,7 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     logger.info(
         f"[PAYLOAD-BUILDER] Built payload: name={name!r}, cluster={primary_cluster}, "
         f"roles={[r['title'] for r in recommended_roles]}, skills={all_skills[:3]}, "
-        f"locations={locations}, industries={industry_interests}"
+        f"locations={locations}, industries={industry_interests}, "
+        f"niche_keywords={niche_keywords}, tech_stack={tech_stack}, work_mode={work_mode}"
     )
     return payload

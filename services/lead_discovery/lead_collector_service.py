@@ -207,41 +207,104 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _clone_filters(base: LeadFilter, **overrides) -> LeadFilter:
+    """Build a new LeadFilter from `base` with the given fields overridden.
+    Preserves all Phase A audit-passed fields unless explicitly nulled."""
+    data = base.model_dump() if hasattr(base, "model_dump") else base.dict()
+    data.update(overrides)
+    return LeadFilter(**data)
+
+
 def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
     """Build a list of progressively looser filter variants.
 
-    Priority: keep TITLES (the role match) intact for as long as possible;
-    relax location and industry first. Only swap titles for function-specific
-    fallbacks at the very end — never swap them for software titles by default,
-    which is what produced the wrong-leads bug for civil engineers / writers.
+    Priority order (drop the high-precision filters first; preserve the
+    role-and-location intent as long as possible):
+
+      Stage 1: Drop currently-hiring-for + posting recency (narrowest filters)
+      Stage 2: Drop tech_stack
+      Stage 3: Drop niche_keywords
+      Stage 4: Drop industry filter
+      Stage 5: Drop person_past_titles + organization_job_locations
+      Stage 6: Drop org_locations (keep person_locations)
+      Stage 7: Flatten company sizes into one segment
+      Stage 8: Drop person_locations (global search, keep ORIGINAL titles)
+      Stage 9: Function-specific fallback titles, KEEP location
+      Stage 10: Nuclear — function-specific fallback titles, no constraints
+
+    Never swap titles for software fallback by default — that produced the
+    wrong-leads bug for civil engineers / writers. Each function has its
+    own fallback set in _FUNCTION_FALLBACK_TITLES.
     """
     stages = []
 
-    # Stage 1: Remove industry filter (keep titles + location)
+    # Stage 1: Drop currently-hiring-for + posting recency (drop together —
+    # they only make sense paired)
+    if filters.q_organization_job_titles or filters.organization_job_posted_at_range:
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+        ))
+        logger.info("[LOOSENING] Stage %d: Drop currently-hiring + posting recency", len(stages))
+
+    # Stage 2: Drop tech_stack (high-precision, often sparse on Indian companies)
+    if filters.currently_using_any_of_technology_uids:
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+        ))
+        logger.info("[LOOSENING] Stage %d: + drop tech_stack", len(stages))
+
+    # Stage 3: Drop niche_keywords
+    if filters.q_organization_keyword_tags:
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+            q_organization_keyword_tags=None,
+        ))
+        logger.info("[LOOSENING] Stage %d: + drop niche keywords", len(stages))
+
+    # Stage 4: Drop industry filter
     if filters.organization_industries:
-        stages.append(LeadFilter(
-            target_segments=filters.target_segments,
-            person_titles_exclude=filters.person_titles_exclude,
-            person_locations=filters.person_locations,
-            organization_locations=filters.organization_locations,
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+            q_organization_keyword_tags=None,
             organization_industries=None,
-            email_status=filters.email_status,
         ))
-        logger.info("[LOOSENING] Stage %d: Remove industry filter", len(stages))
+        logger.info("[LOOSENING] Stage %d: + drop industry filter", len(stages))
 
-    # Stage 2: Remove organization_locations (keep person_locations)
+    # Stage 5: Drop person_past_titles + organization_job_locations
+    if filters.person_past_titles or filters.organization_job_locations:
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+            q_organization_keyword_tags=None,
+            organization_industries=None,
+            person_past_titles=None,
+            organization_job_locations=None,
+        ))
+        logger.info("[LOOSENING] Stage %d: + drop past_titles + job_locations", len(stages))
+
+    # Stage 6: Drop organization_locations (keep person_locations)
     if filters.organization_locations:
-        stages.append(LeadFilter(
-            target_segments=filters.target_segments,
-            person_titles_exclude=filters.person_titles_exclude,
-            person_locations=filters.person_locations,
-            organization_locations=None,
+        stages.append(_clone_filters(filters,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+            q_organization_keyword_tags=None,
             organization_industries=None,
-            email_status=filters.email_status,
+            person_past_titles=None,
+            organization_job_locations=None,
+            organization_locations=None,
         ))
-        logger.info("[LOOSENING] Stage %d: Remove org locations + industry", len(stages))
+        logger.info("[LOOSENING] Stage %d: + drop org_locations", len(stages))
 
-    # Stage 3: Flatten company sizes into one segment (keep titles + location)
+    # Stage 7: Flatten company sizes into one segment (keep titles + person_location)
     all_titles = []
     seen = set()
     for seg in filters.target_segments:
@@ -250,50 +313,64 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
                 seen.add(t)
                 all_titles.append(t)
 
-    stages.append(LeadFilter(
+    stages.append(_clone_filters(filters,
         target_segments=[TargetSegment(company_size_range="1,10000", person_titles=all_titles)],
-        person_titles_exclude=filters.person_titles_exclude,
-        person_locations=filters.person_locations,
-        organization_locations=None,
+        q_organization_job_titles=None,
+        organization_job_posted_at_range=None,
+        currently_using_any_of_technology_uids=None,
+        q_organization_keyword_tags=None,
         organization_industries=None,
-        email_status=filters.email_status,
+        person_past_titles=None,
+        organization_job_locations=None,
+        organization_locations=None,
     ))
-    logger.info("[LOOSENING] Stage %d: Flatten company sizes (keep titles + location)", len(stages))
+    logger.info("[LOOSENING] Stage %d: + flatten company sizes", len(stages))
 
-    # Stage 4: Drop person_locations (keep ORIGINAL titles — DON'T swap to software fallback yet)
+    # Stage 8: Drop person_locations (keep ORIGINAL titles, global search)
     if filters.person_locations:
-        stages.append(LeadFilter(
+        stages.append(_clone_filters(filters,
             target_segments=[TargetSegment(company_size_range="1,10000", person_titles=all_titles)],
-            person_titles_exclude=filters.person_titles_exclude,
-            person_locations=[],
-            organization_locations=None,
+            q_organization_job_titles=None,
+            organization_job_posted_at_range=None,
+            currently_using_any_of_technology_uids=None,
+            q_organization_keyword_tags=None,
             organization_industries=None,
-            email_status=filters.email_status,
+            person_past_titles=None,
+            organization_job_locations=None,
+            organization_locations=None,
+            person_locations=[],
         ))
-        logger.info("[LOOSENING] Stage %d: Keep titles, drop location (global search)", len(stages))
+        logger.info("[LOOSENING] Stage %d: + drop person_locations (global search)", len(stages))
 
-    # Stage 5: Function-specific fallback titles, KEEP location.
-    # This swaps in broader on-domain titles (e.g. for civil_construction,
-    # uses construction PMs / heads of construction — NOT software titles).
+    # Stage 9: Function-specific fallback titles, KEEP location
     fallback_titles = _fallback_titles_for_filter(filters)
-    stages.append(LeadFilter(
+    stages.append(_clone_filters(filters,
         target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(fallback_titles))],
-        person_titles_exclude=filters.person_titles_exclude,
-        person_locations=filters.person_locations,
-        organization_locations=None,
+        q_organization_job_titles=None,
+        organization_job_posted_at_range=None,
+        currently_using_any_of_technology_uids=None,
+        q_organization_keyword_tags=None,
         organization_industries=None,
+        person_past_titles=None,
+        organization_job_locations=None,
+        organization_locations=None,
         email_status=["verified"],
     ))
     logger.info("[LOOSENING] Stage %d: Function-specific fallback titles + location (titles=%s)",
                 len(stages), fallback_titles[:5])
 
-    # Stage 6: Nuclear — function-specific fallback titles, no constraints at all
-    stages.append(LeadFilter(
+    # Stage 10: Nuclear — function-specific fallback titles, no constraints
+    stages.append(_clone_filters(filters,
         target_segments=[TargetSegment(company_size_range="1,10000", person_titles=list(fallback_titles))],
-        person_titles_exclude=filters.person_titles_exclude,
-        person_locations=[],
-        organization_locations=None,
+        q_organization_job_titles=None,
+        organization_job_posted_at_range=None,
+        currently_using_any_of_technology_uids=None,
+        q_organization_keyword_tags=None,
         organization_industries=None,
+        person_past_titles=None,
+        organization_job_locations=None,
+        organization_locations=None,
+        person_locations=[],
         email_status=["verified"],
     ))
     logger.info("[LOOSENING] Stage %d: Nuclear fallback (function-specific titles, no location)", len(stages))

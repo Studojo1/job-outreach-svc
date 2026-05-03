@@ -30,5 +30,11 @@ class CandidateProfile(BaseModel):
     #   company_stage: list[str]   e.g. ["startup", "growth"]
     #   company_size:  list[str]   e.g. ["1,50", "51,200"]
     #   industries:    list[str]   e.g. ["fintech", "saas"]
+    #   niche_keywords: list[str]  e.g. ["fintech", "saas", "consumer"] — May 2026
 
     work_preferences: Optional[Dict] = None
+    # Expected keys inside work_preferences:
+    #   work_mode: str             e.g. "remote", "hybrid", "onsite", "flexible" — May 2026
+
+    tech_stack: Optional[List[str]] = None  # May 2026 — drives currently_using_any_of_technology_uids
+    clarity_score: Optional[int] = None     # May 2026 — used to gate filter aggressiveness

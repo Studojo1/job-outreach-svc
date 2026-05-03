@@ -208,6 +208,17 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     if not industries and career.get("recommended_roles"):
         industries = list({r.get("industry", "") for r in career["recommended_roles"] if r.get("industry")})
 
+    # Candidate city — used as optional context in the email opener
+    # (so emails to leads in the same city can naturally reference it).
+    candidate_city = ""
+    locs = prefs.get("locations") or []
+    if isinstance(locs, list) and locs:
+        candidate_city = str(locs[0]).strip()
+    if not candidate_city:
+        # fallback to resume_profile geography city if present
+        rp = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+        candidate_city = (rp.get("geography") or {}).get("city", "") or ""
+
     # Use flex_notes if available (post-payment answers — much more specific than resume parse)
     flex = candidate.flex_notes or {}
     if flex.get("best_project"):
@@ -239,6 +250,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         "industries_of_interest": industries[:3],
         "short_candidate_signal": signal,
         "has_flex_notes": bool(flex.get("best_project")),
+        "candidate_city": candidate_city,
     }
 
 
@@ -516,13 +528,16 @@ def _build_generation_prompt(
             "your homework, not just to prove you know what they do."
         )
 
+    candidate_city = candidate_profile.get("candidate_city") or ""
+    city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
+
     prompt = f"""Write a short cold outreach email. Follow EVERY rule below exactly.
 
 SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
 SENDER FIELD: {candidate_profile['primary_field']}
 SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}
+SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{city_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
@@ -539,6 +554,7 @@ HARD RULES:
 - Subject line: lowercase, casual, under 40 chars. Like a text message subject.
 - Use \\n\\n between paragraphs. 2-3 short paragraphs max.
 - SENDER SIGNAL is something the sender BUILT or ACHIEVED — never interpret it as their job title.
+- SENDER CITY is optional context. ONLY weave it in if it feels natural (e.g. lead's company is in same city). Never force it. If unsure, omit it entirely.
 
 ABSOLUTELY FORBIDDEN:
 - Em dashes (-- or \u2014)

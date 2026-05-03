@@ -1,8 +1,8 @@
 """
-Adaptive quiz engine — onboarding (Q1-Q8) + psychometric profiling (5 adaptive Qs).
+Adaptive quiz engine — onboarding + progressive disclosure based on implicit clarity.
 Zero LLM calls during quiz. Resume profile (pre-extracted after upload) powers adaptivity.
 
-Onboarding phase (practical questions):
+Always-on questions:
   Q1  career_stage      MCQ   always
   Q2  job_type          MCQ   skipped for experienced / career-switcher
   Q3  location          MCQ   options adapted to candidate's detected geography
@@ -10,10 +10,11 @@ Onboarding phase (practical questions):
   Q5  career_goal       TEXT  always
   Q6  dream_companies   TEXT  adaptive examples based on Q4 company_stage
   Q7  target_role       MCQ   options from resume_profile.likely_roles if available
-  Q8  work_motivation   MCQ   always
+  Q8  work_mode         MCQ   always (drives organization_job_locations decision)
 
-Psychometric phase (5 adaptive questions selected from pool of 8):
-  Q9-Q13  scenario MCQs   selected by adaptive engine based on signal gaps
+Progressive disclosure (gated on implicit _clarity_score, no extra question):
+  Q9  niche_keywords    MCQ multi   medium + high clarity (drives q_organization_keyword_tags, OR'd up to 3)
+  Q10 tech_stack        MCQ multi   high clarity AND technical cluster only (drives currently_using_any_of_technology_uids)
 
 State passed to get_next_question():
   {
@@ -98,24 +99,81 @@ _Q5_CAREER_GOAL = {
     "text_input": True,
 }
 
-_Q8_WORK_MOTIVATION = {
-    "key": "work_motivation",
+_Q8_WORK_MODE = {
+    "key": "work_mode",
     "ack": "That helps a lot.",
-    "message": "Almost done with the basics - what drives you most at work right now?",
+    "message": "Last basic one — what work setup are you targeting?",
     "mcq": {
-        "question": "What drives you most at work?",
+        "question": "What work setup are you targeting?",
         "options": [
-            {"label": "A", "text": "Learning fast and building new skills"},
-            {"label": "B", "text": "Making a real impact on the product"},
-            {"label": "C", "text": "Strong compensation and career growth"},
-            {"label": "D", "text": "Being part of a high-energy team"},
-            {"label": "E", "text": "Working on something with a clear mission"},
-            {"label": "F", "text": "Autonomy to work independently"},
+            {"label": "A", "text": "Fully remote"},
+            {"label": "B", "text": "Hybrid (mix of office + remote)"},
+            {"label": "C", "text": "Fully in-office"},
+            {"label": "D", "text": "Open to all"},
+        ],
+        "allow_multiple": False,
+    },
+    "text_input": False,
+}
+
+_Q_NICHE_KEYWORDS = {
+    "key": "niche_keywords",
+    "ack": "Great pick.",
+    "message": "Which niches genuinely excite you? Pick up to 3 — we'll surface companies in these spaces.",
+    "mcq": {
+        "question": "Which niches do you want us to prioritize?",
+        "options": [
+            {"label": "A", "text": "Fintech / Payments"},
+            {"label": "B", "text": "SaaS / B2B"},
+            {"label": "C", "text": "Consumer apps / D2C"},
+            {"label": "D", "text": "AI / ML"},
+            {"label": "E", "text": "Edtech"},
+            {"label": "F", "text": "Healthtech / Biotech"},
+            {"label": "G", "text": "Devtools / Developer-first"},
+            {"label": "H", "text": "Logistics / Supply chain"},
+            {"label": "I", "text": "Climate / Sustainability"},
+            {"label": "J", "text": "Gaming / Media"},
+            {"label": "K", "text": "Agritech"},
+            {"label": "L", "text": "No strong preference"},
         ],
         "allow_multiple": True,
     },
     "text_input": False,
 }
+
+# Tech-stack chip pickers per cluster — only fired for high-clarity technical candidates
+_TECH_STACK_BY_CLUSTER: dict[str, list[str]] = {
+    "software_engineering": [
+        "Python", "JavaScript", "TypeScript", "Java", "Go", "React", "Node.js",
+        "AWS", "Docker", "Kubernetes", "PostgreSQL", "MongoDB",
+    ],
+    "data_analytics": [
+        "Python", "SQL", "R", "Tableau", "Power BI", "Snowflake", "BigQuery",
+        "dbt", "Airflow", "Pandas", "Spark", "Looker",
+    ],
+    "data": [  # alias
+        "Python", "SQL", "Tableau", "Power BI", "Snowflake", "BigQuery",
+        "dbt", "Airflow", "Pandas", "Spark", "Looker", "R",
+    ],
+}
+
+
+def _build_tech_stack_question(cluster_key: str) -> dict | None:
+    chips = _TECH_STACK_BY_CLUSTER.get(cluster_key)
+    if not chips:
+        return None
+    options = [{"label": chr(65 + i), "text": t} for i, t in enumerate(chips)]
+    return {
+        "key": "tech_stack",
+        "ack": "Stack noted.",
+        "message": "Pick up to 3 tools or technologies you most want to use day-to-day.",
+        "mcq": {
+            "question": "Top 3 tools/tech you want to use?",
+            "options": options,
+            "allow_multiple": True,
+        },
+        "text_input": False,
+    }
 
 # ---------------------------------------------------------------------------
 # Ack messages keyed by question key — shown before next question
@@ -128,29 +186,75 @@ _ACKS: dict[str, str] = {
     "career_goal": "That helps a lot.",
     "dream_companies": "Great!",
     "target_role": "Noted.",
-    "work_motivation": "Nice. Now a few quick ones to understand how you think.",
-}
-
-# Acks for psychometric questions
-_PSYCH_ACKS: dict[str, str] = {
-    "psych_decision": "Interesting.",
-    "psych_teamwork": "Makes sense.",
-    "psych_frustration": "Fair enough.",
-    "psych_crisis": "Good instinct.",
-    "psych_energy": "Noted.",
-    "psych_learning": "Got it.",
-    "psych_success": "That's clear.",
-    "psych_feedback": None,  # could be last
+    "work_mode": "Got it.",
+    "niche_keywords": "Solid picks.",
+    "tech_stack": "Stack noted.",
 }
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+def _clarity_score(answers: dict, resume_profile: dict) -> int:
+    """Implicit clarity-of-intent score derived from existing signals.
+
+    No quiz question — derived from career_stage + resume strength + dream companies.
+    Used to progressively disclose granular questions (niche keywords, tech stack)
+    only to candidates who have enough clarity to answer them well.
+
+    Returns int. ≥3 = high (show all granular Qs), 0-2 = medium, <0 = low.
+    """
+    score = 0
+    cs = (answers.get("career_stage") or "").lower()
+    if "experienced" in cs or "3+" in cs:
+        score += 2
+    elif "recent graduate" in cs or "0-2" in cs:
+        score += 0
+    elif "student" in cs:
+        score -= 1
+    elif "switching" in cs or "exploring" in cs:
+        score -= 2
+
+    likely = resume_profile.get("likely_roles") or []
+    if len(likely) >= 3:
+        score += 2
+    elif len(likely) == 0:
+        score -= 1
+
+    skills = resume_profile.get("top_skills") or []
+    if len(skills) >= 6:
+        score += 1
+    elif len(skills) <= 2:
+        score -= 1
+
+    raw_dream = (answers.get("dream_companies") or "").strip()
+    if raw_dream and raw_dream.lower() != "skip":
+        n = len([c for c in raw_dream.split(",") if c.strip()])
+        if n >= 5:
+            score += 2
+        elif n == 0:
+            score -= 2
+    return score
+
+
+def _detect_role_cluster(answers: dict, resume_profile: dict) -> str:
+    """Best-guess role cluster used to gate the tech_stack chip question."""
+    domain = (resume_profile.get("domain") or "").lower()
+    if domain in ("software_engineering", "data_analytics", "data"):
+        return domain
+    target = (answers.get("target_role") or "").lower()
+    if any(kw in target for kw in ("engineer", "developer", "backend", "frontend", "full stack", "ml", "devops", "sre")):
+        return "software_engineering"
+    if any(kw in target for kw in ("data ", "analyst", "analytics", "scientist", "bi ")):
+        return "data_analytics"
+    return ""
+
+
 def build_question_sequence(state: dict) -> list[dict]:
     """
     Return the full ordered list of questions for this candidate.
-    Some questions are skipped or have dynamic options based on state.
+    Questions are progressively disclosed based on an implicit clarity score
+    derived from existing signals — no separate "how clear are you" prompt.
     """
     answers = state.get("answers", {})
     resume_profile = state.get("resume_profile") or {}
@@ -160,7 +264,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     stage = answers.get("career_stage", "").lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
 
-    # ── Onboarding phase (Q1-Q8) ────────────────────────────────────────
+    # ── Always-on onboarding ────────────────────────────────────────────
     sequence = [_Q1_CAREER_STAGE]
     if not skip_job_type:
         sequence.append(_Q2_JOB_TYPE)
@@ -169,14 +273,19 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_Q5_CAREER_GOAL)
     sequence.append(_build_dream_companies_question(answers))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
-    sequence.append(_Q8_WORK_MOTIVATION)
+    sequence.append(_Q8_WORK_MODE)
 
-    # ── Psychometric phase (5 adaptive questions) ─────────────────────
-    # Only build once onboarding is far enough that we have signal
-    onboarding_keys = {q["key"] for q in sequence}
-    if onboarding_keys & set(answers.keys()):  # at least 1 onboarding Q answered
-        psych_qs = _build_psychometric_sequence(answers, resume_profile)
-        sequence.extend(psych_qs)
+    # ── Progressive disclosure based on clarity ─────────────────────────
+    clarity = _clarity_score(answers, resume_profile)
+
+    if clarity >= 0:  # medium + high
+        sequence.append(_Q_NICHE_KEYWORDS)
+
+    if clarity >= 3:  # high only
+        cluster = _detect_role_cluster(answers, resume_profile)
+        ts_q = _build_tech_stack_question(cluster)
+        if ts_q is not None:
+            sequence.append(ts_q)
 
     return sequence
 
@@ -215,51 +324,13 @@ def build_message(q_def: dict, prev_q_key: str | None, is_first: bool) -> str:
     """
     if is_first or not prev_q_key:
         return q_def["message"]
-    # Check both onboarding and psychometric acks
-    ack = _ACKS.get(prev_q_key) or _PSYCH_ACKS.get(prev_q_key) or "Got it."
+    ack = _ACKS.get(prev_q_key) or "Got it."
     return f"{ack}|||{q_def['message']}"
 
 
 # ---------------------------------------------------------------------------
 # Adaptive question builders
 # ---------------------------------------------------------------------------
-
-def _build_psychometric_sequence(answers: dict, resume_profile: dict) -> list[dict]:
-    """Build the psychometric question sequence using the adaptive engine.
-
-    Converts psychometric question dicts to the format expected by the
-    quiz engine (key, message, mcq, text_input, ack).
-    """
-    from .psychometric.adaptive_engine import select_psychometric_questions
-
-    selected = select_psychometric_questions(
-        onboarding_answers=answers,
-        resume_data=resume_profile,
-    )
-
-    quiz_questions = []
-    for i, pq in enumerate(selected):
-        is_last = (i == len(selected) - 1)
-        is_text_input = pq.get("text_input", False)
-        entry = {
-            "key": pq["key"],
-            "ack": _PSYCH_ACKS.get(pq["key"]) or "Got it.",
-            "message": ("Last one! " if is_last and not is_text_input else "") + pq["text"],
-            "text_input": is_text_input,
-        }
-        if is_text_input:
-            entry["mcq"] = None
-            if pq.get("placeholder"):
-                entry["input_placeholder"] = pq["placeholder"]
-        else:
-            entry["mcq"] = {
-                "question": pq["text"],
-                "options": [{"label": o["label"], "text": o["text"]} for o in pq["options"]],
-                "allow_multiple": False,
-            }
-        quiz_questions.append(entry)
-
-    return quiz_questions
 
 
 def _build_dream_companies_question(answers: dict) -> dict:

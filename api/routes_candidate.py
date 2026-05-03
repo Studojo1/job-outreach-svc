@@ -287,24 +287,8 @@ async def candidate_chat_stream(
         else:
             candidate.dream_companies = []
 
-        # Persist flex notes (email personalisation signals from psychometric phase)
-        best_project = (answers.get("flex_best_project") or "").strip()
-        outcome = (answers.get("flex_outcome") or "").strip()
-        if best_project:
-            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
-            logger.info(f"[STREAM] Stored flex_notes for candidate {candidate_id}")
-
-        # ── Run psychometric profiling ────────────────────────────────
-        psych_profile = {}
-        try:
-            psych_profile = _build_psychometric_profile(answers, resume_profile)
-            candidate.psychometric_profile = psych_profile
-            logger.info(
-                f"[STREAM] Psychometric profile: strengths={psych_profile.get('result', {}).get('top_strengths')}, "
-                f"confidence={psych_profile.get('confidence', 0)}, traits={psych_profile.get('traits')}"
-            )
-        except Exception as psych_err:
-            logger.error(f"[STREAM] Psychometric profiling failed (non-fatal): {psych_err}", exc_info=True)
+        # Flex notes are captured post-payment via PUT /candidate/{id}/flex
+        # (best_project + outcome). We no longer collect them in this stream.
 
         db.commit()
 
@@ -327,7 +311,7 @@ async def candidate_chat_stream(
             "text_input": False,
             "is_complete": True,
             "questions_asked_so_far": q_index,
-            "psychometric": psych_profile.get("result"),
+            "psychometric": None,
         }
         logger.info(f"[STREAM] Quiz complete for candidate {candidate_id} after {q_index} answers")
 
@@ -367,70 +351,6 @@ async def candidate_chat_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _build_psychometric_profile(answers: dict, resume_data: dict) -> dict:
-    """Run the full psychometric pipeline on quiz answers.
-
-    Extracts onboarding signals, scores psychometric answers,
-    applies resume boost, detects traits, calculates confidence,
-    and generates the final result.
-    """
-    from services.candidate_intelligence.psychometric import (
-        update_scores, normalize_scores, detect_traits,
-        extract_onboarding_signals, calculate_confidence, generate_result,
-    )
-    from services.candidate_intelligence.psychometric.types import new_profile
-    from services.candidate_intelligence.psychometric.questions import get_question_by_id
-    from services.candidate_intelligence.psychometric.scoring_engine import apply_resume_boost
-
-    profile = new_profile(resume_data=resume_data, onboarding_answers=answers)
-
-    # 1. Seed scores from onboarding answers (Q1-Q8)
-    ob_signals = extract_onboarding_signals(answers)
-    for dim, val in ob_signals.items():
-        profile["scores"][dim] += val
-
-    # 2. Score each psychometric answer
-    for key, answer_text in answers.items():
-        if not key.startswith("psych_"):
-            continue
-        q = get_question_by_id(key)
-        if not q:
-            continue
-        # Match selected label from answer text
-        selected_label = None
-        for opt in q["options"]:
-            if opt["text"].lower() == answer_text.lower() or opt["label"].lower() == answer_text.lower():
-                selected_label = opt["label"]
-                break
-        if not selected_label:
-            # Fuzzy: check if answer starts with a label letter
-            first_char = answer_text.strip()[:1].upper()
-            if first_char in ("A", "B", "C", "D"):
-                selected_label = first_char
-        if selected_label:
-            for opt in q["options"]:
-                if opt["label"] == selected_label:
-                    update_scores(profile, key, dict(opt["weights"]))
-                    break
-
-    # 3. Apply resume boost (max 15%)
-    apply_resume_boost(profile)
-
-    # 4. Normalize to 0-100
-    normalize_scores(profile)
-
-    # 5. Detect traits
-    detect_traits(profile)
-
-    # 6. Calculate confidence
-    calculate_confidence(profile)
-
-    # 7. Generate result
-    generate_result(profile)
-
-    return profile
 
 
 def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
