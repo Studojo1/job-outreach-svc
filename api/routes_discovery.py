@@ -173,16 +173,11 @@ async def search_leads(
             logger.info(f"[LeadSearch] Locations: {prefs.get('locations', [])}")
             logger.info(f"[LeadSearch] Industries: {prefs.get('industry_interests', [])}")
 
-            # Compute clarity score from existing signals (no extra question)
-            from services.candidate_intelligence.question_engine import _clarity_score
-            # Reconstruct partial answers dict for clarity scoring
-            _answers_for_clarity = {
-                "career_stage": (prefs.get("company_stage") or "") + " " + (prefs.get("seniority") or ""),
-                "dream_companies": ", ".join(candidate.dream_companies or []),
-            }
-            _resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
-            clarity = _clarity_score(_answers_for_clarity, _resume_profile)
-            logger.info(f"[LeadSearch] Computed clarity score: {clarity}")
+            # Read explicit clarity from the persisted profile (Q2 of the quiz).
+            # Map high/medium/low → int score for the existing CandidateProfile schema.
+            _clarity_str = (prefs.get("clarity") or "medium").lower()
+            clarity = {"high": 3, "medium": 1, "low": -1}.get(_clarity_str, 1)
+            logger.info(f"[LeadSearch] Clarity from quiz: {_clarity_str} (score={clarity})")
 
             # Build CandidateProfile from the LLM-generated payload
             profile = CandidateProfile(

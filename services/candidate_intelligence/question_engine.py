@@ -1,20 +1,25 @@
 """
-Adaptive quiz engine — onboarding + progressive disclosure based on implicit clarity.
+Adaptive quiz engine — onboarding with explicit clarity branching.
 Zero LLM calls during quiz. Resume profile (pre-extracted after upload) powers adaptivity.
 
 Always-on questions:
-  Q1  career_stage      MCQ   always
-  Q2  job_type          MCQ   skipped for experienced / career-switcher
-  Q3  location          MCQ   options adapted to candidate's detected geography
-  Q4  company_stage     MCQ   always
-  Q5  career_goal       TEXT  always
-  Q6  dream_companies   TEXT  adaptive examples based on Q4 company_stage
-  Q7  target_role       MCQ   options from resume_profile.likely_roles if available
-  Q8  work_mode         MCQ   always (drives organization_job_locations decision)
+  Q1  career_stage         MCQ   always
+  Q2  clarity              MCQ   always — user explicitly tells us how clear they are
+  Q3  job_type             MCQ   skipped for experienced / career-switcher
+  Q4  location             MCQ   options adapted to candidate's detected geography
+  Q5  company_stage        MCQ   always
+  Q6  career_goal          TEXT  always
+  Q7  dream_companies      TEXT  adaptive examples based on Q5 company_stage
+  Q8  target_role          MCQ   options from resume_profile.likely_roles if available
+  Q9  work_mode            MCQ   always (drives organization_job_locations decision)
 
-Progressive disclosure (gated on implicit _clarity_score, no extra question):
-  Q9  niche_keywords    MCQ multi   medium + high clarity (drives q_organization_keyword_tags, OR'd up to 3)
-  Q10 tech_stack        MCQ multi   high clarity AND technical cluster only (drives currently_using_any_of_technology_uids)
+Clarity-gated extras (asked based on the user's own clarity answer):
+  Q10 niche_keywords       MCQ multi   asked unless clarity == "still figuring out"
+  Q11 tech_stack           MCQ multi   asked when clarity == "exact" AND cluster is technical
+
+Email-personalization questions (always asked at the end of the quiz, role-adaptive):
+  Q12 flex_best_project    TEXT  always  → persisted to candidate.flex_notes
+  Q13 flex_outcome         TEXT  always  → persisted to candidate.flex_notes
 
 State passed to get_next_question():
   {
@@ -54,9 +59,25 @@ _Q1_CAREER_STAGE = {
     "text_input": False,
 }
 
+_Q_CLARITY = {
+    "key": "clarity",
+    "ack": "Got it!",
+    "message": "Quick one — how clear are you on the kind of role and company you actually want?",
+    "mcq": {
+        "question": "How clear are you on what you want?",
+        "options": [
+            {"label": "A", "text": "I know exactly — give me precise controls"},
+            {"label": "B", "text": "I have a general direction — help me narrow it down"},
+            {"label": "C", "text": "Still figuring it out — keep it simple"},
+        ],
+        "allow_multiple": False,
+    },
+    "text_input": False,
+}
+
 _Q2_JOB_TYPE = {
     "key": "job_type",
-    "ack": "Got it!",
+    "ack": "Got it.",
     "message": "Are you targeting an internship or a full-time role?",
     "mcq": {
         "question": "What type of opportunity are you looking for?",
@@ -180,7 +201,8 @@ def _build_tech_stack_question(cluster_key: str) -> dict | None:
 # ---------------------------------------------------------------------------
 _ACKS: dict[str, str] = {
     "career_stage": "Got it!",
-    "job_type": "Got it!",
+    "clarity": "Cool — tailoring to that.",
+    "job_type": "Got it.",
     "location": "Makes sense.",
     "company_stage": "Good to know.",
     "career_goal": "That helps a lot.",
@@ -189,52 +211,144 @@ _ACKS: dict[str, str] = {
     "work_mode": "Got it.",
     "niche_keywords": "Solid picks.",
     "tech_stack": "Stack noted.",
+    "flex_best_project": "Strong signal.",
+    "flex_outcome": "Got it. That's everything.",
 }
+
+
+# ---------------------------------------------------------------------------
+# Flex (email-personalization) prompts — role-adaptive
+# ---------------------------------------------------------------------------
+
+_FLEX_PROJECT_COPY: dict[str, tuple[str, str]] = {
+    # cluster → (prompt, placeholder)
+    "engineering": (
+        "What's a thing you built that someone actually used? Tell me what it did and roughly how big the impact was.",
+        "e.g. Built a Telegram bot that auto-summarizes my college's placement-cell announcements, used by 800+ students",
+    ),
+    "data": (
+        "What's a data project or analysis you ran that drove a decision? What did you investigate and what changed?",
+        "e.g. Built a churn-prediction model for a fintech client that flagged 12% of accounts for proactive outreach",
+    ),
+    "product": (
+        "What's a product or feature you shipped (or co-shipped)? What was it, who was it for, and what changed?",
+        "e.g. Shipped a referral feature for a commerce app that drove 22% of new signups in month one",
+    ),
+    "design": (
+        "What's a design project you shipped that someone actually used? Who used it and what did it improve?",
+        "e.g. Redesigned the onboarding flow for an edtech app, drop-off after step 1 fell from 50% to 18%",
+    ),
+    "marketing": (
+        "What's a campaign or growth experiment you ran that worked? What did you try and what shifted as a result?",
+        "e.g. Ran an Instagram launch campaign that took a D2C brand from 2k to 8k followers in 6 weeks",
+    ),
+    "sales": (
+        "What's a deal or partnership you closed (or got close to)? Who was the buyer and how did you move it?",
+        "e.g. Closed a 20-seat pilot with a Bengaluru SaaS company after 4 months of cold outbound",
+    ),
+    "finance": (
+        "What's a finance / analysis project you owned? What was the question and what call did you help make?",
+        "e.g. Built the financial model for a Series B raise that closed at $30M",
+    ),
+    "consulting": (
+        "What's a project or engagement you delivered that mattered? Who was the client and what shifted for them?",
+        "e.g. Led a 6-week ops audit for a D2C brand, identified 3 changes that cut fulfilment cost 18%",
+    ),
+    "other": (
+        "What's a project or piece of work you're most proud of? What was it and what came of it?",
+        "e.g. Organized a city-wide hackathon with 200+ participants and 6 sponsor companies",
+    ),
+}
+
+_FLEX_OUTCOME_COPY: dict[str, tuple[str, str]] = {
+    "engineering": (
+        "What's the most concrete number you can share about it? Even rough is fine.",
+        "e.g. ~800 weekly users, runtime cut from 12s to 2s, shipped to prod in one sprint",
+    ),
+    "data": (
+        "What's the most concrete number you can share? Numbers > adjectives.",
+        "e.g. $2M ARR identified at risk, 89% precision, dashboard now used by 3 ops teams",
+    ),
+    "product": (
+        "What's the most concrete number you can share? Anything quantitative — adoption, retention, revenue moved.",
+        "e.g. 22% of new signups via referral, retention +14%, shipped under a 6-week PRD",
+    ),
+    "design": (
+        "What's the most concrete number you can share?",
+        "e.g. Activation up 32%, used daily by 12k people, sprint shipped on time",
+    ),
+    "marketing": (
+        "What's the most concrete number you can share? Numbers > adjectives.",
+        "e.g. CAC dropped 60%, 4x engagement, $15k attributed revenue in month one",
+    ),
+    "sales": (
+        "What's the deal size or pipeline number?",
+        "e.g. ~$8k ARR, became the company's first enterprise reference customer",
+    ),
+    "finance": (
+        "What's the most concrete number — deal size, valuation, cost saved?",
+        "e.g. Raise closed at $30M with 18x revenue multiple, model used in IC pitch",
+    ),
+    "consulting": (
+        "What's the most concrete result — cost saved, time cut, revenue lift?",
+        "e.g. Fulfilment cost down 18%, recommendations adopted within 30 days",
+    ),
+    "other": (
+        "What's the most concrete result you can share? Even one number is fine.",
+        "e.g. 200 participants, 6 sponsors, raised ₹2L; featured on YourStory",
+    ),
+}
+
+
+def _build_flex_project_question(cluster_key: str) -> dict:
+    prompt, placeholder = _FLEX_PROJECT_COPY.get(cluster_key, _FLEX_PROJECT_COPY["other"])
+    return {
+        "key": "flex_best_project",
+        "ack": "Great pick.",
+        "message": prompt,
+        "mcq": None,
+        "text_input": True,
+        "input_placeholder": placeholder,
+    }
+
+
+def _build_flex_outcome_question(cluster_key: str) -> dict:
+    prompt, placeholder = _FLEX_OUTCOME_COPY.get(cluster_key, _FLEX_OUTCOME_COPY["other"])
+    return {
+        "key": "flex_outcome",
+        "ack": "Strong signal.",
+        "message": prompt,
+        "mcq": None,
+        "text_input": True,
+        "input_placeholder": placeholder,
+    }
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def _clarity_score(answers: dict, resume_profile: dict) -> int:
-    """Implicit clarity-of-intent score derived from existing signals.
+def _clarity_level(answers: dict) -> str:
+    """Map the explicit clarity answer (Q2) to one of: high / medium / low.
 
-    No quiz question — derived from career_stage + resume strength + dream companies.
-    Used to progressively disclose granular questions (niche keywords, tech stack)
-    only to candidates who have enough clarity to answer them well.
-
-    Returns int. ≥3 = high (show all granular Qs), 0-2 = medium, <0 = low.
+    Falls back to "medium" if the question hasn't been answered yet
+    (so the niche question still shows up in the planning sequence).
     """
-    score = 0
-    cs = (answers.get("career_stage") or "").lower()
-    if "experienced" in cs or "3+" in cs:
-        score += 2
-    elif "recent graduate" in cs or "0-2" in cs:
-        score += 0
-    elif "student" in cs:
-        score -= 1
-    elif "switching" in cs or "exploring" in cs:
-        score -= 2
+    raw = (answers.get("clarity") or "").lower()
+    if "exactly" in raw or "precise" in raw or raw.startswith("a"):
+        return "high"
+    if "general" in raw or "narrow" in raw or raw.startswith("b"):
+        return "medium"
+    if "figuring" in raw or "simple" in raw or raw.startswith("c"):
+        return "low"
+    return "medium"
 
-    likely = resume_profile.get("likely_roles") or []
-    if len(likely) >= 3:
-        score += 2
-    elif len(likely) == 0:
-        score -= 1
 
-    skills = resume_profile.get("top_skills") or []
-    if len(skills) >= 6:
-        score += 1
-    elif len(skills) <= 2:
-        score -= 1
-
-    raw_dream = (answers.get("dream_companies") or "").strip()
-    if raw_dream and raw_dream.lower() != "skip":
-        n = len([c for c in raw_dream.split(",") if c.strip()])
-        if n >= 5:
-            score += 2
-        elif n == 0:
-            score -= 2
-    return score
+# Backwards-compat shim: routes_discovery still imports this helper to
+# annotate the CandidateProfile. Returns 0 so existing call sites continue
+# to work without spreading clarity-as-int assumptions further.
+def _clarity_score(answers: dict, resume_profile: dict) -> int:  # noqa: ARG001
+    level = _clarity_level(answers)
+    return {"high": 3, "medium": 1, "low": -1}.get(level, 1)
 
 
 def _detect_role_cluster(answers: dict, resume_profile: dict) -> str:
@@ -250,11 +364,55 @@ def _detect_role_cluster(answers: dict, resume_profile: dict) -> str:
     return ""
 
 
+# Map detected cluster → flex copy bucket
+_CLUSTER_TO_FLEX_COPY = {
+    "software_engineering": "engineering",
+    "data_analytics": "data",
+    "data": "data",
+}
+
+
+def _flex_copy_key(answers: dict, resume_profile: dict) -> str:
+    """Pick the flex prompt bucket from cluster + target_role + resume."""
+    cluster = _detect_role_cluster(answers, resume_profile)
+    if cluster in _CLUSTER_TO_FLEX_COPY:
+        return _CLUSTER_TO_FLEX_COPY[cluster]
+    target = (answers.get("target_role") or "").lower()
+    if any(kw in target for kw in ("product manager", "product owner", "apm")):
+        return "product"
+    if any(kw in target for kw in ("designer", "design lead", "ux", "ui")):
+        return "design"
+    if any(kw in target for kw in ("growth", "marketing", "brand", "content", "seo", "gtm")):
+        return "marketing"
+    if any(kw in target for kw in ("sales", "account executive", "business development", "bdr", "sdr")):
+        return "sales"
+    if any(kw in target for kw in ("finance", "investment", "valuation", "fp&a")):
+        return "finance"
+    if any(kw in target for kw in ("consult", "strategy", "advisory")):
+        return "consulting"
+    # Resume domain fallback
+    domain = (resume_profile.get("domain") or "").lower()
+    if domain in ("marketing",):
+        return "marketing"
+    if domain in ("sales", "sales_bd"):
+        return "sales"
+    if domain in ("finance",):
+        return "finance"
+    if domain in ("consulting", "consulting_strategy"):
+        return "consulting"
+    if domain in ("product", "product_management"):
+        return "product"
+    if domain in ("design",):
+        return "design"
+    return "other"
+
+
 def build_question_sequence(state: dict) -> list[dict]:
     """
     Return the full ordered list of questions for this candidate.
-    Questions are progressively disclosed based on an implicit clarity score
-    derived from existing signals — no separate "how clear are you" prompt.
+    Branching is driven by the explicit `clarity` answer (Q2), not an
+    implicit score. Flex (project + outcome) questions are now part of
+    the main quiz — no post-payment intercept.
     """
     answers = state.get("answers", {})
     resume_profile = state.get("resume_profile") or {}
@@ -264,8 +422,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     stage = answers.get("career_stage", "").lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
 
-    # ── Always-on onboarding ────────────────────────────────────────────
-    sequence = [_Q1_CAREER_STAGE]
+    sequence = [_Q1_CAREER_STAGE, _Q_CLARITY]
     if not skip_job_type:
         sequence.append(_Q2_JOB_TYPE)
     sequence.append(_build_location_question(resume_profile, resume_text, parsed_json))
@@ -275,17 +432,23 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q8_WORK_MODE)
 
-    # ── Progressive disclosure based on clarity ─────────────────────────
-    clarity = _clarity_score(answers, resume_profile)
+    clarity = _clarity_level(answers)
 
-    if clarity >= 0:  # medium + high
+    # Niche keywords — asked for medium + high (skipped only on "still figuring out")
+    if clarity in ("medium", "high"):
         sequence.append(_Q_NICHE_KEYWORDS)
 
-    if clarity >= 3:  # high only
+    # Tech stack — asked for high clarity AND technical cluster
+    if clarity == "high":
         cluster = _detect_role_cluster(answers, resume_profile)
         ts_q = _build_tech_stack_question(cluster)
         if ts_q is not None:
             sequence.append(ts_q)
+
+    # Flex (email-fuel) questions — always asked, role-adaptive copy
+    flex_key = _flex_copy_key(answers, resume_profile)
+    sequence.append(_build_flex_project_question(flex_key))
+    sequence.append(_build_flex_outcome_question(flex_key))
 
     return sequence
 

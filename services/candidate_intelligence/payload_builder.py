@@ -505,6 +505,17 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     tech_stack = _parse_multi(answers.get("tech_stack", ""))
     tech_stack = [t.strip() for t in tech_stack if t.strip()]
 
+    # Explicit clarity (Q2) — drives filter aggressiveness downstream
+    raw_clarity = (answers.get("clarity") or "").lower()
+    if "exactly" in raw_clarity or "precise" in raw_clarity:
+        clarity_level = "high"
+    elif "general" in raw_clarity or "narrow" in raw_clarity:
+        clarity_level = "medium"
+    elif "figuring" in raw_clarity or "simple" in raw_clarity:
+        clarity_level = "low"
+    else:
+        clarity_level = "medium"
+
     seniority      = _map_seniority(career_stage)
     # Resume profile seniority is more accurate (based on actual experience)
     if not career_stage and resume_profile.get("seniority"):
@@ -556,6 +567,7 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
             "industry_interests": industry_interests,
             "niche_keywords": niche_keywords,
             "tech_stack": tech_stack,
+            "clarity": clarity_level,
             "salary_expectations": salary,
             "risk_tolerance": risk_tolerance,
             "timeline": timeline,

@@ -287,8 +287,15 @@ async def candidate_chat_stream(
         else:
             candidate.dream_companies = []
 
-        # Flex notes are captured post-payment via PUT /candidate/{id}/flex
-        # (best_project + outcome). We no longer collect them in this stream.
+        # Persist flex notes from quiz answers — these now ride inside the main
+        # quiz instead of post-payment so the email pipeline has signal as soon
+        # as the user converts. PUT /candidate/{id}/flex still works as a
+        # manual override.
+        best_project = (answers.get("flex_best_project") or "").strip()
+        outcome = (answers.get("flex_outcome") or "").strip()
+        if best_project or outcome:
+            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
+            logger.info(f"[STREAM] Stored flex_notes from quiz for candidate {candidate_id}")
 
         db.commit()
 
@@ -296,6 +303,7 @@ async def candidate_chat_stream(
             "candidate_id": candidate_id,
             "questions_answered": q_index,
             "has_dream_companies": bool(candidate.dream_companies),
+            "has_flex_notes": bool(candidate.flex_notes),
         })
 
         # Funnel: mark stage 3.
