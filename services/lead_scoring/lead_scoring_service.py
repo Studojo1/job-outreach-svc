@@ -462,3 +462,110 @@ def score_and_select_leads(
         logger.error("[SCORING] Failed to write scoring trace: %s", e)
 
     return result
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Domain-affinity post-scoring adjustment (round-2 quality upgrade)
+# ═════════════════════════════════════════════════════════════════════════════
+# Runs AFTER company_fact_extractor produces structured facts. Compares the
+# candidate's actual specialization (resume_profile.subdomain + target_industries)
+# against the company's primary_market + core_tech. Hard mismatches get a
+# negative adjustment that pushes them below the score floor (hidden from UI).
+#
+# Mappings: candidate subdomain → set of company primary_market keywords that
+# count as "same domain". Verified against the manual lead-review failure cases.
+_SUBDOMAIN_TO_TARGET_MARKETS = {
+    "machine_learning": {"ai", "ml", "machine learning", "data", "research"},
+    "ml_ai": {"ai", "ml", "machine learning", "data", "research"},
+    "asr": {"ai", "speech", "voice", "conversation", "ml"},
+    "llm": {"ai", "ml", "machine learning", "nlp", "research"},
+    "nlp": {"ai", "ml", "machine learning", "nlp", "conversation"},
+    "data_science": {"ai", "ml", "data", "analytics"},
+    "data_engineering": {"data", "analytics", "platform"},
+    "backend": {"backend", "platform", "infrastructure", "developer", "devtools"},
+    "frontend": {"frontend", "consumer", "product", "design"},
+    "devops": {"devops", "platform", "infrastructure", "developer"},
+    "growth_marketing": {"marketing", "growth", "consumer", "b2c"},
+    "performance_marketing": {"marketing", "growth", "consumer", "b2c"},
+    "brand_marketing": {"marketing", "brand", "consumer"},
+    "product_marketing": {"marketing", "product", "saas"},
+    "product_design": {"design", "product", "consumer"},
+    "ux_research": {"design", "research", "product"},
+    "enterprise_sales": {"enterprise", "saas", "b2b"},
+}
+
+
+def domain_affinity_adjustment(
+    facts: dict | None,
+    subdomain: str | None,
+    target_industries: list[str] | None,
+    core_tech_overlap: list[str] | None = None,
+) -> int:
+    """Return a score adjustment in the range [-25, +15] based on whether the
+    company's `extracted_facts` match the candidate's actual specialization.
+
+    Returns 0 when there's no facts data (don't penalize what we don't know).
+    """
+    if not facts:
+        return 0
+
+    primary_market = (facts.get("primary_market") or "").lower()
+    what_they_build = (facts.get("what_they_build") or "").lower()
+    company_blob = f"{primary_market} {what_they_build}"
+    core_tech = [str(t).lower() for t in (facts.get("core_tech") or [])]
+
+    score = 0
+
+    # Subdomain affinity — does the company operate in the same problem space?
+    if subdomain:
+        target_markets = _SUBDOMAIN_TO_TARGET_MARKETS.get(subdomain.lower(), set())
+        if target_markets:
+            market_hit = any(m in company_blob for m in target_markets)
+            tech_hit = any(m in t for m in target_markets for t in core_tech)
+            if market_hit or tech_hit:
+                score += 10  # bonus: same problem space
+            else:
+                score -= 25  # hard penalty: different problem space
+
+    # Target-industry overlap (free win when present)
+    if target_industries:
+        ti = [str(i).lower() for i in target_industries if i]
+        if ti and any(i in primary_market for i in ti):
+            score += 5
+
+    # Direct core-tech overlap with candidate's actual stack
+    if core_tech_overlap:
+        cto = [str(t).lower() for t in core_tech_overlap]
+        if any(t in core_tech for t in cto):
+            score += 5
+
+    # Clamp to declared range
+    return max(-25, min(15, score))
+
+
+def apply_domain_affinity_to_top_leads(
+    top_leads: list[dict],
+    company_facts_by_domain: dict,
+    subdomain: str | None,
+    target_industries: list[str] | None,
+    candidate_tech_stack: list[str] | None,
+) -> dict[int, int]:
+    """Compute the adjustment for each top lead. Returns {lead_id: delta}.
+
+    Caller is responsible for adding the delta to LeadScore.overall_score and
+    re-saving. We don't mutate here so this stays pure / testable.
+    """
+    out: dict[int, int] = {}
+    for lead in top_leads:
+        lid = lead.get("id")
+        domain = (lead.get("company_domain") or "").lower()
+        facts = company_facts_by_domain.get(domain) if domain else None
+        delta = domain_affinity_adjustment(
+            facts=facts,
+            subdomain=subdomain,
+            target_industries=target_industries,
+            core_tech_overlap=candidate_tech_stack,
+        )
+        if delta and lid is not None:
+            out[lid] = delta
+    return out

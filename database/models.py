@@ -141,6 +141,23 @@ class CompanyProfile(Base):
     scrape_failed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Round-2 quality upgrade — multi-page scrape sections (migration 027).
+    product_page_summary = Column(Text)   # /products | /platform | /solutions
+    blog_summary = Column(Text)           # /blog hero / latest posts
+    careers_summary = Column(Text)        # /careers — job-page text
+
+    # Deeper Apollo enrich fields (migration 027).
+    recent_news_summary = Column(Text)
+    latest_funding_round_date = Column(DateTime)
+    latest_funding_amount = Column(Integer)  # BIGINT in Postgres
+    linkedin_url = Column(Text)
+
+    # Apollo job postings list — {title, snippet, posted_at} per posting.
+    recent_job_postings = Column(JSONB)
+
+    # Structured per-company facts produced by company_fact_extractor LLM.
+    extracted_facts = Column(JSONB)
+
 
 class Campaign(Base):
     __tablename__ = "campaigns"

@@ -45,25 +45,44 @@ ONE specific company. Output is rendered in a compact card — content MUST be t
 
 Output shape: a one-line headline + exactly 3 short bullets.
 
+You are given:
+- Structured facts per company (what_they_build, core_tech, primary_market,
+  recent_momentum, hiring_signal). PRIORITIZE these — they're already distilled.
+- A wider candidate profile including their actual specialization (subdomain),
+  top skills, target industries, target roles, tech stack, and a flex project.
+- The lead's title, name, location, plus raw company description and website
+  summary as fallback.
+
 Rules:
 
-1. CITE REAL FACTS ONLY. Every bullet must reference something concrete from the company data
-   (industry, product, tech stack, headcount, HQ city) OR the lead (title, seniority).
-   Never invent facts not in the provided data.
+1. CITE REAL FACTS ONLY. Every bullet must reference something concrete from the
+   company facts OR the lead. Never invent.
 
-2. ONE CANDIDATE-COMPANY LINK PER BULLET. Each bullet should connect a candidate signal
-   (target role, niche, tech stack, flex project) to a company signal. Examples:
-   - "Builds client-acquisition SaaS — same problem space as your AI-agent project"
-   - "Stack overlap: Python + Kubernetes (your daily tools)"
-   - "Hiring ML engineers actively in Bengaluru (your city)"
+2. PREFER STRUCTURED FACTS. When `what_they_build`, `core_tech`,
+   `recent_momentum`, or `hiring_signal` is provided, use it verbatim or close to it.
+   Examples of GOOD bullets:
+   - "Builds LLM/RAG to summarize sales calls — exact match to your ASR background"
+   - "Stack overlap: PyTorch + transformers (your core tools)"
+   - "Hiring an LLM Engineer right now — your role"
+   - "Just raised Series B — growth-stage hiring push"
 
-3. CONCISE. Each bullet ≤ 80 chars. Headline ≤ 80 chars. No throat-clearing.
+3. ONE CANDIDATE-COMPANY LINK PER BULLET. Connect a candidate signal
+   (subdomain, top_skills, tech_stack, target_industries, flex project) to a
+   company signal (what_they_build, core_tech, recent_momentum, hiring_signal).
+   Bullet 1 = strongest link. Bullet 2 = second strongest. Bullet 3 = the
+   "soft" link (location, headcount, market overlap).
 
-4. NO FLUFF PHRASES. Forbidden: "strong fit", "great match", "good fit", "perfect alignment",
-   "reach out promptly", "ideal candidate", "perfect match", "excellent opportunity",
-   "great opportunity", "amazing", "exciting".
+4. CONCISE. Each bullet ≤ 80 chars. Headline ≤ 80 chars. No throat-clearing.
 
-5. DEGRADE GRACEFULLY. If company data is thin, anchor bullets on title/seniority/location/size.
+5. ABSOLUTELY FORBIDDEN. Never use these surface-level phrases:
+   "strong fit", "great match", "good fit", "perfect alignment", "reach out promptly",
+   "ideal candidate", "perfect match", "excellent opportunity", "great opportunity",
+   "amazing", "exciting", "company focus on AI aligns with your AI expertise"
+   (or any generic "X aligns with your Y" without naming X and Y specifically),
+   "shared Python expertise" (without naming what for).
+
+6. DEGRADE GRACEFULLY. If structured facts are missing AND raw text is thin,
+   anchor on title, seniority, location overlap. Mark signal_strength: "low".
 
 Output one JSON object containing reasoning for ALL leads in this batch, keyed by lead_id (string)."""
 
@@ -98,7 +117,13 @@ def _format_candidate_block(candidate: dict) -> str:
     parts = [
         f"Name: {candidate.get('name') or 'unspecified'}",
         f"Target roles: {', '.join(candidate.get('target_roles') or []) or 'unspecified'}",
-        f"Niche keywords: {', '.join(candidate.get('niche_keywords') or []) or 'none'}",
+        # Round-2: surface the LLM-extracted specialization so the justifier
+        # can write subdomain-specific bullets (e.g. "ASR background", not
+        # generic "ML background").
+        f"Actual specialization (subdomain): {candidate.get('subdomain') or 'unspecified'}",
+        f"Top skills (from resume): {', '.join(candidate.get('top_skills') or []) or 'none'}",
+        f"Target industries: {', '.join(candidate.get('target_industries') or []) or 'none'}",
+        f"Niche keywords (from quiz): {', '.join(candidate.get('niche_keywords') or []) or 'none'}",
         f"Tech stack: {', '.join(candidate.get('tech_stack') or []) or 'none'}",
         f"Career stage: {candidate.get('career_stage') or 'unspecified'}",
         f"Locations: {', '.join(candidate.get('locations') or []) or 'flexible'}",
@@ -119,6 +144,25 @@ def _format_lead_block(lead: dict, company: Optional[dict]) -> str:
         f"  Location: {lead.get('location') or 'unknown'}",
     ]
     if company:
+        # Round-2: prioritize the structured facts blob produced by the
+        # company_fact_extractor LLM. The justifier should anchor bullets on
+        # these high-signal fields first.
+        facts = company.get("facts") or {}
+        if facts:
+            lines.append("  --- Structured facts (USE THESE FIRST) ---")
+            if facts.get("what_they_build"):
+                lines.append(f"  what_they_build: {facts['what_they_build']}")
+            if facts.get("core_tech"):
+                lines.append(f"  core_tech: {', '.join(facts['core_tech'])}")
+            if facts.get("primary_market"):
+                lines.append(f"  primary_market: {facts['primary_market']}")
+            if facts.get("stage_signal"):
+                lines.append(f"  stage: {facts['stage_signal']}")
+            if facts.get("recent_momentum"):
+                lines.append(f"  recent_momentum: {facts['recent_momentum']}")
+            if facts.get("hiring_signal"):
+                lines.append(f"  hiring_signal: {facts['hiring_signal']}")
+            lines.append("  --- Raw fallback (use only if facts are thin) ---")
         if company.get("short_description"):
             lines.append(f"  Company description: {company['short_description']}")
         if company.get("industries"):
@@ -131,6 +175,12 @@ def _format_lead_block(lead: dict, company: Optional[dict]) -> str:
             lines.append(f"  Headcount: {company['employee_count']}")
         if company.get("headquarters_city"):
             lines.append(f"  HQ: {company['headquarters_city']}")
+        if company.get("recent_news_summary"):
+            lines.append(f"  Recent news: {company['recent_news_summary']}")
+        if company.get("recent_job_postings"):
+            posts = ", ".join(p.get("title", "") for p in company["recent_job_postings"][:3] if p.get("title"))
+            if posts:
+                lines.append(f"  Active job postings: {posts}")
         if company.get("website_summary"):
             lines.append(f"  Website summary: {company['website_summary']}")
     elif lead.get("company_description"):

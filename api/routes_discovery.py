@@ -156,6 +156,33 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             profiles = bulk_enrich_top_companies(db, top_domains, enable_scrape=True)
             company_payloads = {d: profile_to_llm_dict(p) for d, p in profiles.items()}
 
+            # ── Domain-affinity adjustment (round-2) ─────────────────────────
+            # Now that fact extraction has run during enrichment, compare each
+            # company's `extracted_facts` to the candidate's resume_profile
+            # subdomain + target_industries. Hard mismatches push leads below
+            # the score floor so they're hidden from /candidate/{id}/leads.
+            from services.lead_scoring.lead_scoring_service import apply_domain_affinity_to_top_leads
+            resume_prof = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+            facts_by_domain = {d: (p.extracted_facts or {}) for d, p in profiles.items()}
+            adjustments = apply_domain_affinity_to_top_leads(
+                top_leads=top_leads,
+                company_facts_by_domain=facts_by_domain,
+                subdomain=resume_prof.get("subdomain"),
+                target_industries=resume_prof.get("target_industries") or [],
+                candidate_tech_stack=prefs.get("tech_stack") or [],
+            )
+            if adjustments:
+                penalized = sum(1 for v in adjustments.values() if v < 0)
+                boosted = sum(1 for v in adjustments.values() if v > 0)
+                logger.info(
+                    "[DOMAIN_AFFINITY] applied to %d/%d leads (penalized=%d, boosted=%d, subdomain=%s)",
+                    len(adjustments), len(top_leads), penalized, boosted, resume_prof.get("subdomain"),
+                )
+                for lid, delta in adjustments.items():
+                    row = score_rows.get(lid)
+                    if row is not None and row.overall_score is not None:
+                        row.overall_score = max(0, min(100, row.overall_score + delta))
+
             candidate_context = {
                 "name": (parsed.get("personal_info") or {}).get("name"),
                 "target_roles": candidate.target_roles or preferred_roles,
@@ -164,6 +191,12 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 "career_stage": prefs.get("career_stage"),
                 "locations": prefs.get("locations") or [],
                 "flex_notes": candidate.flex_notes or {},
+                # Round-2: forward LLM-extracted resume_profile fields so the
+                # justifier knows the candidate is specifically (e.g.) ASR/LLM,
+                # not just generic ML.
+                "subdomain": resume_prof.get("subdomain"),
+                "top_skills": resume_prof.get("top_skills") or [],
+                "target_industries": resume_prof.get("target_industries") or [],
             }
 
             justifications = justify_leads(

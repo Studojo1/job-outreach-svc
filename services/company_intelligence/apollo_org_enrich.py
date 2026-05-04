@@ -73,18 +73,57 @@ def enrich_organization(domain: str) -> Optional[Dict[str, Any]]:
         "employee_count": _coerce_int(org.get("estimated_num_employees") or org.get("employee_count")),
         "founded_year": _coerce_int(org.get("founded_year")),
         "headquarters_city": org.get("city") or org.get("primary_city"),
+        # Round-2 momentum signals — were previously discarded.
+        "recent_news_summary": _extract_news_summary(org),
+        "latest_funding_round_date": _parse_date(org.get("latest_funding_round_date")),
+        "latest_funding_amount": _coerce_int(org.get("latest_funding_round_amount") or org.get("latest_funding_amount")),
+        "linkedin_url": org.get("linkedin_url"),
     }
 
     logger.info(
-        "[APOLLO_ENRICH] OK domain=%s name=%s industries=%d keywords=%d tech=%d employees=%s",
+        "[APOLLO_ENRICH] OK domain=%s name=%s industries=%d keywords=%d tech=%d employees=%s funding=%s news=%s",
         domain,
         parsed["name"],
         len(parsed["industries"] or []),
         len(parsed["keywords"] or []),
         len(parsed["technologies"] or []),
         parsed["employee_count"],
+        parsed["latest_funding_round_date"],
+        bool(parsed["recent_news_summary"]),
     )
     return parsed
+
+
+def _parse_date(value: Any) -> Optional[str]:
+    """Return ISO yyyy-mm-dd string if Apollo gave us a parseable date.
+    Apollo returns dates as ISO strings already; we just normalize."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value[:10]  # 'yyyy-mm-dd' or 'yyyy-mm-ddThh...'
+    return None
+
+
+def _extract_news_summary(org: Dict[str, Any]) -> Optional[str]:
+    """Apollo exposes recent news in a few possible fields depending on plan.
+    Try `recent_news_summary` first, then fall back to concatenating titles
+    from a `current_news` array if present. Cap to 800 chars."""
+    direct = org.get("recent_news_summary")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()[:800]
+    news = org.get("current_news") or org.get("news") or []
+    if isinstance(news, list) and news:
+        titles = []
+        for item in news[:5]:
+            if isinstance(item, dict):
+                t = item.get("title") or item.get("headline")
+                if t:
+                    titles.append(str(t).strip())
+            elif item:
+                titles.append(str(item).strip())
+        joined = " | ".join(titles)
+        return joined[:800] if joined else None
+    return None
 
 
 def _coerce_list(value: Any) -> Optional[list]:
