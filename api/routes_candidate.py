@@ -498,9 +498,16 @@ async def get_candidate_leads(
     leads = db.query(Lead).filter_by(candidate_id=candidate_id).all()
     logger.info(f"[LeadSearch] Leads retrieved from DB: {len(leads)}")
 
+    # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads))
+    lead_ids = [l.id for l in leads]
+    scores_by_lead: dict[int, LeadScore] = {}
+    if lead_ids:
+        for s in db.query(LeadScore).filter(LeadScore.lead_id.in_(lead_ids)).all():
+            scores_by_lead[s.lead_id] = s
+
     results = []
     for lead in leads:
-        score = db.query(LeadScore).filter_by(lead_id=lead.id).first()
+        score = scores_by_lead.get(lead.id)
         results.append({
             "id": lead.id,
             "name": lead.name,

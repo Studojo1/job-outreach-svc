@@ -580,8 +580,13 @@ def _detect_primary_domains(text: str) -> list[str]:
     """
     Frequency-weighted domain detection from resume text.
     Counts how many times each domain's keywords appear — returns top domains.
-    Much more reliable than presence-only matching for noisy resume text.
+
+    Uses WORD-BOUNDARY regex matching. Naive substring matching previously
+    caused 'evaluation' to match 'valuation' (finance), 'pipeline' to match
+    sales pipeline, etc. — misclassifying ML engineers as finance/sales.
     """
+    import re
+
     # Each domain maps to (keywords, weight) — multi-word phrases score higher
     DOMAIN_KEYWORDS: dict[str, list[tuple[str, int]]] = {
         "marketing": [
@@ -598,9 +603,9 @@ def _detect_primary_domains(text: str) -> list[str]:
         ],
         "sales_bd": [
             ("business development", 3), ("revenue growth", 3), ("enterprise sales", 3),
-            ("account executive", 3), ("deal", 2), ("sales strategy", 2),
-            ("pipeline", 2), ("closing", 2), ("client acquisition", 2),
-            ("sales", 1), ("revenue", 1), ("accounts", 1),
+            ("account executive", 3), ("sales strategy", 2),
+            ("sales pipeline", 3), ("deal closing", 3), ("client acquisition", 2),
+            ("sales", 1), ("quota", 2),
         ],
         "operations": [
             ("operations manager", 3), ("supply chain", 3), ("process improvement", 3),
@@ -611,7 +616,9 @@ def _detect_primary_domains(text: str) -> list[str]:
             ("investment banking", 4), ("private equity", 4), ("venture capital", 4),
             ("financial modelling", 4), ("financial modeling", 4), ("equity research", 3),
             ("mergers and acquisitions", 3), ("m&a", 3), ("cfa", 3), ("accounting", 2),
-            ("valuation", 2), ("financial analysis", 2), ("finance", 1), ("investment", 1),
+            # NOTE: dropped bare "valuation" — common in ML "model evaluation" contexts
+            ("dcf valuation", 4), ("company valuation", 3), ("financial valuation", 3),
+            ("financial analysis", 2), ("finance", 1), ("investments", 1),
         ],
         "product_management": [
             ("product manager", 4), ("product management", 4), ("product roadmap", 4),
@@ -623,32 +630,53 @@ def _detect_primary_domains(text: str) -> list[str]:
             ("software engineer", 4), ("full stack", 4), ("backend developer", 4),
             ("frontend developer", 4), ("software development", 3), ("devops", 3),
             ("python developer", 3), ("javascript", 2), ("react", 2), ("api development", 2),
+            ("microservices", 3), ("system design", 3), ("kubernetes", 2),
             ("coding", 2), ("programming", 2), ("git", 1), ("developer", 1),
         ],
+        # NEW: ML/AI engineering domain — needed because the old data_analytics
+        # bucket pulled BI/Reporting roles (Data Analyst, BI Analyst) for ML engineers.
+        "ml_engineering": [
+            ("machine learning engineer", 5), ("ml engineer", 5), ("ai engineer", 5),
+            ("nlp engineer", 5), ("computer vision engineer", 5), ("research scientist", 4),
+            ("deep learning", 4), ("large language model", 4), ("llm", 3), ("nlp", 3),
+            ("asr", 4), ("speech recognition", 4), ("conversational ai", 4),
+            ("transformer", 3), ("pytorch", 3), ("tensorflow", 3), ("hugging face", 3),
+            ("generative ai", 4), ("gen ai", 4), ("ai agent", 4),
+            ("model training", 3), ("fine-tuning", 3), ("rag", 3), ("retrieval augmented", 4),
+            ("ml model", 3), ("ai model", 3), ("inference latency", 3),
+            ("machine learning", 2), ("artificial intelligence", 2),
+        ],
         "data_analytics": [
-            ("data scientist", 4), ("data analyst", 4), ("machine learning engineer", 4),
+            ("data analyst", 5), ("bi analyst", 5), ("business intelligence", 4),
             ("data science", 3), ("sql queries", 3), ("tableau", 3), ("power bi", 3),
-            ("python for data", 3), ("statistical analysis", 3), ("analytics", 2),
-            ("data analysis", 2), ("data-driven", 2), ("dashboard", 2), ("sql", 1),
+            ("statistical analysis", 3), ("analytics", 2),
+            ("data analysis", 2), ("data-driven", 2), ("dashboard", 2),
+            ("etl pipeline", 3), ("data warehouse", 3),
         ],
         "design": [
             ("ux designer", 4), ("product designer", 4), ("ui/ux", 4),
             ("user experience design", 4), ("figma", 3), ("wireframe", 3),
             ("interaction design", 3), ("ux research", 2), ("prototyping", 2),
-            ("user interface", 2), ("ux", 1), ("ui", 1),
+            ("user interface", 2),
         ],
         "hr_people": [
             ("talent acquisition", 4), ("human resources", 3), ("people operations", 3),
             ("technical recruiter", 3), ("hr manager", 3), ("employee engagement", 2),
-            ("performance management", 2), ("recruiting", 2), ("hr", 1),
+            ("performance management", 2), ("recruiting", 2),
         ],
     }
 
     lower = text[:3000].lower()
     scores: dict[str, int] = {}
     for domain, keyword_weights in DOMAIN_KEYWORDS.items():
-        total = sum(count * weight for kw, weight in keyword_weights
-                    if (count := lower.count(kw)) > 0)
+        total = 0
+        for kw, weight in keyword_weights:
+            # Word-boundary regex: 'valuation' won't match 'evaluation'.
+            # re.escape handles &, /, etc. in keywords like 'm&a' or 'ui/ux'.
+            pattern = r"\b" + re.escape(kw) + r"\b"
+            count = len(re.findall(pattern, lower))
+            if count > 0:
+                total += count * weight
         if total > 0:
             scores[domain] = total
 
@@ -676,6 +704,7 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     # domain key → (ontology cluster, preferred spec keywords)
     DOMAIN_TO_CLUSTER: dict[str, tuple[str, list[str]]] = {
         "software_engineering": ("Technology & Engineering", ["software", "development"]),
+        "ml_engineering": ("Data & Analytics", ["data science", "ml"]),
         "data": ("Data & Analytics", ["data science", "analysis"]),
         "data_analytics": ("Data & Analytics", ["data analysis", "bi"]),
         "marketing": ("Marketing & Growth", ["growth", "digital", "content"]),

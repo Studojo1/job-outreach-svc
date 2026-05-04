@@ -207,6 +207,38 @@ async def search_leads(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    # ── Idempotency guard ──────────────────────────────────────────────
+    # If this candidate already has a substantial scored lead set from the
+    # last 5 minutes, treat the call as a duplicate (e.g. browser retry,
+    # double-click) and short-circuit. Stops wasted Apollo + LLM credits
+    # when the frontend retries before the previous run finishes.
+    from datetime import datetime, timedelta
+    recent_lead_count = (
+        db.query(Lead)
+        .filter(Lead.candidate_id == candidate.id)
+        .filter(Lead.created_at >= datetime.utcnow() - timedelta(minutes=5))
+        .count()
+    )
+    if recent_lead_count >= 100:
+        total_count = db.query(Lead).filter(Lead.candidate_id == candidate.id).count()
+        scored_count = (
+            db.query(LeadScore)
+            .join(Lead, LeadScore.lead_id == Lead.id)
+            .filter(Lead.candidate_id == candidate.id)
+            .count()
+        )
+        logger.info(
+            "[DISCOVERY] idempotency hit — candidate %s has %d leads in last 5min, "
+            "returning early without re-running pipeline",
+            candidate.id, recent_lead_count,
+        )
+        return {
+            "status": "success",
+            "leads_collected": total_count,
+            "leads_scored": scored_count,
+            "idempotent": True,
+        }
+
     try:
         if request.filters:
             filters = request.filters
