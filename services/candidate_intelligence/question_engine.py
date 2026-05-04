@@ -782,13 +782,13 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
             "Management Consultant (Analyst)",
         ]
 
-    # Deduplicate, cap at 5, add "Something else"
+    # Deduplicate, cap at 6, add "Something else"
     seen, final_roles = set(), []
     for r in ontology_roles:
         if r not in seen:
             seen.add(r)
             final_roles.append(r)
-        if len(final_roles) == 5:
+        if len(final_roles) == 6:
             break
 
     options = [{"label": chr(65 + i), "text": r} for i, r in enumerate(final_roles)]

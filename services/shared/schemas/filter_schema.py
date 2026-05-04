@@ -34,3 +34,10 @@ class LeadFilter(BaseModel):
     currently_using_any_of_technology_uids: Optional[List[str]] = None
     organization_job_locations: Optional[List[str]] = None
     person_past_titles: Optional[List[str]] = None
+
+    # ── May 4 2026: enforce IC vs hiring-manager filter at Apollo ─────────
+    # Previously never sent; Apollo would happily return Operations Managers,
+    # Junior Data Scientists, etc. when they loosely matched our title list.
+    # Apollo seniority codes: owner, founder, c_suite, partner, vp, head,
+    # director, manager, senior, entry, intern.
+    person_seniorities: Optional[List[str]] = None

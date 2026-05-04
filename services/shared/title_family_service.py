@@ -267,19 +267,178 @@ _TITLE_FAMILIES: Dict[str, Dict[str, str]] = {
 }
 
 
-def get_title_family(function: str) -> Dict[str, str]:
+# ---------------------------------------------------------------------------
+# Specializations — additive layer that injects modern/specific manager titles
+# on top of the generic function family. Keyed by subdomain string.
+# Inferred from candidate's role text via role_classifier_service.subdomain_for_role.
+# Without specializations, an ML engineer gets generic "Data Analyst" titles —
+# this is what drives the bad-quality leads (Operations Manager, Junior DS, etc.).
+# ---------------------------------------------------------------------------
+_SPECIALIZATIONS: Dict[str, Dict[str, str]] = {
+    "ml_ai": {
+        "Machine Learning Engineer": "junior",
+        "Senior Machine Learning Engineer": "senior",
+        "Staff Machine Learning Engineer": "senior",
+        "Principal Machine Learning Engineer": "principal",
+        "ML Engineering Manager": "manager",
+        "AI Engineering Manager": "manager",
+        "Applied AI Manager": "manager",
+        "Head of Machine Learning": "head",
+        "Head of AI": "head",
+        "Head of Applied AI": "head",
+        "Head of Applied Research": "head",
+        "Director of Machine Learning": "director",
+        "Director of AI": "director",
+        "Director of Applied AI": "director",
+        "VP of AI": "vp",
+        "VP of Machine Learning": "vp",
+        "VP of AI Engineering": "vp",
+        "Chief AI Officer": "vp",
+        "Applied Scientist": "junior",
+        "Senior Applied Scientist": "senior",
+        "Research Scientist": "junior",
+        "Senior Research Scientist": "senior",
+    },
+    "data_engineering": {
+        "Data Engineer": "junior",
+        "Senior Data Engineer": "senior",
+        "Staff Data Engineer": "senior",
+        "Data Engineering Manager": "manager",
+        "Head of Data Engineering": "head",
+        "Director of Data Engineering": "director",
+        "VP of Data Engineering": "vp",
+    },
+    "backend": {
+        "Backend Engineer": "junior",
+        "Senior Backend Engineer": "senior",
+        "Staff Backend Engineer": "senior",
+        "Backend Engineering Manager": "manager",
+        "Head of Backend": "head",
+        "Director of Backend": "director",
+    },
+    "frontend": {
+        "Frontend Engineer": "junior",
+        "Senior Frontend Engineer": "senior",
+        "Frontend Engineering Manager": "manager",
+        "Head of Frontend": "head",
+        "Director of Frontend": "director",
+    },
+    "mobile": {
+        "Mobile Engineer": "junior",
+        "iOS Engineer": "junior",
+        "Android Engineer": "junior",
+        "Senior Mobile Engineer": "senior",
+        "Mobile Engineering Manager": "manager",
+        "Head of Mobile": "head",
+    },
+    "growth_marketing": {
+        "Growth Marketing Manager": "manager",
+        "Senior Growth Manager": "senior",
+        "Head of Growth": "head",
+        "VP of Growth": "vp",
+        "Director of Growth": "director",
+        "Growth Lead": "lead",
+    },
+    "brand_marketing": {
+        "Brand Manager": "manager",
+        "Senior Brand Manager": "senior",
+        "Brand Director": "director",
+        "Head of Brand": "head",
+        "VP of Brand": "vp",
+    },
+    "performance_marketing": {
+        "Performance Marketing Manager": "manager",
+        "Head of Performance Marketing": "head",
+        "Director of Performance Marketing": "director",
+        "Paid Media Manager": "manager",
+    },
+    "product_marketing": {
+        "Product Marketing Manager": "manager",
+        "Senior Product Marketing Manager": "senior",
+        "Head of Product Marketing": "head",
+        "Director of Product Marketing": "director",
+        "VP of Product Marketing": "vp",
+    },
+    "content_marketing": {
+        "Content Marketing Manager": "manager",
+        "Head of Content": "head",
+        "Director of Content": "director",
+    },
+    "product_design": {
+        "Product Designer": "junior",
+        "Senior Product Designer": "senior",
+        "Lead Product Designer": "lead",
+        "Product Design Manager": "manager",
+        "Head of Product Design": "head",
+        "Director of Product Design": "director",
+        "VP of Design": "vp",
+    },
+    "ux_research": {
+        "UX Researcher": "junior",
+        "Senior UX Researcher": "senior",
+        "UX Research Manager": "manager",
+        "Head of UX Research": "head",
+        "Director of Research": "director",
+    },
+    "enterprise_sales": {
+        "Enterprise Account Executive": "junior",
+        "Senior Enterprise Account Executive": "senior",
+        "Enterprise Sales Manager": "manager",
+        "Head of Enterprise Sales": "head",
+        "VP of Enterprise Sales": "vp",
+    },
+    "smb_sales": {
+        "SMB Account Executive": "junior",
+        "Senior SMB Account Executive": "senior",
+        "SMB Sales Manager": "manager",
+        "Head of SMB Sales": "head",
+    },
+    "appsec": {
+        "Application Security Engineer": "junior",
+        "Senior Application Security Engineer": "senior",
+        "Head of Application Security": "head",
+        "Director of Application Security": "director",
+    },
+    "biz_ops": {
+        "Business Operations Manager": "manager",
+        "Senior Business Operations Manager": "senior",
+        "Head of Business Operations": "head",
+        "Director of Business Operations": "director",
+        "VP of Business Operations": "vp",
+        "BizOps Lead": "lead",
+    },
+}
+
+
+def get_title_family(function: str, subdomain: str | None = None) -> Dict[str, str]:
     """Return the title → seniority mapping for a function category.
+
+    When ``subdomain`` is provided AND matches a known specialization key
+    (see ``_SPECIALIZATIONS``), specialized hiring-manager titles are merged
+    on top of the generic function family. This makes the generated Apollo
+    title list specific to (e.g.) ML/AI rather than generic "data".
 
     Args:
         function: Function category name.
+        subdomain: Optional specialization key (e.g. "ml_ai", "growth_marketing",
+            "product_design"). Inferred from the candidate's target role via
+            ``role_classifier_service.subdomain_for_role``.
 
     Returns:
         Dict mapping title strings to their seniority keyword.
         Falls back to ``"business"`` if the function is unknown.
     """
-    family = _TITLE_FAMILIES.get(function, _TITLE_FAMILIES["business"])
-    logger.info("Title family for '%s': %d titles available", function, len(family))
-    return family
+    base = dict(_TITLE_FAMILIES.get(function, _TITLE_FAMILIES["business"]))
+    spec = _SPECIALIZATIONS.get((subdomain or "").lower()) if subdomain else None
+    if spec:
+        base.update(spec)  # specialized titles take precedence
+        logger.info(
+            "Title family for '%s' + spec '%s': %d total titles (%d specialized)",
+            function, subdomain, len(base), len(spec),
+        )
+    else:
+        logger.info("Title family for '%s' (no spec): %d titles", function, len(base))
+    return base
 
 
 def filter_titles_by_seniority(

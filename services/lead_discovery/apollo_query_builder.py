@@ -73,6 +73,9 @@ def build_apollo_query(filters: LeadFilter, page: int = 1) -> Dict[str, Any]:
         payload["organization_job_locations"] = filters.organization_job_locations
     if getattr(filters, "person_past_titles", None):
         payload["person_past_titles"] = filters.person_past_titles
+    if getattr(filters, "person_seniorities", None):
+        payload["person_seniorities"] = filters.person_seniorities
+        logger.info("[LeadSearch] person_seniorities filter: %s", filters.person_seniorities)
 
     # ── Apollo query guardrails ──────────────────────────────────────────
     # Note: Do NOT trim person_titles here. The search_people_chunked()

@@ -42,15 +42,60 @@ FALLBACK_TITLES = [
     "Chief of Staff", "General Manager", "Business Operations Manager",
 ]
 
-# Default exclusion titles — roles we should never target
+# Default exclusion titles — roles we should never target as hiring managers.
+# Apollo's `person_not_titles` does substring matching, so these block any
+# title containing these words. Expanded May 4 2026 after manual lead review
+# showed Operations Managers, Sales Managers, Customer Success Managers,
+# and Junior ICs were leaking through and crowding out actual hiring managers.
 DEFAULT_EXCLUSION_TITLES = [
+    # Recruitment / HR (was already there)
     "Recruiter",
-    "HR Manager",
     "Talent Acquisition",
     "People Operations",
+    # Sub-grad ranks — never hiring managers
     "Intern",
     "Student",
+    "Apprentice",
+    "Trainee",
+    # Cross-functional managers that flood the data/eng title list with noise
+    "Operations Manager",
+    "Sales Manager",
+    "Account Manager",
+    "Customer Success Manager",
+    "Customer Success",
+    "Account Executive",
+    "Business Analyst",
+    "Strategy Manager",
+    "Project Manager",
+    "Project Coordinator",
+    "Office Manager",
+    "Administrative Assistant",
+    "Executive Assistant",
+    "Inside Sales",
+    "Field Sales",
+    # HR Manager — kept as a keyword block (HR Business Partner etc. still excluded
+    # via the People Operations entry)
+    "HR Manager",
 ]
+
+
+def _seniorities_for_experience_level(exp_level: str) -> List[str]:
+    """Map our internal experience level to Apollo's `person_seniorities` codes.
+
+    Apollo seniority codes (per their /api/v1/mixed_people/api_search docs):
+      owner, founder, c_suite, partner, vp, head, director, manager, senior, entry, intern.
+
+    We never want intern/entry as hiring managers. Beyond that, we widen the
+    floor as the candidate gets more senior — a senior IC will reach out to
+    VPs/founders, an entry-level student should reach out to managers/directors
+    (peers and one-up).
+    """
+    if exp_level == "senior":
+        return ["owner", "founder", "c_suite", "partner", "vp", "head", "director", "manager"]
+    if exp_level == "mid":
+        return ["vp", "head", "director", "manager"]
+    # entry / student / graduate
+    return ["head", "director", "manager"]
 
 
 def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) -> LeadFilter:
@@ -190,6 +235,11 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
     if person_past_titles:
         logger.info("[LeadSearch] person_past_titles (managers who came up through role): %s", person_past_titles)
 
+    # 6g. Apollo seniority filter — never sent before; observed Operations Managers
+    # and Junior Data Scientists slipping through because of this gap.
+    person_seniorities = _seniorities_for_experience_level(exp_level)
+    logger.info("[LeadSearch] person_seniorities: %s (exp_level=%s)", person_seniorities, exp_level)
+
     # ── Build filter ─────────────────────────────────────────────────────
     filters = LeadFilter(
         target_segments=all_segments,
@@ -204,6 +254,7 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
         currently_using_any_of_technology_uids=tech_stack,
         organization_job_locations=org_job_locations,
         person_past_titles=person_past_titles,
+        person_seniorities=person_seniorities,
     )
     logger.info("Production filters generated successfully (clarity=%s)", clarity)
     return filters

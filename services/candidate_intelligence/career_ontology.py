@@ -66,8 +66,10 @@ CAREER_ONTOLOGY = {
             "Business Intelligence Developer"
         ],
         "Data Science & ML": [
-            "Data Scientist", "ML Engineer", "AI Engineer", "Research Scientist",
-            "NLP Engineer", "Computer Vision Engineer"
+            "Data Scientist", "Machine Learning Engineer", "AI Engineer",
+            "Applied AI Engineer", "LLM Engineer", "GenAI Engineer",
+            "Speech / ASR Engineer", "NLP Engineer", "Computer Vision Engineer",
+            "AI Agent Engineer", "Research Scientist", "Prompt Engineer",
         ],
         "Analytics Engineering": [
             "Analytics Engineer", "Data Modeler", "Metrics Engineer"

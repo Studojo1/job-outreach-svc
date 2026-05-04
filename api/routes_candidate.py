@@ -505,9 +505,19 @@ async def get_candidate_leads(
         for s in db.query(LeadScore).filter(LeadScore.lead_id.in_(lead_ids)).all():
             scores_by_lead[s.lead_id] = s
 
+    # Score-floor cutoff: hide leads where the heuristic decided they're a clear
+    # mismatch (zero title overlap, niche miss, denylisted industry).
+    # 50 = "not great but worth showing"; below 50 = "noise that drags trust down".
+    SCORE_FLOOR = 50
     results = []
+    hidden_count = 0
     for lead in leads:
         score = scores_by_lead.get(lead.id)
+        # Hide clearly bad leads. Unscored leads (score is None) are NOT hidden —
+        # discovery may still be running for them and we want them to surface.
+        if score is not None and score.overall_score is not None and score.overall_score < SCORE_FLOOR:
+            hidden_count += 1
+            continue
         results.append({
             "id": lead.id,
             "name": lead.name,
@@ -534,6 +544,12 @@ async def get_candidate_leads(
 
     # Sort by score descending
     results.sort(key=lambda x: (x["score"]["overall"] if x["score"] else 0), reverse=True)
+
+    if hidden_count:
+        logger.info(
+            "[LeadSearch] Hidden %d/%d leads scoring below %d (clear mismatches)",
+            hidden_count, len(leads), SCORE_FLOOR,
+        )
 
     logger.info(f"[LeadSearch] Returning {len(results)} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
     return {"leads": results, "total": len(results)}

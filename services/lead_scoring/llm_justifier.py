@@ -40,41 +40,46 @@ BANNED_PHRASES = [
 ]
 
 _SYSTEM_PROMPT = """You are writing per-lead reasoning for a job-outreach product.
-Each card explains why ONE specific candidate should reach out to ONE specific lead at ONE specific company.
+Each flashcard explains why ONE specific candidate should reach out to ONE specific lead at
+ONE specific company. Output is rendered in a compact card — content MUST be tight.
 
-Your job is to write SHORT, SPECIFIC, GROUNDED reasoning. Three rules:
+Output shape: a one-line headline + exactly 3 short bullets.
 
-1. CITE A REAL FACT FROM THE COMPANY DATA. Always anchor on something concrete:
-   what the company does (from short_description / website_summary / industries),
-   the tech they use, their size, where they're based. Never say "this company is a great fit" —
-   say "Peppo builds client-acquisition SaaS for service businesses."
+Rules:
 
-2. CONNECT IT TO THE CANDIDATE. The candidate gives you their target role, niche keywords,
-   tech stack, and a flex project they built. Find the most concrete link between candidate
-   signal and company signal. If a niche overlaps, name the niche. If the tech overlaps,
-   name the tech. If the candidate's project solves a problem the company also solves, say so.
+1. CITE REAL FACTS ONLY. Every bullet must reference something concrete from the company data
+   (industry, product, tech stack, headcount, HQ city) OR the lead (title, seniority).
+   Never invent facts not in the provided data.
 
-3. DEGRADE GRACEFULLY. If the company data is thin, anchor on what you DO have —
-   the lead's title + seniority, the location overlap with the candidate, the company size
-   bucket. Never invent facts not in the provided data.
+2. ONE CANDIDATE-COMPANY LINK PER BULLET. Each bullet should connect a candidate signal
+   (target role, niche, tech stack, flex project) to a company signal. Examples:
+   - "Builds client-acquisition SaaS — same problem space as your AI-agent project"
+   - "Stack overlap: Python + Kubernetes (your daily tools)"
+   - "Hiring ML engineers actively in Bengaluru (your city)"
 
-ABSOLUTELY FORBIDDEN:
-- The phrases: "strong fit", "great match", "good fit", "perfect alignment", "reach out promptly",
-  "ideal candidate", "perfect match", "excellent opportunity".
-- Inventing company facts not in the provided data.
-- Generic praise. Every sentence must point at something real.
+3. CONCISE. Each bullet ≤ 80 chars. Headline ≤ 80 chars. No throat-clearing.
 
-Output one JSON object containing reasoning for ALL the leads in this batch, keyed by lead_id (string)."""
+4. NO FLUFF PHRASES. Forbidden: "strong fit", "great match", "good fit", "perfect alignment",
+   "reach out promptly", "ideal candidate", "perfect match", "excellent opportunity",
+   "great opportunity", "amazing", "exciting".
+
+5. DEGRADE GRACEFULLY. If company data is thin, anchor bullets on title/seniority/location/size.
+
+Output one JSON object containing reasoning for ALL leads in this batch, keyed by lead_id (string)."""
 
 _LEAD_SCHEMA = {
     "type": "object",
     "properties": {
-        "headline": {"type": "string", "minLength": 10, "maxLength": 120},
-        "fit_reason": {"type": "string", "minLength": 30, "maxLength": 400},
-        "talk_track": {"type": "string", "minLength": 20, "maxLength": 300},
+        "headline": {"type": "string", "minLength": 10, "maxLength": 90},
+        "bullets": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 8, "maxLength": 90},
+            "minItems": 3,
+            "maxItems": 3,
+        },
         "signal_strength": {"type": "string", "enum": ["high", "medium", "low"]},
     },
-    "required": ["headline", "fit_reason", "talk_track", "signal_strength"],
+    "required": ["headline", "bullets", "signal_strength"],
     "additionalProperties": False,
 }
 
@@ -150,11 +155,15 @@ def _build_batch_prompt(candidate: dict, leads: List[dict], companies: Dict[str,
 {chr(10).join(lead_blocks)}
 
 For EACH lead above, produce a JSON object with these fields:
-- headline: one line (≤120 chars). The single most concrete reason. Should mention the company by name.
-- fit_reason: 1-2 sentences (30-400 chars). Tie a candidate signal to a company signal explicitly.
-- talk_track: 1-2 sentences (20-300 chars). What the candidate should mention first when they reach out.
-- signal_strength: "high" if there's a direct concrete overlap (tech stack match, niche match, project topic match);
-  "medium" if it's a sensible role/seniority/location fit; "low" if reasoning had to fall back to generic title-based fit.
+- headline: one line (≤80 chars). Should mention the company by name. Concrete, no fluff.
+- bullets: EXACTLY 3 items, each ≤80 chars. Each bullet ties one candidate signal to one
+  company signal. Lead with the strongest link (niche or tech overlap), then 2nd-strongest, etc.
+  Examples:
+    "Builds client-acquisition SaaS — same space as your AI-agent project"
+    "Stack overlap: Python + Kubernetes (your daily tools)"
+    "Hiring ML engineers actively in Bengaluru (your city)"
+- signal_strength: "high" for direct concrete overlap (tech / niche / project topic match);
+  "medium" for sensible role/seniority/location fit; "low" for generic title-based fit only.
 
 Return a JSON object whose top-level keys are the lead_ids (as strings).
 """
@@ -185,7 +194,9 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
 
 
 def _has_banned_phrase(item: dict) -> bool:
-    blob = " ".join(str(item.get(k, "")) for k in ("headline", "fit_reason", "talk_track")).lower()
+    parts = [str(item.get("headline") or "")]
+    parts.extend(str(b) for b in (item.get("bullets") or []))
+    blob = " ".join(parts).lower()
     return any(b in blob for b in BANNED_PHRASES)
 
 

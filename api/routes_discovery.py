@@ -53,6 +53,8 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         "company_preferences": {
             "industries": prefs.get("industry_interests", []),
             "company_size": [prefs.get("company_size", "any")],
+            # Pipe niches through so the scorer can apply the niche-mismatch penalty.
+            "niche_keywords": prefs.get("niche_keywords", []),
         },
     }
 

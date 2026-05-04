@@ -273,6 +273,26 @@ def score_and_select_leads(
             if len(word) > 3:  # skip short words like "of", "and"
                 role_keywords.add(word)
 
+    # ── Hard mismatch penalty data (added May 4 2026) ─────────────────────
+    # Niches the candidate selected — penalize leads whose company shows zero overlap
+    cand_niches = candidate_profile.get("company_preferences", {}).get("niche_keywords", []) or []
+    if isinstance(cand_niches, str):
+        cand_niches = [cand_niches]
+    cand_niches_lower = [n.lower().strip() for n in cand_niches if n and str(n).strip()]
+
+    # Industry denylist for engineering/data/product candidates — these companies
+    # exist in Apollo and slip through niche-keyword filters loosely. Confirmed
+    # in manual lead review (Beta Makers Lab, WeWork, etc.)
+    cand_cluster = (role_intelligence.get("departments") or [""])[0].lower()
+    is_tech_candidate = any(c in cand_cluster for c in ("engineer", "data", "product", "design"))
+    INDUSTRY_DENYLIST_FOR_TECH = {
+        "real estate", "interior design", "construction", "apparel & fashion",
+        "hospitality", "food production", "restaurants", "beauty",
+        "religious institutions", "luxury goods & jewelry", "wine and spirits",
+        "tobacco", "performing arts", "fine art", "cosmetics",
+        "ranching", "dairy", "fishery",
+    }
+
     scored_leads = []
     log_traces = []
 
@@ -304,7 +324,9 @@ def score_and_select_leads(
         elif match_count == 1:
             t_score = 15
         else:
-            t_score = 5
+            # Hard penalty: NO title overlap at all → drag score below the floor.
+            # Was +5 (every Operations Manager still scored ~78). Now -25.
+            t_score = -25
 
         # --- 2. Department Relevance (0-20) ---
         d_score = 5
@@ -330,26 +352,61 @@ def score_and_select_leads(
         l_score = _score_location(location, pref_locations)
 
         # --- 6. Dream Company Bonus (0 or +10) ---
+        # Dream companies are protected — they get a +10 bonus AND override
+        # all penalties (any dream-company match keeps the lead visible no
+        # matter how poor the other signals are).
         dc_score = 0
+        is_dream = False
         if dream_companies:
             lead_company = (lead.get("company") or "").lower()
             for dc in dream_companies:
                 dc_lower = dc.lower()
                 if dc_lower in lead_company or lead_company in dc_lower:
                     dc_score = 10
+                    is_dream = True
                     break
 
+        # --- 7. Niche-keyword penalty (NEW) ---
+        # Penalize when the candidate selected niches (AI, SaaS, Devtools)
+        # but ZERO of them appear anywhere in the company text.
+        niche_penalty = 0
+        if cand_niches_lower and not is_dream:
+            company_blob = " ".join([
+                (lead.get("company") or ""),
+                (lead.get("industry") or ""),
+                (lead.get("company_description") or ""),
+            ]).lower()
+            niche_hits = sum(1 for n in cand_niches_lower if n in company_blob)
+            if niche_hits == 0:
+                niche_penalty = -15
+
+        # --- 8. Industry denylist penalty (NEW) ---
+        # Hard mismatch: tech candidate landing on Real Estate / Interior Design / etc.
+        # is almost certainly a noise lead — Apollo loosely matched on something.
+        denylist_penalty = 0
+        if is_tech_candidate and not is_dream and industry:
+            if any(d in industry for d in INDUSTRY_DENYLIST_FOR_TECH):
+                denylist_penalty = -20
+
         # Total Calculation
-        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score
+        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score + niche_penalty + denylist_penalty
 
-        # Tie-breaker
-        unique_str = str(lead.get("apollo_person_id") or lead.get("name") or "")
-        tie_breaker = hash(unique_str) % 5
-        total_score += tie_breaker
-        total_score = min(total_score, 100)
+        # Tie-breaker (only when total_score is positive — don't randomly rescue penalized leads)
+        if total_score > 0:
+            unique_str = str(lead.get("apollo_person_id") or lead.get("name") or "")
+            tie_breaker = hash(unique_str) % 5
+            total_score += tie_breaker
 
-        # Normalize to 70-90 range
-        normalized_score = 70 + (total_score / 100) * 20
+        # Clamp to [-60, 100] then normalize linearly to [0, 100].
+        # A perfect lead → ~100. A clear-mismatch lead → near 0 (well below
+        # the score floor so it's hidden from the user).
+        clamped = max(-60, min(total_score, 100))
+        normalized_score = round((clamped + 60) * (100 / 160), 1)
+
+        # Dream-company override: any dream match is ALWAYS visible regardless
+        # of penalties. Floor their normalized score at 65 (well above the cutoff).
+        if is_dream and normalized_score < 65:
+            normalized_score = 65.0
 
         lead["score"] = round(normalized_score, 1)
         # Attach raw component scores for DB storage

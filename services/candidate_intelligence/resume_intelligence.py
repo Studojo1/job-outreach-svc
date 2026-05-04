@@ -26,14 +26,14 @@ Required JSON schema:
     "country": "<candidate's CURRENT country — NOT countries of companies they worked at>",
     "country_code": "<ISO 3166-1 alpha-2 of candidate's current location, or null>"
   },
-  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>", "<role title 4>"],
+  "likely_roles": ["<role 1>", "<role 2>", "<role 3>", "<role 4>", "<role 5>", "<role 6>"],
   "education_level": "<high_school | bachelors | masters | phd | other | unknown>",
   "target_industries": ["<industry1>", "<industry2>"]
 }
 
 Use these career clusters to pick likely_roles — choose specific role titles that match the candidate's actual skills:
 - Technology & Engineering: Software Engineer, Backend Developer, Frontend Developer, Full-Stack Developer, Mobile Developer, DevOps Engineer, Cloud Engineer, Security Analyst, QA Engineer
-- Data & Analytics: Data Analyst, Data Scientist, ML Engineer, Analytics Engineer, BI Analyst, Product Analyst
+- Data & Analytics: Data Analyst, Data Scientist, Machine Learning Engineer, AI Engineer, Applied AI Engineer, LLM Engineer, GenAI Engineer, Speech / ASR Engineer, NLP Engineer, Computer Vision Engineer, AI Agent Engineer, Analytics Engineer, BI Analyst, Product Analyst, Research Scientist, Prompt Engineer
 - Marketing & Growth: Growth Marketing Manager, Performance Marketer, Content Marketing Specialist, Product Marketing Manager, SEO Specialist, Marketing Analyst
 - Sales & Business Development: SDR, Account Executive, Business Development Representative, Enterprise Sales Associate, Partnerships Manager
 - Product: Product Manager, Associate PM, Product Analyst, Go-to-Market Analyst
@@ -43,7 +43,7 @@ Use these career clusters to pick likely_roles — choose specific role titles t
 - Consulting & Strategy: Management Consultant (Analyst), Strategy Analyst, Associate Consultant
 
 Rules:
-- likely_roles: 3-5 realistic roles for THIS candidate based on their actual experience and skills
+- likely_roles: 4-6 realistic roles for THIS candidate based on their actual experience and skills. Pick the MOST SPECIFIC titles from the cluster — e.g. for an ASR engineer prefer "Speech / ASR Engineer" over generic "ML Engineer". Always include the closest specialization.
 - geography: only use the candidate's own location (from phone number, address, header) — ignore company office locations
 - top_skills: the 5 most marketable skills demonstrated in the resume
 - seniority: infer from years of experience and education stage
@@ -63,8 +63,12 @@ def extract_resume_profile(
     from core.config import settings
     from openai import AzureOpenAI
 
+    # NOTE: settings field names are AZURE_OPENAI_KEY (not _API_KEY) and
+    # AZURE_OPENAI_LLM_DEPLOYMENT (not _DEPLOYMENT). The previous mismatch
+    # caused this whole function to silently fail with AttributeError for
+    # every uploaded resume.
     client = AzureOpenAI(
-        api_key=settings.AZURE_OPENAI_API_KEY,
+        api_key=settings.AZURE_OPENAI_KEY,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
         api_version=settings.AZURE_OPENAI_API_VERSION,
     )
@@ -77,13 +81,13 @@ def extract_resume_profile(
         trimmed = hint + trimmed
 
     response = client.chat.completions.create(
-        model=settings.AZURE_OPENAI_DEPLOYMENT,
+        model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
         temperature=0,
-        max_tokens=400,
+        max_tokens=600,
     )
 
     raw = response.choices[0].message.content or ""

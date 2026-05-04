@@ -10,7 +10,7 @@
 
 from typing import List
 
-from services.shared.role_classifier_service import classify_role_function
+from services.shared.role_classifier_service import classify_role_function, subdomain_for_role
 from services.shared.title_family_service import get_title_family, filter_titles_by_seniority
 from services.shared.company_size_service import get_company_size_segments, get_target_seniority_by_size
 from services.shared.title_expansion_service import expand_titles
@@ -31,7 +31,8 @@ def generate_decision_maker_titles(role: str, company_size: str = "") -> List[st
         Expanded list of decision-maker titles.
     """
     function = classify_role_function(role)
-    title_family = get_title_family(function)
+    subdomain = subdomain_for_role(role)
+    title_family = get_title_family(function, subdomain=subdomain)
 
     seniority_levels = get_target_seniority_by_size(company_size) if company_size else ["manager", "lead"]
     titles = filter_titles_by_seniority(title_family, seniority_levels)
@@ -66,13 +67,16 @@ def generate_titles_by_company_size(role: str, experience_level: str = "entry") 
     Returns:
         A list of ``TargetSegment`` objects, one per company-size range.
     """
-    # Layer 1 — classify role
+    # Layer 1 — classify role + infer specialization subdomain
     function = classify_role_function(role)
-    logger.info("Layer 1 — Role '%s' → function '%s' (exp_level=%s)", role, function, experience_level)
+    subdomain = subdomain_for_role(role)
+    logger.info("Layer 1 — Role '%s' → function '%s', subdomain '%s' (exp_level=%s)",
+                role, function, subdomain, experience_level)
 
-    # Layer 2 — load title family
-    title_family = get_title_family(function)
-    logger.info("Layer 2 — Title family for '%s': %d base titles", function, len(title_family))
+    # Layer 2 — load title family with specialization layer
+    title_family = get_title_family(function, subdomain=subdomain)
+    logger.info("Layer 2 — Title family for '%s'/'%s': %d base titles",
+                function, subdomain, len(title_family))
 
     # Layer 3-5 per segment
     segments: List[TargetSegment] = []

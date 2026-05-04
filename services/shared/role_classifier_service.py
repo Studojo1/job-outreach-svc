@@ -275,6 +275,91 @@ def _direct_classify(role_lower: str):
     return matches[0][1]
 
 
+# Substring → specialization mapping for subdomain inference. Order matters
+# (longest/most-specific keywords first). Used by title_family_service to
+# inject specialized hiring-manager titles on top of the generic family.
+_SUBDOMAIN_KEYWORDS: List[tuple[str, str]] = [
+    # ML / AI specializations — highest priority because resume signal is strongest here
+    ("machine learning engineer", "ml_ai"),
+    ("ml engineer", "ml_ai"),
+    ("ai engineer", "ml_ai"),
+    ("applied ai", "ml_ai"),
+    ("llm engineer", "ml_ai"),
+    ("llm", "ml_ai"),
+    ("genai", "ml_ai"),
+    ("generative ai", "ml_ai"),
+    ("ai agent", "ml_ai"),
+    ("nlp engineer", "ml_ai"),
+    ("nlp", "ml_ai"),
+    ("speech / asr engineer", "ml_ai"),
+    ("speech engineer", "ml_ai"),
+    ("asr engineer", "ml_ai"),
+    ("asr", "ml_ai"),
+    ("computer vision engineer", "ml_ai"),
+    ("research scientist", "ml_ai"),
+    ("applied scientist", "ml_ai"),
+    ("prompt engineer", "ml_ai"),
+    ("machine learning", "ml_ai"),
+    # Data engineering
+    ("data engineer", "data_engineering"),
+    ("data engineering", "data_engineering"),
+    # SWE specializations
+    ("backend engineer", "backend"),
+    ("backend developer", "backend"),
+    ("frontend engineer", "frontend"),
+    ("frontend developer", "frontend"),
+    ("ios developer", "mobile"),
+    ("android developer", "mobile"),
+    ("mobile developer", "mobile"),
+    ("mobile engineer", "mobile"),
+    # Marketing specializations
+    ("growth marketing", "growth_marketing"),
+    ("growth manager", "growth_marketing"),
+    ("performance marketing", "performance_marketing"),
+    ("paid media", "performance_marketing"),
+    ("brand manager", "brand_marketing"),
+    ("brand strategist", "brand_marketing"),
+    ("product marketing", "product_marketing"),
+    ("content marketing", "content_marketing"),
+    ("content strategist", "content_marketing"),
+    # Design specializations
+    ("product designer", "product_design"),
+    ("ux researcher", "ux_research"),
+    ("ux research", "ux_research"),
+    # Sales specializations
+    ("enterprise sales", "enterprise_sales"),
+    ("enterprise account executive", "enterprise_sales"),
+    ("smb sales", "smb_sales"),
+    # Security
+    ("application security", "appsec"),
+    ("appsec", "appsec"),
+    # Ops
+    ("business operations", "biz_ops"),
+    ("biz ops", "biz_ops"),
+    ("bizops", "biz_ops"),
+]
+
+
+def subdomain_for_role(role: str) -> str | None:
+    """Infer a specialization key from a role string. Returns None when generic.
+
+    Used by ``get_title_family(function, subdomain=...)`` to inject specialized
+    hiring-manager titles. Without this, an ML Engineer candidate gets the same
+    generic 'data' titles as a BI Analyst — which is the root cause of the
+    bad-quality leads (Operations Managers, Junior Data Scientists).
+
+    Sort order in ``_SUBDOMAIN_KEYWORDS`` matters: longer/more-specific keywords
+    come first so 'machine learning engineer' beats 'machine learning'.
+    """
+    if not role:
+        return None
+    role_lower = role.strip().lower()
+    for keyword, spec in _SUBDOMAIN_KEYWORDS:
+        if keyword in role_lower:
+            return spec
+    return None
+
+
 def classify_role_function(role: str) -> str:
     """Classify a role string into a function category.
 
