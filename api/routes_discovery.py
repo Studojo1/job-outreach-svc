@@ -22,11 +22,10 @@ from api.dependencies import get_current_user
 from core.analytics import capture
 
 # Top-K leads that get the full enrichment + LLM justification pass.
-# Reduced from 100 → 50 in May 2026 after observing that the bottom half
-# of "top 100" rarely gets opened anyway, and the cost saved (50 fewer
-# Apollo enrichments + 12 fewer justifier batches) drops total pipeline
-# latency from ~125s to ~75s — well under the frontend timeout.
-JUSTIFY_TOP_K = 50
+# 100 leads (~25 batches of 4 in parallel pool of 10 = 3 sequential rounds
+# = ~30s extra). Worth the cost: every justified lead gets a tailored
+# explanation instead of falling back to the generic FlashCard heuristic.
+JUSTIFY_TOP_K = 100
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +144,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
 
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
+    # Tiebreaker: leads with a known company_domain rank first within the same
+    # score bucket — they have richer signal and produce better justifications.
     top_leads = sorted(
         [ld for ld in scored if ld.get("id") in score_rows],
-        key=lambda ld: ld.get("score", 0),
+        key=lambda ld: (ld.get("score", 0), 1 if ld.get("company_domain") else 0),
         reverse=True,
     )[:JUSTIFY_TOP_K]
 

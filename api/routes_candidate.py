@@ -505,17 +505,11 @@ async def get_candidate_leads(
         for s in db.query(LeadScore).filter(LeadScore.lead_id.in_(lead_ids)).all():
             scores_by_lead[s.lead_id] = s
 
-    # Score-floor cutoff: hide leads where the heuristic decided they're a clear
-    # mismatch (zero title overlap, niche miss, denylisted industry).
-    # Live distribution on Himanshu's leads (1000 in DB):
-    #   bucket  20-30: 705 (clear off-domain garbage)
-    #   bucket  30-40: 178 (penalty-heavy borderline)
-    #   bucket  40-50:  21
-    #   bucket  50-90:  96 (the actually-good ones)
-    # Floor=50 → only 96 leads visible (too aggressive).
-    # Floor=40 → 117. Floor=35 → 146. Pick 40 to keep the borderline
-    # leads visible while still hiding the 70% obvious-garbage bucket.
-    SCORE_FLOOR = 40
+    # Score-floor cutoff disabled. Users pay for ~500 emails so they need
+    # to see ~500 leads — even the noisier ones. Quality is preserved by
+    # the sort order (high-score leads at the top, garbage at the bottom).
+    # Set to a value > 0 to re-enable hiding the very-clearly-off ones.
+    SCORE_FLOOR = 0
     results = []
     hidden_count = 0
     for lead in leads:

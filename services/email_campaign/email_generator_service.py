@@ -142,6 +142,19 @@ FORBIDDEN_PHRASES = [
     "align with your mission",
     "make a meaningful impact",
     "contribute to your team",
+    # Round-2 additions: the exact generic patterns observed in user testing.
+    "fascinating work",
+    "intersection of ai",
+    "intersection of AI",
+    "ai-driven solutions that scale",
+    "AI-driven solutions that scale",
+    "doing some fascinating",
+    "some fascinating work",
+    "doing exciting work",
+    "looks like your team is doing",
+    "your team is doing some",
+    "while researching companies",
+    "while researching AI",
     "from day one",
     "bring to the table",
     "hit the ground running",
@@ -311,9 +324,17 @@ def _build_candidate_signal(_name: str, field: str, skills: list, project: str, 
 def extract_lead_profile(lead: Lead) -> dict:
     """Extract a structured profile from lead data.
 
+    Pulls the rich `CompanyProfile.extracted_facts` blob (round-2 enrichment)
+    when available — that's the structured output of the per-company fact
+    extractor LLM (what_they_build, core_tech, primary_market, hiring_signal,
+    recent_momentum). When available, the email prompt cites these facts
+    instead of guessing from the company name.
+
     Returns:
         dict with: lead_name, lead_role, company_name, company_focus,
-                   department_hint, contextual_hook
+                   department_hint, contextual_hook, company_facts,
+                   recent_job_postings, what_they_build, core_tech,
+                   recent_momentum, hiring_signal
     """
     lead_name = lead.name or "there"
     lead_role = lead.title or ""
@@ -323,13 +344,35 @@ def extract_lead_profile(lead: Lead) -> dict:
     # Infer department from title
     department_hint = _infer_department(lead_role)
 
-    # Use real company description from Apollo if available and substantive (>50 chars)
-    # Short descriptions like "Software company" add no value — use size-aware fallback instead
+    # ── Look up the round-2 CompanyProfile if we have a domain.
+    company_profile = _lookup_company_profile(lead.company_domain)
+    facts = (company_profile.extracted_facts if company_profile else None) or {}
+
+    # Build the strongest "what does this company do" string we have.
+    # Priority: extracted_facts.what_they_build → CompanyProfile.short_description
+    # → CompanyProfile.website_summary → Apollo's lead.company_description
+    # → size-aware contextual fallback.
+    company_context_parts = []
+    if facts.get("what_they_build"):
+        company_context_parts.append(facts["what_they_build"])
+    if facts.get("primary_market"):
+        company_context_parts.append(f"primary market: {facts['primary_market']}")
+    if facts.get("recent_momentum"):
+        company_context_parts.append(facts["recent_momentum"])
+
     company_size = lead.company_size or ""
-    if lead.company_description and len(lead.company_description.strip()) > 50:
+    if company_context_parts:
+        company_context = " | ".join(company_context_parts)
+        has_company_description = True
+    elif company_profile and company_profile.short_description and len(company_profile.short_description) > 50:
+        company_context = company_profile.short_description.strip()
+        has_company_description = True
+    elif lead.company_description and len(lead.company_description.strip()) > 50:
         company_context = lead.company_description.strip()
+        has_company_description = True
     else:
         company_context = _build_contextual_hook(company_name, lead_role, industry, department_hint, company_size)
+        has_company_description = False
 
     # Build a "why this person" line tailored to their role
     why_this_person = _build_why_this_person(department_hint)
@@ -342,8 +385,37 @@ def extract_lead_profile(lead: Lead) -> dict:
         "department_hint": department_hint,
         "contextual_hook": company_context,
         "why_this_person": why_this_person,
-        "has_company_description": bool(lead.company_description and len(lead.company_description.strip()) > 50),
+        "has_company_description": has_company_description,
+        # ── Round-2 enrichment fields piped into the prompt builder.
+        "what_they_build": facts.get("what_they_build"),
+        "core_tech": facts.get("core_tech") or [],
+        "primary_market": facts.get("primary_market"),
+        "recent_momentum": facts.get("recent_momentum"),
+        "hiring_signal": facts.get("hiring_signal"),
+        "recent_job_postings": (company_profile.recent_job_postings or []) if company_profile else [],
     }
+
+
+def _lookup_company_profile(domain: str | None):
+    """Best-effort fetch of CompanyProfile by domain. Opens its own short-lived
+    DB session so callers don't need to thread one through. Returns None on
+    any failure — email generation must always work even without enrichment."""
+    if not domain:
+        return None
+    try:
+        from database.session import SessionLocal
+        from database.models import CompanyProfile
+    except Exception:
+        return None
+    try:
+        db = SessionLocal()
+        try:
+            return db.query(CompanyProfile).filter_by(domain=domain.lower()).first()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("[EmailGen] CompanyProfile lookup failed for %s: %s", domain, e)
+        return None
 
 
 def _infer_department(title: str) -> str:
@@ -528,8 +600,46 @@ def _build_generation_prompt(
             "your homework, not just to prove you know what they do."
         )
 
+    # Round-2 specificity push — when we have rich extracted facts, the
+    # email MUST cite at least one of them by name. This is what kills the
+    # "I came across X while researching companies at the intersection of AI"
+    # generic opener.
+    if lead_profile.get("what_they_build") or lead_profile.get("hiring_signal") or lead_profile.get("core_tech"):
+        synthesis += (
+            "\n\nSPECIFICITY (mandatory): you have STRUCTURED FACTS about this company "
+            "(WHAT THEY BUILD, CORE TECH STACK, HIRING NOW, RECENT NEWS / MOMENTUM, ACTIVE JOB POSTINGS). "
+            "The email MUST reference at least ONE of these facts by name in the opening sentence — "
+            "NOT 'I came across {company} while researching AI companies' or 'looks like your team is "
+            "doing fascinating work in AI' or any other generic intersection phrase. "
+            "Example good openings: "
+            "'Saw {company} is building [WHAT THEY BUILD] — same problem space as the [your project] I built.' "
+            "'{company} is hiring [HIRING NOW] which lines up with what I've been doing.' "
+            "'Noticed [RECENT MOMENTUM] — congrats. Reaching out because [link to your work].' "
+            "Pick the fact that genuinely connects to the sender's background; don't use facts as decoration."
+        ).replace("{company}", lead_profile["company_name"])
+
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
+
+    # ── Round-2 facts: include the structured per-company facts when we have
+    # them. These come from the company_fact_extractor LLM and contain the
+    # company's actual product, tech stack, recent news, and active hiring.
+    facts_block = []
+    if lead_profile.get("what_they_build"):
+        facts_block.append(f"WHAT THEY BUILD: {lead_profile['what_they_build']}")
+    if lead_profile.get("primary_market"):
+        facts_block.append(f"PRIMARY MARKET: {lead_profile['primary_market']}")
+    if lead_profile.get("core_tech"):
+        facts_block.append(f"CORE TECH STACK: {', '.join(lead_profile['core_tech'])}")
+    if lead_profile.get("recent_momentum"):
+        facts_block.append(f"RECENT NEWS / MOMENTUM: {lead_profile['recent_momentum']}")
+    if lead_profile.get("hiring_signal"):
+        facts_block.append(f"HIRING NOW: {lead_profile['hiring_signal']}")
+    if lead_profile.get("recent_job_postings"):
+        titles = [jp.get("title") for jp in lead_profile["recent_job_postings"][:3] if jp.get("title")]
+        if titles:
+            facts_block.append(f"ACTIVE JOB POSTINGS: {', '.join(titles)}")
+    facts_section = ("\n\n" + "\n".join(facts_block)) if facts_block else ""
 
     prompt = f"""Write a short cold outreach email. Follow EVERY rule below exactly.
 
@@ -543,7 +653,7 @@ RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
 COMPANY CONTEXT: {lead_profile['contextual_hook']}
 DEPARTMENT: {lead_profile['department_hint']}
-WHY THIS PERSON: {lead_profile['why_this_person']}
+WHY THIS PERSON: {lead_profile['why_this_person']}{facts_section}
 
 {structure}
 
