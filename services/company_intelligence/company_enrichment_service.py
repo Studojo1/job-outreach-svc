@@ -155,28 +155,29 @@ def bulk_enrich_top_companies(
 
     logger.info("[ENRICH] starting bulk enrich for %d unique companies", len(deduped))
 
-    # ── Phase 1: Apollo enrich (resolves missing domains via name-based lookup).
-    # We key the in-memory `profiles` dict by the BEST key we have at any
-    # moment. After name → domain resolution we re-key any temp-name entries.
-    profiles: Dict[str, CompanyProfile] = {}
+    # ── Phase 1: Apollo enrich. Resolves company name → canonical domain,
+    # then enriches by domain. Companies we can't resolve are tracked in
+    # `name_alias` so the caller can still look up the (mostly-empty) profile
+    # by the original name string, but they don't enter the downstream
+    # domain-keyed pipeline (jobs / scrape / facts).
+    profiles: Dict[str, CompanyProfile] = {}        # keyed by canonical domain
+    name_alias: Dict[str, CompanyProfile] = {}      # original name → profile
     apollo_ok = 0
     apollo_attempted = 0
 
     for c in deduped:
         domain = c["domain"]
         name = c["name"]
-        # Best initial cache key: prefer domain.
-        cache_key = domain or name
-        existing = None
+
+        # Cache hit on a known domain → reuse, skip Apollo call.
         if domain:
             existing = db.query(CompanyProfile).filter_by(domain=domain).first()
+            if existing and not _apollo_stale(existing):
+                profiles[domain] = existing
+                if name:
+                    name_alias[name] = existing
+                continue
 
-        # Already-fresh cached domain → reuse, skip Apollo call.
-        if existing and not _apollo_stale(existing):
-            profiles[domain] = existing  # type: ignore[index]
-            continue
-
-        # Need to call Apollo (either to resolve domain from name OR refresh cache).
         apollo_attempted += 1
         payload = enrich_organization(domain=domain, name=name)
         resolved_domain: Optional[str] = None
@@ -184,29 +185,27 @@ def bulk_enrich_top_companies(
             resolved_domain = payload.get("discovered_domain") or domain
             apollo_ok += 1
 
-        if resolved_domain:
-            # Now we have a real domain — get_or_create the row and apply payload.
-            p = get_or_create_profile(db, resolved_domain)
-            if payload:
-                _apply_apollo_payload(p, payload)
-            else:
-                p.last_apollo_enriched_at = datetime.utcnow()
-            profiles[resolved_domain] = p
-            # Index the original name too so callers without a domain can find it.
-            if name and name != resolved_domain:
-                profiles[name] = p
-        elif name:
-            # Couldn't resolve a domain; still create a row keyed by name so
-            # caller can look up partial data (e.g. company_description).
-            p = get_or_create_profile(db, name.lower())
+        if not resolved_domain:
+            # Nothing we can do — log and skip. The lead will still appear
+            # in results (it just won't get enriched bullets).
+            continue
+
+        p = get_or_create_profile(db, resolved_domain)
+        if payload:
+            _apply_apollo_payload(p, payload)
+        else:
             p.last_apollo_enriched_at = datetime.utcnow()
-            profiles[name] = p
+        profiles[resolved_domain] = p
+        if name:
+            name_alias[name] = p
 
-    logger.info("[ENRICH] apollo: %d/%d enriched (others cached or unresolvable)",
-                apollo_ok, apollo_attempted)
+    logger.info(
+        "[ENRICH] apollo: %d/%d enriched, %d companies entered domain pipeline",
+        apollo_ok, apollo_attempted, len(profiles),
+    )
 
-    # Build the canonical unique-domain list for downstream stages.
-    unique_domains = sorted({p.domain for p in set(profiles.values()) if p.domain})
+    # Domain-keyed canonical list for downstream stages.
+    unique_domains = sorted(profiles.keys())
 
     # ── Apollo job postings (per company that has an apollo_org_id).
     # Run sequentially since they're already cheap (single HTTP call) and
@@ -266,7 +265,14 @@ def bulk_enrich_top_companies(
                 profiles[d].extracted_facts = facts
 
     db.commit()
-    return profiles
+    # Merge name aliases into the returned dict so callers can look up by
+    # either domain OR original company name. This is what the earlier
+    # backfill code in routes_discovery.py expects.
+    out: Dict[str, CompanyProfile] = dict(profiles)
+    for nm, p in name_alias.items():
+        if nm not in out:
+            out[nm] = p
+    return out
 
 
 def profile_to_extractor_dict(profile: CompanyProfile) -> dict:

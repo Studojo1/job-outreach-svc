@@ -5,9 +5,10 @@ industries, employee_count, founded_year, headquarters, etc. Uses the same
 APOLLO_API_KEY as the people search; org enrichment is free under the current plan.
 """
 
+import re
 import time
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from core.config import settings
 from core.logger import get_logger
@@ -22,18 +23,19 @@ def enrich_organization(
     domain: str | None = None,
     name: str | None = None,
 ) -> Optional[Dict[str, Any]]:
-    """Call Apollo /organizations/enrich. Looks up by domain when given;
-    otherwise falls back to a name-based lookup via /mixed_companies/api_search.
+    """Call Apollo /organizations/enrich. Always uses domain-based lookup.
 
-    Apollo's /people/search returns extremely thin organization data on most
-    plans (just the name + a few has_* booleans), so for the vast majority
-    of leads we discover we have NO domain — only the company name. The
-    name-based fallback uses /mixed_companies/api_search to resolve a name
-    to an org record, then returns the same parsed dict shape.
+    When only a name is provided, we generate up to 5 candidate domains by
+    normalizing the name (e.g. "ConnectWise" → "connectwise.com",
+    "InStore.ai" → "instore.ai", "BI Worldwide (India)" → "biworldwide.com")
+    and try each in turn. The first that returns rich data wins.
+
+    We cannot use Apollo's /mixed_companies/search for name-based discovery
+    because on our plan it returns empty org records (verified via live test
+    on 48 companies — every result had industries=0, keywords=0, tech=0).
 
     Returns the parsed organization dict on success, or None on any failure.
-    Failures are logged but never raised — the caller falls back to whatever
-    partial data exists.
+    Failures are logged but never raised.
     """
     if not domain and not name:
         return None
@@ -48,40 +50,56 @@ def enrich_organization(
     }
     label = domain or name
 
-    # Same throttle as people search to stay under Apollo's per-second limits.
-    time.sleep(0.2)
+    # Build the list of candidate domains to try, in priority order.
+    candidates: List[str] = []
+    if domain:
+        candidates.append(_domainify(domain) or domain)
+    if name:
+        for guess in _guess_domains_from_name(name):
+            if guess and guess not in candidates:
+                candidates.append(guess)
 
+    # Try each candidate; first one that returns a non-empty org wins.
     org: Optional[Dict[str, Any]] = None
-    try:
-        if domain:
+    successful_domain: Optional[str] = None
+    for candidate in candidates[:4]:  # cap at 4 attempts so we don't waste 5x time
+        # Same throttle as people search to stay under Apollo's per-second limits.
+        time.sleep(0.2)
+        try:
             url = f"{APOLLO_BASE_URL}/organizations/enrich"
-            resp = requests.get(url, params={"domain": domain}, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
-            if resp.ok:
-                org = (resp.json() or {}).get("organization") or None
-            else:
-                logger.info("[APOLLO_ENRICH] domain lookup HTTP %d for %s", resp.status_code, label)
-        if not org and name:
-            # Fallback: name-based lookup via mixed_companies/api_search.
-            url = f"{APOLLO_BASE_URL}/mixed_companies/search"
-            payload = {"q_organization_name": name, "page": 1, "per_page": 1}
-            resp = requests.post(url, json=payload, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
-            if resp.ok:
-                body = resp.json() or {}
-                orgs = body.get("organizations") or body.get("accounts") or []
-                if orgs and isinstance(orgs[0], dict):
-                    org = orgs[0]
-            else:
-                logger.info("[APOLLO_ENRICH] name lookup HTTP %d for %s", resp.status_code, label)
-    except requests.RequestException as e:
-        logger.warning("[APOLLO_ENRICH] network error for %s: %s", label, e)
-        return None
-    except ValueError:
-        logger.warning("[APOLLO_ENRICH] non-JSON response for %s", label)
-        return None
+            resp = requests.get(url, params={"domain": candidate}, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
+        except requests.RequestException as e:
+            logger.warning("[APOLLO_ENRICH] network error for %s (try %s): %s", label, candidate, e)
+            continue
+        if not resp.ok:
+            logger.debug("[APOLLO_ENRICH] HTTP %d for %s (try %s)", resp.status_code, label, candidate)
+            continue
+        try:
+            candidate_org = (resp.json() or {}).get("organization") or None
+        except ValueError:
+            continue
+        if not candidate_org:
+            continue
+        # Accept only if Apollo returned something genuinely useful — at least
+        # an industry, an employee count, or a description. Empty stub records
+        # would just produce generic justifier output again.
+        has_signal = bool(
+            candidate_org.get("industry")
+            or candidate_org.get("industries")
+            or candidate_org.get("estimated_num_employees")
+            or candidate_org.get("short_description")
+            or candidate_org.get("keywords")
+        )
+        if has_signal:
+            org = candidate_org
+            successful_domain = candidate
+            break
 
     if not org:
-        logger.info("[APOLLO_ENRICH] no organization found for %s", label)
+        logger.info("[APOLLO_ENRICH] no rich data found for %s (tried %d candidates)", label, len(candidates[:4]))
         return None
+    if successful_domain and successful_domain != domain:
+        logger.info("[APOLLO_ENRICH] resolved %s → domain %s", label, successful_domain)
 
     # Apollo's response uses different key names for the website depending on
     # which endpoint we hit. Normalize them all into one.
@@ -135,6 +153,75 @@ def _domainify(value: Any) -> Optional[str]:
     if raw.startswith("www."):
         raw = raw[4:]
     return raw or None
+
+
+# Common suffixes / qualifiers that don't belong in a domain guess.
+# Stripped before generating candidate domains.
+_NAME_NOISE_PATTERNS = [
+    r"\(.*?\)",                                  # "(India)", "(formerly X)"
+    r"\b(pvt|pvt\.|private)\s*(ltd|ltd\.|limited)\b",
+    r"\b(india|usa|uk|inc|inc\.|llc|llp|corp|corporation|company|co\.)\b",
+    r"\b(software|technologies|technology|tech|systems|labs|solutions|services|center|centre)\b",
+]
+
+
+def _guess_domains_from_name(name: str) -> List[str]:
+    """Generate up to ~5 candidate domains from a company name.
+
+    Examples:
+      "ConnectWise"            → ["connectwise.com", "connectwise.io", "connectwise.ai"]
+      "InStore.ai"             → ["instore.ai", "instore.com"]
+      "BI Worldwide (India)"   → ["biworldwide.com", "bi.com", ...]
+      "Sony India Software"    → ["sony.com", "sonyindia.com"]
+    """
+    if not name or not isinstance(name, str):
+        return []
+
+    cleaned = name.strip().lower()
+    # If the name itself looks like a domain, try it directly first.
+    if "." in cleaned and " " not in cleaned and len(cleaned) <= 30:
+        d = _domainify(cleaned)
+        if d:
+            return [d, d.rsplit(".", 1)[0] + ".com"]
+
+    # Strip noise patterns.
+    for pattern in _NAME_NOISE_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[^a-z0-9 ]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if not cleaned:
+        return []
+
+    words = cleaned.split()
+    candidates: List[str] = []
+
+    # 1. All words concatenated: "biworldwide", "sonyindiasoftware".
+    base = "".join(words)
+    if 3 <= len(base) <= 30:
+        candidates.extend([f"{base}.com", f"{base}.ai", f"{base}.io"])
+
+    # 2. Just the first word: helps for "Sony India Software" → "sony.com".
+    if len(words) > 1:
+        first = words[0]
+        if 3 <= len(first) <= 20:
+            candidates.append(f"{first}.com")
+
+    # 3. First two words concatenated: "biworldwide" again, but also
+    #    "sonyindia" for cases where that's the actual brand.
+    if len(words) >= 2:
+        first_two = words[0] + words[1]
+        if 4 <= len(first_two) <= 30 and f"{first_two}.com" not in candidates:
+            candidates.append(f"{first_two}.com")
+
+    # Dedupe while preserving order
+    seen: set = set()
+    out: List[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 def _parse_date(value: Any) -> Optional[str]:

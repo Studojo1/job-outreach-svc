@@ -507,8 +507,15 @@ async def get_candidate_leads(
 
     # Score-floor cutoff: hide leads where the heuristic decided they're a clear
     # mismatch (zero title overlap, niche miss, denylisted industry).
-    # 50 = "not great but worth showing"; below 50 = "noise that drags trust down".
-    SCORE_FLOOR = 50
+    # Live distribution on Himanshu's leads (1000 in DB):
+    #   bucket  20-30: 705 (clear off-domain garbage)
+    #   bucket  30-40: 178 (penalty-heavy borderline)
+    #   bucket  40-50:  21
+    #   bucket  50-90:  96 (the actually-good ones)
+    # Floor=50 → only 96 leads visible (too aggressive).
+    # Floor=40 → 117. Floor=35 → 146. Pick 40 to keep the borderline
+    # leads visible while still hiding the 70% obvious-garbage bucket.
+    SCORE_FLOOR = 40
     results = []
     hidden_count = 0
     for lead in leads:
