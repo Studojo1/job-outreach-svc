@@ -18,54 +18,84 @@ APOLLO_BASE_URL = "https://api.apollo.io/api/v1"
 ENRICH_TIMEOUT_SEC = 12
 
 
-def enrich_organization(domain: str) -> Optional[Dict[str, Any]]:
-    """Call Apollo /organizations/enrich for a domain.
+def enrich_organization(
+    domain: str | None = None,
+    name: str | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Call Apollo /organizations/enrich. Looks up by domain when given;
+    otherwise falls back to a name-based lookup via /mixed_companies/api_search.
 
-    Returns the parsed organization dict on success, or None on any failure
-    (rate limit, 4xx/5xx, network error, missing data). Failures are logged
-    but never raised — the caller is expected to fall back to Lead.company_description.
+    Apollo's /people/search returns extremely thin organization data on most
+    plans (just the name + a few has_* booleans), so for the vast majority
+    of leads we discover we have NO domain — only the company name. The
+    name-based fallback uses /mixed_companies/api_search to resolve a name
+    to an org record, then returns the same parsed dict shape.
+
+    Returns the parsed organization dict on success, or None on any failure.
+    Failures are logged but never raised — the caller falls back to whatever
+    partial data exists.
     """
-    if not domain:
+    if not domain and not name:
         return None
     if not settings.APOLLO_API_KEY or settings.APOLLO_API_KEY == "your_apollo_key_here":
-        logger.warning("[APOLLO_ENRICH] APOLLO_API_KEY missing, skipping enrich for %s", domain)
+        logger.warning("[APOLLO_ENRICH] APOLLO_API_KEY missing, skipping enrich")
         return None
 
-    url = f"{APOLLO_BASE_URL}/organizations/enrich"
     headers = {
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
         "X-Api-Key": settings.APOLLO_API_KEY,
     }
-    params = {"domain": domain}
+    label = domain or name
 
     # Same throttle as people search to stay under Apollo's per-second limits.
     time.sleep(0.2)
 
+    org: Optional[Dict[str, Any]] = None
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
+        if domain:
+            url = f"{APOLLO_BASE_URL}/organizations/enrich"
+            resp = requests.get(url, params={"domain": domain}, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
+            if resp.ok:
+                org = (resp.json() or {}).get("organization") or None
+            else:
+                logger.info("[APOLLO_ENRICH] domain lookup HTTP %d for %s", resp.status_code, label)
+        if not org and name:
+            # Fallback: name-based lookup via mixed_companies/api_search.
+            url = f"{APOLLO_BASE_URL}/mixed_companies/search"
+            payload = {"q_organization_name": name, "page": 1, "per_page": 1}
+            resp = requests.post(url, json=payload, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
+            if resp.ok:
+                body = resp.json() or {}
+                orgs = body.get("organizations") or body.get("accounts") or []
+                if orgs and isinstance(orgs[0], dict):
+                    org = orgs[0]
+            else:
+                logger.info("[APOLLO_ENRICH] name lookup HTTP %d for %s", resp.status_code, label)
     except requests.RequestException as e:
-        logger.warning("[APOLLO_ENRICH] network error for %s: %s", domain, e)
+        logger.warning("[APOLLO_ENRICH] network error for %s: %s", label, e)
         return None
-
-    if not resp.ok:
-        logger.warning("[APOLLO_ENRICH] HTTP %d for %s: %s", resp.status_code, domain, resp.text[:200])
-        return None
-
-    try:
-        body = resp.json()
     except ValueError:
-        logger.warning("[APOLLO_ENRICH] non-JSON response for %s", domain)
+        logger.warning("[APOLLO_ENRICH] non-JSON response for %s", label)
         return None
 
-    org = body.get("organization") or {}
     if not org:
-        logger.info("[APOLLO_ENRICH] empty organization for %s", domain)
+        logger.info("[APOLLO_ENRICH] no organization found for %s", label)
         return None
+
+    # Apollo's response uses different key names for the website depending on
+    # which endpoint we hit. Normalize them all into one.
+    discovered_domain = (
+        _domainify(org.get("primary_domain"))
+        or _domainify(org.get("website_url"))
+        or _domainify(org.get("domain"))
+        or _domainify(org.get("primary_domain_in_lower_case"))
+    )
 
     parsed = {
         "apollo_org_id": org.get("id"),
         "name": org.get("name"),
+        "discovered_domain": discovered_domain or domain,  # propagate so caller can persist it
         "short_description": (org.get("short_description") or org.get("seo_description") or "")[:2000] or None,
         "industries": _coerce_list(org.get("industries")) or _coerce_list([org.get("industry")]),
         "keywords": _coerce_list(org.get("keywords")),
@@ -92,6 +122,19 @@ def enrich_organization(domain: str) -> Optional[Dict[str, Any]]:
         bool(parsed["recent_news_summary"]),
     )
     return parsed
+
+
+def _domainify(value: Any) -> Optional[str]:
+    """Normalize any URL-ish string into a clean lowercase domain."""
+    if not value or not isinstance(value, str):
+        return None
+    raw = value.strip().lower()
+    if raw.startswith(("http://", "https://")):
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    return raw or None
 
 
 def _parse_date(value: Any) -> Optional[str]:

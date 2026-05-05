@@ -21,8 +21,12 @@ from services.lead_scoring.llm_justifier import justify_leads
 from api.dependencies import get_current_user
 from core.analytics import capture
 
-# Top-K leads that get LLM-generated per-lead justifications
-JUSTIFY_TOP_K = 100
+# Top-K leads that get the full enrichment + LLM justification pass.
+# Reduced from 100 → 50 in May 2026 after observing that the bottom half
+# of "top 100" rarely gets opened anyway, and the cost saved (50 fewer
+# Apollo enrichments + 12 fewer justifier batches) drops total pipeline
+# latency from ~125s to ~75s — well under the frontend timeout.
+JUSTIFY_TOP_K = 50
 
 logger = logging.getLogger(__name__)
 
@@ -149,12 +153,35 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
 
     if top_leads:
         try:
-            top_domains = [ld.get("company_domain") for ld in top_leads if ld.get("company_domain")]
+            # Apollo's people search returns near-zero org data on our plan
+            # (no domain, no industry), so most leads have company_domain=None
+            # but always have a company name. Pass both — the orchestrator
+            # resolves missing domains via name-based Apollo lookup.
+            top_companies = [
+                {"domain": ld.get("company_domain"), "name": ld.get("company")}
+                for ld in top_leads if ld.get("company") or ld.get("company_domain")
+            ]
+            unique_count = len({(c["domain"] or c["name"] or "").lower() for c in top_companies})
             logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
-                        len(set(top_domains)), len(top_leads))
+                        unique_count, len(top_leads))
 
-            profiles = bulk_enrich_top_companies(db, top_domains, enable_scrape=True)
+            profiles = bulk_enrich_top_companies(db, top_companies, enable_scrape=True)
             company_payloads = {d: profile_to_llm_dict(p) for d, p in profiles.items()}
+
+            # Backfill discovered domains onto Lead rows so subsequent runs
+            # skip the name-resolution step.
+            backfilled = 0
+            lead_id_to_obj = {l.id: l for l in unscored}
+            for ld in top_leads:
+                lead_obj = lead_id_to_obj.get(ld.get("id"))
+                if not lead_obj or lead_obj.company_domain:
+                    continue
+                profile = profiles.get(lead_obj.company)  # name-keyed lookup first
+                if profile and profile.domain and profile.domain != (lead_obj.company or "").lower():
+                    lead_obj.company_domain = profile.domain
+                    backfilled += 1
+            if backfilled:
+                logger.info("[ENRICH] backfilled company_domain on %d leads", backfilled)
 
             # ── Domain-affinity adjustment (round-2) ─────────────────────────
             # Now that fact extraction has run during enrichment, compare each

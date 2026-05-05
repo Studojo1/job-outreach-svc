@@ -17,8 +17,8 @@ from services.shared.ai.azure_openai_client import generate_json
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 5
-PARALLEL_BATCHES = 5
+BATCH_SIZE = 4
+PARALLEL_BATCHES = 10
 TEMPERATURE = 0.4
 
 # Phrases the LLM is forbidden from using — these are the markers of
@@ -104,10 +104,14 @@ _LEAD_SCHEMA = {
 
 
 def _build_batch_schema(lead_ids: List[int]) -> dict:
+    # NOTE: we do NOT mark per-lead keys as required. If the LLM omits one
+    # we accept the partial result (caller drops missing leads gracefully).
+    # Previously we required every lead, which caused the whole batch to
+    # retry 3x (~90s wasted) on a single missed lead. The retries don't help
+    # because the LLM keeps hitting the same context limit.
     return {
         "type": "object",
         "properties": {str(lid): _LEAD_SCHEMA for lid in lead_ids},
-        "required": [str(lid) for lid in lead_ids],
         "additionalProperties": False,
     }
 

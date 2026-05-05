@@ -14,7 +14,7 @@ Cache rules:
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -110,41 +110,103 @@ def _apply_scrape_payload(profile: CompanyProfile, payload: Optional[dict]) -> N
 
 def bulk_enrich_top_companies(
     db: Session,
-    domains: Iterable[str],
+    companies: Iterable[Any],
     enable_scrape: bool = True,
 ) -> Dict[str, CompanyProfile]:
-    """Enrich every domain in `domains` (deduplicated, falsy-stripped).
+    """Enrich every company in the input.
 
-    Returns a {domain: CompanyProfile} dict for every domain processed
-    (including ones whose Apollo + scrape both failed — caller can still read
-    whatever partial data was previously cached).
+    Accepts two input shapes (back-compatible):
+      - List of domain strings (legacy)
+      - List of {"domain": str|None, "name": str|None} dicts (new)
+
+    On most Apollo plans the people-search response doesn't include a usable
+    `organization.domain`, so for many leads we only know the company NAME.
+    For those companies we call Apollo's name-based search to discover the
+    canonical domain BEFORE proceeding with the rest of the enrichment.
+
+    Returns a {key: CompanyProfile} dict where `key` is the resolved
+    canonical domain (or the input name when no domain could be resolved).
+    Caller maps lead.company → key via the same name to find its profile.
     """
-    unique_domains: List[str] = sorted({d.strip().lower() for d in domains if d and d.strip()})
-    if not unique_domains:
+    # ── Normalize input shape to a list of {domain, name}
+    norm_companies: List[Dict[str, Optional[str]]] = []
+    for entry in companies:
+        if isinstance(entry, str):
+            norm_companies.append({"domain": entry.strip().lower() if entry else None, "name": None})
+        elif isinstance(entry, dict):
+            d = (entry.get("domain") or "").strip().lower() or None
+            n = (entry.get("name") or "").strip() or None
+            if d or n:
+                norm_companies.append({"domain": d, "name": n})
+
+    if not norm_companies:
         return {}
 
-    logger.info("[ENRICH] starting bulk enrich for %d unique domains", len(unique_domains))
+    # Dedupe — companies with the same domain (or, lacking that, the same name)
+    # collapse into one entry.
+    seen: set[str] = set()
+    deduped: List[Dict[str, Optional[str]]] = []
+    for c in norm_companies:
+        key = (c["domain"] or c["name"] or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
 
-    # ── Apollo enrich (sync, sequential — already throttled at 0.2s/req)
-    apollo_to_run: List[str] = []
+    logger.info("[ENRICH] starting bulk enrich for %d unique companies", len(deduped))
+
+    # ── Phase 1: Apollo enrich (resolves missing domains via name-based lookup).
+    # We key the in-memory `profiles` dict by the BEST key we have at any
+    # moment. After name → domain resolution we re-key any temp-name entries.
     profiles: Dict[str, CompanyProfile] = {}
-    for d in unique_domains:
-        p = get_or_create_profile(db, d)
-        profiles[d] = p
-        if _apollo_stale(p):
-            apollo_to_run.append(d)
-
-    logger.info("[ENRICH] apollo: %d need refresh out of %d", len(apollo_to_run), len(unique_domains))
     apollo_ok = 0
-    for d in apollo_to_run:
-        payload = enrich_organization(d)
+    apollo_attempted = 0
+
+    for c in deduped:
+        domain = c["domain"]
+        name = c["name"]
+        # Best initial cache key: prefer domain.
+        cache_key = domain or name
+        existing = None
+        if domain:
+            existing = db.query(CompanyProfile).filter_by(domain=domain).first()
+
+        # Already-fresh cached domain → reuse, skip Apollo call.
+        if existing and not _apollo_stale(existing):
+            profiles[domain] = existing  # type: ignore[index]
+            continue
+
+        # Need to call Apollo (either to resolve domain from name OR refresh cache).
+        apollo_attempted += 1
+        payload = enrich_organization(domain=domain, name=name)
+        resolved_domain: Optional[str] = None
         if payload:
-            _apply_apollo_payload(profiles[d], payload)
+            resolved_domain = payload.get("discovered_domain") or domain
             apollo_ok += 1
-        else:
-            # Stamp the timestamp so we don't hammer a domain that returns nothing.
-            profiles[d].last_apollo_enriched_at = datetime.utcnow()
-    logger.info("[ENRICH] apollo: %d/%d succeeded", apollo_ok, len(apollo_to_run))
+
+        if resolved_domain:
+            # Now we have a real domain — get_or_create the row and apply payload.
+            p = get_or_create_profile(db, resolved_domain)
+            if payload:
+                _apply_apollo_payload(p, payload)
+            else:
+                p.last_apollo_enriched_at = datetime.utcnow()
+            profiles[resolved_domain] = p
+            # Index the original name too so callers without a domain can find it.
+            if name and name != resolved_domain:
+                profiles[name] = p
+        elif name:
+            # Couldn't resolve a domain; still create a row keyed by name so
+            # caller can look up partial data (e.g. company_description).
+            p = get_or_create_profile(db, name.lower())
+            p.last_apollo_enriched_at = datetime.utcnow()
+            profiles[name] = p
+
+    logger.info("[ENRICH] apollo: %d/%d enriched (others cached or unresolvable)",
+                apollo_ok, apollo_attempted)
+
+    # Build the canonical unique-domain list for downstream stages.
+    unique_domains = sorted({p.domain for p in set(profiles.values()) if p.domain})
 
     # ── Apollo job postings (per company that has an apollo_org_id).
     # Run sequentially since they're already cheap (single HTTP call) and
