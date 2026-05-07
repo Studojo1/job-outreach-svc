@@ -28,6 +28,9 @@ _SKIP_DOMAINS = {
     "crunchbase.com", "zoominfo.com", "bloomberg.com", "forbes.com",
     "twitter.com", "x.com", "facebook.com", "instagram.com", "youtube.com",
     "tracxn.com", "owler.com", "dnb.com", "craft.co",
+    "duckduckgo.com", "google.com", "bing.com", "yahoo.com",
+    "indiamart.com", "justdial.com", "quora.com", "reddit.com",
+    "moneycontrol.com", "economictimes.com", "livemint.com", "businessinsider.com",
 }
 
 
@@ -79,20 +82,27 @@ async def ddg_search(query: str, max_results: int = 5) -> list[dict]:
 
 
 def _clean_ddg_url(raw: str) -> Optional[str]:
-    """DuckDuckGo wraps URLs in a redirect — unwrap to get the real URL."""
+    """DuckDuckGo wraps URLs in a redirect — unwrap to get the real URL.
+
+    DDG HTML results use protocol-relative URLs like:
+      //duckduckgo.com/l/?uddg=https%3A%2F%2Fstripe.com%2F&rut=...
+    urlparse can't parse protocol-relative URLs without a scheme, so we
+    prepend https: before parsing.
+    """
     if not raw:
         return None
-    # DDG HTML results use //duckduckgo.com/l/?uddg=<encoded-url>
+    # Normalise protocol-relative to absolute so urlparse works correctly
+    if raw.startswith("//"):
+        raw = "https:" + raw
     if "uddg=" in raw:
         try:
-            from urllib.parse import parse_qs, urlparse
+            from urllib.parse import parse_qs as _parse_qs
             parsed = urlparse(raw)
-            uddg = parse_qs(parsed.query).get("uddg", [None])[0]
+            uddg = _parse_qs(parsed.query).get("uddg", [None])[0]
             if uddg:
                 return unquote(uddg)
         except Exception:
             pass
-    # Fallback: return as-is if it looks like a real URL
     if raw.startswith("http"):
         return raw
     return None

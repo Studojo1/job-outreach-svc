@@ -38,7 +38,7 @@ router = APIRouter(prefix="/leadstest", tags=["Leadstest"])
 
 class LeadIntelRequest(BaseModel):
     first_name: str
-    last_name: str
+    title: str
     company_name: str
 
 
@@ -105,13 +105,12 @@ async def lead_intel(
     Runs 4 DuckDuckGo searches + Google News RSS in parallel, then scrapes
     the career page if a domain is found. No API keys, no credits consumed.
     """
-    full_name = f"{req.first_name} {req.last_name}"
     company = req.company_name
 
-    logger.info("[LeadIntel] Gathering intel for %s @ %s", full_name, company)
+    logger.info("[LeadIntel] Gathering intel for %s (%s) @ %s", req.first_name, req.title, company)
 
     person_li_results, domain_results, company_li_results, news = await asyncio.gather(
-        ddg_search(f'"{full_name}" "{company}" site:linkedin.com/in', max_results=5),
+        ddg_search(f'"{req.first_name}" "{req.title}" "{company}" site:linkedin.com/in', max_results=5),
         ddg_search(f'"{company}" official website', max_results=5),
         ddg_search(f'"{company}" linkedin company', max_results=5),
         get_company_news(company, max_results=8),
@@ -129,8 +128,8 @@ async def lead_intel(
             logger.warning("[LeadIntel] Career page scrape failed for %s: %s", company_domain, exc)
 
     logger.info(
-        "[LeadIntel] Done — linkedin=%s domain=%s news=%d careers_status=%s",
-        person_linkedin_url, company_domain, len(news),
+        "[LeadIntel] Done for %s @ %s — linkedin=%s domain=%s news=%d careers_status=%s",
+        req.first_name, company, person_linkedin_url, company_domain, len(news),
         careers.get("status") if careers else "skipped",
     )
 
