@@ -112,51 +112,82 @@ def _parse_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Enhanced extraction — additional intelligence fields for leadstest
+# Enhanced extraction v2 — deep career intelligence for leadstest
 # ---------------------------------------------------------------------------
 
-_ENHANCED_SYSTEM_PROMPT = """You are a career intelligence extractor. Given a resume, extract a comprehensive structured profile.
+_ENHANCED_SYSTEM_PROMPT = """You are a senior talent strategist and career intelligence analyst. Your job is to read a resume and produce a structured intelligence brief that a sharp recruiter or founder would write after a 30-minute coffee chat — not a keyword dump, but genuine insight about who this person is, what makes them tick, and where they would thrive.
+
 Output ONLY valid JSON — no markdown, no prose, no code fences.
 
-Required JSON schema (all fields from standard extraction PLUS the new ones below):
+Required JSON schema:
 {
   "domain": "<primary field: software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
-  "subdomain": "<specific niche, e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design>",
+  "subdomain": "<specific niche: e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design | ai_engineering | gtm_strategy | revenue_operations>",
   "seniority": "<student | junior | mid | senior>",
   "experience_years": <number or null>,
   "top_skills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
   "geography": {
-    "city": "<candidate's CURRENT city from contact/header section only>",
+    "city": "<candidate's CURRENT city from contact/header section only — NOT company locations>",
     "country": "<candidate's CURRENT country>",
     "country_code": "<ISO 3166-1 alpha-2 or null>"
   },
-  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>", "<role title 4>"],
+  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>", "<role title 4>", "<role title 5>"],
   "education_level": "<high_school | bachelors | masters | phd | other | unknown>",
   "target_industries": ["<industry1>", "<industry2>"],
 
-  "achievement_density": <integer 0-100: percentage of resume bullets that include a number, percentage, team size, scale metric, or measurable outcome — e.g. "reduced latency by 40%", "led team of 5", "handled 10M requests/day" all count>,
-  "trajectory_speed": "<fast | normal | slow>: fast = multiple promotions, rapid scope growth, or level jumps within 1-2 years; slow = same title for 4+ years with no scope change",
-  "company_prestige_tier": "<tier1 | tier2 | tier3 | unknown>: tier1 = FAANG, McKinsey, Goldman, top-50 global brands (Stripe, Airbnb, Uber, etc.); tier2 = well-known regional or mid-size companies; tier3 = small or obscure companies",
-  "has_portfolio_signal": <true | false: any GitHub URL, personal website, portfolio link, or project URL is visible in the resume>,
-  "most_recent_stack": ["skill1", "skill2", "skill3"],
-  "role_progression": "<ic_only | ic_to_manager | multi_company_growth | same_company_growth>: ic_only = no management; ic_to_manager = became a manager; multi_company_growth = changed companies for higher roles; same_company_growth = grew within one company",
-  "strongest_hook": "<exactly 1 sentence starting with a strong verb or metric: the single most impressive, specific, concrete thing about this candidate's background — prefer quantified outcomes over vague descriptions>",
-  "candidate_pitch": "<exactly 2 sentences: what makes this candidate compelling for cold outreach? What type of team or hiring manager would find this profile exciting?>"
+  "achievement_density": <integer 0-100: % of resume bullets that contain a real number, metric, scale signal, or measurable outcome — "reduced latency by 40%", "led team of 5", "10M requests/day" all count; "responsible for X" or "helped with Y" do NOT count>,
+  "trajectory_speed": "<fast | normal | slow>: fast = promotions, rapid scope growth, or title jumps within 1-2 years; slow = same title 4+ years with no evident scope change",
+  "company_prestige_tier": "<tier1 | tier2 | tier3 | unknown>: tier1 = FAANG, McKinsey, Goldman Sachs, Stripe, Airbnb, Uber, top-20 global brands; tier2 = well-known regional/mid-size companies with 200+ employees; tier3 = small, early-stage, or obscure companies",
+  "has_portfolio_signal": <true | false: any GitHub URL, personal website, portfolio link, Behance, Dribbble, or project URL visible in the resume>,
+  "most_recent_stack": ["<tool or skill from their last/current role — max 5>"],
+  "role_progression": "<ic_only | ic_to_manager | multi_company_growth | same_company_growth>",
+
+  "archetype_label": "<the single most accurate compound role archetype for this person — NOT a job title from a job board, but a label that describes the intersection of their skills, working style, and career pattern. Examples: 'Founding Product Engineer', 'AI-Native Founder's Office Hire', 'Zero-to-One Growth Systems Builder', 'Applied AI Solutions Architect', 'GTM Automation Engineer', 'Full-Stack AI Builder', 'Product-Led Growth Operator', 'Consulting-to-Startup Generalist'. Never output a generic single-function title like 'Software Engineer' or 'Product Manager' unless the resume truly shows no compound pattern.>",
+  "archetype_reason": "<2-3 sentences explaining exactly WHY this archetype fits — must reference specific companies, roles, projects, or skill combinations from the actual resume. Bad: 'Has diverse skills and experience.' Good: 'Built and shipped production AI voice systems at FourFrontAI for real estate and healthcare clients while simultaneously owning growth and scaling Studojo to 2,500+ users — that rare combination of zero-to-one technical delivery AND commercial distribution instinct is the exact DNA that early-stage AI startups need in a founding-team-adjacent hire.'>",
+  "company_stage_fit": ["<array of best-fit company stages based on resume evidence: pre-seed | seed | series-a | series-b | growth | enterprise — include all that genuinely fit, not just one>"],
+  "company_type_best_fit": ["<array of company types where this profile would thrive: ai-native-startup | automation-agency | vertical-saas | b2b-saas | marketplace | deep-tech | creator-tech | gtm-tools | consulting-firm | fintech | enterprise-software | media-tech | edtech | healthtech>"],
+  "company_type_avoid": ["<array of company/environment types that would be a POOR fit — be honest and specific. Examples: big-tech-enterprise | deep-research-lab | slow-moving-mnc | hyper-process-consulting | large-structured-org | pure-execution-role. These anti-fit signals are as valuable as the positive ones.>"],
+  "execution_style": "<builder-first | strategist-first | operator-first | hybrid>: builder-first = ships things, makes things work; strategist-first = frames problems, designs systems; operator-first = runs and scales existing things; hybrid = genuinely balances 2+ of these",
+  "ambiguity_tolerance": "<high | medium | low>: high = thrives with minimal direction, figures it out; low = needs clear specs and structure to do their best work",
+  "ownership_orientation": "<end-to-end | scoped | collaborative>: end-to-end = owns outcomes from concept to delivery; scoped = executes well within defined boundaries; collaborative = strong in team-dependent environments",
+  "breadth_vs_depth": "<generalist | specialist | T-shaped>: generalist = wide range of domains with no single deep spike; specialist = deep single-domain expertise; T-shaped = one clear deep domain with meaningful adjacent breadth",
+  "distribution_signal": <true | false: true only if the resume shows EVIDENCE of growth hacking, content creation, community building, client acquisition, user acquisition, sales, GTM, or business development IN ADDITION TO technical or analytical skills. This 'builds AND distributes' pattern is rare — flag it when genuinely present.>,
+  "vertical_exposure": ["<industries where this person has actual delivery experience from the resume — NOT aspirational interests. Be specific: real-estate-tech | healthcare-ai | career-tech | voice-ai | recruiting-tech | fintech | edtech | e-commerce | b2b-saas | retail | logistics | gaming | media | climate-tech>"],
+  "strongest_hook": "<exactly 1 sentence starting with a strong verb or metric: the single most impressive, specific, concrete thing about this candidate. Prefer quantified outcomes. Bad: 'Experienced in AI and product.' Good: 'Co-built a career-tech platform to 2,500+ signups and 200+ student placements within months using AI-powered outreach tools — while concurrently delivering production AI systems for Microsoft-adjacent clients.'",
+  "candidate_pitch": "<exactly 2 sentences from the recruiter's perspective: (1) what makes this profile genuinely compelling and rare, (2) what specific type of team or company would be most excited to have them. Write for a founder or hiring manager, not HR.>"
 }
 
-Rules:
-- achievement_density: count only bullets that contain real numbers or metrics; generic responsibility bullets ("responsible for", "helped with") do not count
-- strongest_hook: must be concrete and specific — bad: "experienced software engineer"; good: "Built a rate-limiter handling 400K req/s deployed at a Series B fintech"
-- candidate_pitch: write from the perspective of what a recruiter would notice, not generic praise
-- Use null for fields you cannot determine
-- Respond with JSON only"""
+Field-by-field rules:
+- archetype_label: compound archetypes only. Think: what IS this person, not what do they apply for. "Founding Product Engineer" is better than "Product Manager + Software Engineer". If the profile is truly single-function, name it precisely but don't force a compound label.
+- archetype_reason: cite the resume. Name actual companies, quantified outcomes, or specific skill combinations. Never write generic sentences.
+- company_stage_fit: infer from evidence — startup experience + fast trajectory + broad ownership = ["seed", "series-a"]; FAANG/tier1 + deep specialization = ["series-b", "growth", "enterprise"]. Be honest — NOT everyone fits early-stage.
+- company_type_avoid: this is critical. A builder-first generalist should avoid "deep-research-lab". A high-ambiguity-tolerance person should avoid "large-structured-org". Be specific. Don't leave this empty.
+- distribution_signal: only true if there is real evidence in the resume — not just because the person works in tech or did one user interview. Actual growth numbers, client acquisition, community building, or content distribution count.
+- vertical_exposure: list only industries where the resume shows actual work done — not industries the candidate is "interested in". If they built an AI product for real estate, include "real-estate-tech". If they just listed "interested in fintech" with no experience, exclude it.
+- strongest_hook: must be a sentence a recruiter would actually use to pitch this candidate. Concrete, specific, quotable.
+- candidate_pitch: write as if briefing a founder. Sentence 1: what's genuinely rare or impressive here. Sentence 2: who specifically would get excited about this profile.
+- likely_roles: 4-6 specific realistic titles from the clusters below, chosen for THIS candidate's actual background. Prefer compound or specialised titles (e.g. "AI Agent Engineer" not "AI Engineer", "GTM Systems Builder" not "Marketing Manager").
+- Use null for fields you cannot determine from the resume.
+- Respond with JSON only.
+
+Role cluster reference (use when choosing likely_roles):
+Technology: Software Engineer, Backend Developer, Frontend Developer, Full-Stack Developer, Mobile Developer, DevOps Engineer, Cloud Engineer
+AI/ML: ML Engineer, AI Engineer, Applied AI Engineer, LLM Engineer, GenAI Engineer, AI Agent Engineer, Speech/ASR Engineer, NLP Engineer, Computer Vision Engineer, Research Scientist
+Data: Data Analyst, Data Scientist, Analytics Engineer, BI Analyst, Product Analyst, AI/ML Ops Engineer
+GTM/Growth: Growth Marketing Manager, Performance Marketer, GTM Systems Builder, Product Marketing Manager, SEO Specialist, Growth Hacker
+Sales: SDR, Account Executive, Business Development Rep, Enterprise Sales Associate, Partnerships Manager
+Product: Product Manager, Associate PM, Product Analyst, AI Product Manager, Founding PM
+Design: UX Designer, Product Designer, UI Designer, UX Researcher
+Finance: Financial Analyst, IB Analyst, FP&A Analyst, Equity Research Analyst, VC Analyst
+Operations: Operations Analyst, Project Manager, Supply Chain Analyst, Business Operations Associate, Founder's Office
+Consulting: Management Consultant (Analyst), Strategy Analyst, Associate Consultant"""
 
 
 def extract_enhanced_resume_profile(resume_text: str) -> dict:
-    """Run enhanced LLM extraction returning 8 additional intelligence fields.
+    """Run enhanced LLM v2 extraction — 20+ intelligence fields including archetype, company fit, work style DNA.
 
-    Intended for the leadstest comparison tool. Not stored to DB — returned
-    directly to the caller for display purposes.
+    Intended for the leadstest comparison tool and production quiz personalization.
+    Not stored to DB from here — returned directly to the caller.
     """
     from core.config import settings
     from openai import AzureOpenAI
@@ -167,7 +198,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
         api_version=settings.AZURE_OPENAI_API_VERSION,
     )
 
-    trimmed = (resume_text or "")[:4000]  # slightly more context for richer extraction
+    trimmed = (resume_text or "")[:5000]  # more context for richer intelligence extraction
 
     response = client.chat.completions.create(
         model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
@@ -176,7 +207,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
         temperature=0,
-        max_tokens=700,
+        max_tokens=1200,
     )
 
     raw = response.choices[0].message.content or ""

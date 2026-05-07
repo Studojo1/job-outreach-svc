@@ -336,7 +336,8 @@ async def candidate_chat_stream(
     q_def = sequence[q_index]
     prev_key = sequence[q_index - 1]["key"] if q_index > 0 else None
     is_first = (request.message == "__start__" or q_index == 0)
-    msg_text = build_message(q_def, prev_key, is_first)
+    prev_answer = answers.get(prev_key) if prev_key else None
+    msg_text = build_message(q_def, prev_key, is_first, prev_answer=prev_answer, resume_profile=resume_profile)
     mcq = q_def.get("mcq")
 
     payload = {
