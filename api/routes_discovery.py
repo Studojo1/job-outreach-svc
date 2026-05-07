@@ -3,12 +3,12 @@
 import asyncio
 import logging
 import time
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 
-from database.session import get_db
+from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
 from services.lead_discovery.lead_collector_service import collect_leads, collect_dream_company_leads
 from services.shared.schemas.filter_schema import LeadFilter
@@ -246,9 +246,39 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     return count
 
 
+def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
+    """Background-task wrapper that opens its own DB session for scoring.
+
+    Runs after the HTTP response has been sent so the client isn't blocked
+    by the slow company-enrichment + LLM-justification pipeline.
+    """
+    db = SessionLocal()
+    try:
+        candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+        if not candidate:
+            logger.warning("[SCORE_BG] candidate %d not found", candidate_id)
+            return
+        scored_count = _score_candidate_leads(db, candidate)
+        logger.info("[SCORE_BG] candidate %d: scored %d leads", candidate_id, scored_count)
+
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, user_id, "leads_generated", candidate_id=candidate_id)
+
+        from core.analytics import capture as _capture
+        _capture("lead_scoring_completed", user_id, {
+            "candidate_id": candidate_id,
+            "leads_scored": scored_count,
+        })
+    except Exception as e:
+        logger.error("[SCORE_BG] failed for candidate %d: %s", candidate_id, e, exc_info=True)
+    finally:
+        db.close()
+
+
 @router.post("/search")
 async def search_leads(
     request: DiscoveryRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -397,32 +427,24 @@ async def search_leads(
             except Exception as dream_err:
                 logger.error(f"[LeadSearch] Dream company search failed (non-fatal): {dream_err}", exc_info=True)
 
-        # Score all newly collected leads
-        scored_count = 0
-        try:
-            scored_count = await asyncio.to_thread(_score_candidate_leads, db, candidate)
-            logger.info(f"[LeadSearch] Leads scored: {scored_count}")
-        except Exception as score_err:
-            logger.error(f"[LeadSearch] Scoring failed (non-fatal): {score_err}", exc_info=True)
-
         t_end = time.perf_counter()
         duration = round(t_end - t_start, 1)
-        logger.info(f"[LeadSearch] Pipeline complete: {duration*1000:.0f}ms total, leads={count}, scored={scored_count}")
+        logger.info(f"[LeadSearch] Collection complete in {duration*1000:.0f}ms — leads={count}; dispatching scoring to background")
         capture("lead_discovery_completed", str(current_user.id), {
             "candidate_id": request.candidate_id,
             "leads_found": count,
-            "leads_scored": scored_count,
             "dream_company_leads": dream_count,
-            "duration_seconds": duration,
+            "collection_duration_seconds": duration,
         })
 
-        # Funnel: mark stage 4 if any leads were actually found.
+        # Scoring (company enrichment + LLM justification) runs in the background
+        # so the HTTP response returns before the 300s ingress timeout.
         if count > 0:
-            from services.stage_tracking import safe_mark_stage
-            safe_mark_stage(db, str(current_user.id), "leads_generated",
-                            candidate_id=request.candidate_id)
+            background_tasks.add_task(
+                _score_candidate_leads_bg, candidate.id, str(current_user.id)
+            )
 
-        return {"status": "success", "leads_collected": count, "leads_scored": scored_count}
+        return {"status": "success", "leads_collected": count, "leads_scored": 0, "scoring_async": True}
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
