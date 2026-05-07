@@ -6,10 +6,9 @@ No DB writes — all endpoints are read-only for testing purposes.
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import httpx
-import requests
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
@@ -22,40 +21,25 @@ from services.candidate_intelligence.resume_intelligence import (
     extract_enhanced_resume_profile,
 )
 from services.hiring_signals.career_page_scraper import scrape_career_page
+from services.hiring_signals.ddg_search import (
+    ddg_search,
+    extract_linkedin_profile,
+    extract_linkedin_company,
+    extract_company_domain,
+)
+from services.hiring_signals.news_search import get_company_news
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/leadstest", tags=["Leadstest"])
 
-APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
-
-# Fields we know are in the response but currently ignored
-_NEW_PERSON_FIELDS = [
-    "headline", "seniority", "departments", "subdepartments", "functions",
-    "time_zone", "email_domain_catchall", "photo_url", "github_url",
-    "twitter_url", "facebook_url", "extrapolated_email_confidence",
-]
-_NEW_ORG_FIELDS = [
-    "website_url", "primary_domain", "linkedin_url", "founded_year",
-    "alexa_ranking", "annual_revenue", "annual_revenue_printed",
-    "total_funding", "total_funding_printed",
-    "latest_funding_round_date", "latest_funding_stage",
-    "organization_headcount_six_month_growth",
-    "organization_headcount_twelve_month_growth",
-    "organization_headcount_twenty_four_month_growth",
-    "technology_names", "keywords", "industries", "secondary_industries",
-]
-
 
 # ── Request / Response Models ────────────────────────────────────────────────
 
-class ApolloInspectRequest(BaseModel):
+class LeadIntelRequest(BaseModel):
     first_name: str
-    last_name: Optional[str] = None
-    title: Optional[str] = None
-    company: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    apollo_id: Optional[str] = None
+    last_name: str
+    company_name: str
 
 
 class CareerPageRequest(BaseModel):
@@ -109,119 +93,54 @@ async def analyze_resume(
     }
 
 
-# ── Tool 2: Apollo Data Inspector ────────────────────────────────────────────
+# ── Tool 2: Lead Intelligence (DuckDuckGo + Google News RSS) ─────────────────
 
-@router.post("/apollo-inspect")
-async def apollo_inspect(
-    req: ApolloInspectRequest,
+@router.post("/lead-intel")
+async def lead_intel(
+    req: LeadIntelRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """Call Apollo People Match and expose the full response, split into
-    currently-extracted vs currently-ignored fields."""
-    if not settings.APOLLO_API_KEY:
-        raise HTTPException(status_code=500, detail="Apollo API key not configured")
+    """Given first name, last name, company — gather all public intelligence for free.
 
-    payload: Dict[str, Any] = {}
-    if req.apollo_id:
-        payload["id"] = req.apollo_id
-    if req.first_name:
-        payload["first_name"] = req.first_name
-    if req.last_name:
-        payload["last_name"] = req.last_name
-    if req.title:
-        payload["title"] = req.title
-    if req.company:
-        payload["organization_name"] = req.company
-    if req.linkedin_url:
-        payload["linkedin_url"] = req.linkedin_url
+    Runs 4 DuckDuckGo searches + Google News RSS in parallel, then scrapes
+    the career page if a domain is found. No API keys, no credits consumed.
+    """
+    full_name = f"{req.first_name} {req.last_name}"
+    company = req.company_name
 
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Key": settings.APOLLO_API_KEY,
-    }
+    logger.info("[LeadIntel] Gathering intel for %s @ %s", full_name, company)
 
-    try:
-        resp = requests.post(APOLLO_MATCH_URL, json=payload, headers=headers, timeout=15)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Apollo request failed: {e}")
+    person_li_results, domain_results, company_li_results, news = await asyncio.gather(
+        ddg_search(f'"{full_name}" "{company}" site:linkedin.com/in', max_results=5),
+        ddg_search(f'"{company}" official website', max_results=5),
+        ddg_search(f'"{company}" linkedin company', max_results=5),
+        get_company_news(company, max_results=8),
+    )
 
-    if not resp.ok:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Apollo API error: {resp.text[:300]}",
-        )
+    person_linkedin_url = extract_linkedin_profile(person_li_results)
+    company_domain = extract_company_domain(domain_results)
+    company_linkedin_url = extract_linkedin_company(company_li_results)
 
-    data = resp.json()
-    person = data.get("person") or {}
-    org = person.get("organization") or {}
+    careers = None
+    if company_domain:
+        try:
+            careers = await scrape_career_page(company_domain, company)
+        except Exception as exc:
+            logger.warning("[LeadIntel] Career page scrape failed for %s: %s", company_domain, exc)
 
-    if not person:
-        raise HTTPException(status_code=404, detail="No person found in Apollo for these inputs")
-
-    # ── Currently extracted (what we save to Lead model today) ──
-    currently_extracted = {
-        "name": person.get("name") or f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
-        "email": person.get("email"),
-        "email_status": person.get("email_status"),
-        "title": person.get("title"),
-        "linkedin_url": person.get("linkedin_url"),
-        "city": person.get("city"),
-        "state": person.get("state"),
-        "country": person.get("country"),
-        "company": org.get("name"),
-        "industry": org.get("industry"),
-        "company_size": _employee_count_to_range(org.get("estimated_num_employees")),
-        "company_description": (org.get("short_description") or "")[:300] or None,
-    }
-
-    # ── Hidden person fields — available but unused ──
-    hidden_person = {k: person.get(k) for k in _NEW_PERSON_FIELDS}
-
-    # ── Employment history — clean format ──
-    employment_history = []
-    for job in (person.get("employment_history") or []):
-        employment_history.append({
-            "title": job.get("title"),
-            "company": job.get("organization_name"),
-            "start": _fmt_date(job.get("start_date")),
-            "end": _fmt_date(job.get("end_date")),
-            "current": job.get("current", False),
-        })
-
-    # ── Hidden org fields — available but unused ──
-    hidden_company_raw = {k: org.get(k) for k in _NEW_ORG_FIELDS}
-
-    # Format growth rates as percentages for readability
-    hidden_company = dict(hidden_company_raw)
-    for growth_key in [
-        "organization_headcount_six_month_growth",
-        "organization_headcount_twelve_month_growth",
-        "organization_headcount_twenty_four_month_growth",
-    ]:
-        val = hidden_company.get(growth_key)
-        if isinstance(val, float):
-            hidden_company[growth_key] = f"{val * 100:.1f}%"
-
-    # Sample tech stack (full list can be huge)
-    tech_names = org.get("technology_names") or []
-    hidden_company["technology_names_count"] = len(tech_names)
-    hidden_company["technology_names_sample"] = tech_names[:15]
-    hidden_company.pop("technology_names", None)
-
-    keywords = org.get("keywords") or []
-    hidden_company["keywords_sample"] = keywords[:15]
-    hidden_company.pop("keywords", None)
-
-    # ── Derived scoring signals ──
-    scoring_signals = _compute_scoring_signals(person, org)
+    logger.info(
+        "[LeadIntel] Done — linkedin=%s domain=%s news=%d careers_status=%s",
+        person_linkedin_url, company_domain, len(news),
+        careers.get("status") if careers else "skipped",
+    )
 
     return {
-        "status": "success",
-        "currently_extracted": currently_extracted,
-        "hidden_person_fields": hidden_person,
-        "hidden_person_career": employment_history,
-        "hidden_company_fields": hidden_company,
-        "scoring_signals_unlocked": scoring_signals,
+        "person_linkedin_url": person_linkedin_url,
+        "person_linkedin_search_results": person_li_results[:3],
+        "company_domain": company_domain,
+        "company_linkedin_url": company_linkedin_url,
+        "funding_news": news,
+        "careers": careers,
     }
 
 
@@ -296,123 +215,6 @@ async def linkedin_enrich(
         "activity_signal": _activity_signal(len(activities)),
         "raw_field_count": len(data),
     }
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _employee_count_to_range(n: Optional[int]) -> Optional[str]:
-    if n is None:
-        return None
-    if n <= 10:
-        return "1-10"
-    if n <= 50:
-        return "11-50"
-    if n <= 200:
-        return "51-200"
-    if n <= 1000:
-        return "201-1000"
-    if n <= 5000:
-        return "1001-5000"
-    return "5001+"
-
-
-def _fmt_date(d: Optional[str]) -> Optional[str]:
-    if not d:
-        return None
-    # Apollo dates look like "2025-01-01T00:00:00.000+00:00" — trim to YYYY-MM
-    return d[:7] if len(d) >= 7 else d
-
-
-def _compute_scoring_signals(person: dict, org: dict) -> dict:
-    signals: Dict[str, Any] = {}
-
-    # Hiring urgency from headcount growth
-    growth_12m = org.get("organization_headcount_twelve_month_growth")
-    growth_6m = org.get("organization_headcount_six_month_growth")
-    funding_date = org.get("latest_funding_round_date")
-
-    urgency_score = 0
-    urgency_reasons = []
-
-    if isinstance(growth_12m, float):
-        pct = growth_12m * 100
-        if pct >= 20:
-            urgency_score += 40
-            urgency_reasons.append(f"{pct:.0f}% headcount growth in 12M")
-        elif pct >= 10:
-            urgency_score += 25
-            urgency_reasons.append(f"{pct:.0f}% headcount growth in 12M")
-        elif pct > 0:
-            urgency_score += 10
-            urgency_reasons.append(f"{pct:.0f}% headcount growth in 12M")
-        elif pct < 0:
-            urgency_score -= 20
-            urgency_reasons.append(f"headcount declined {abs(pct):.0f}% in 12M")
-
-    if isinstance(growth_6m, float) and growth_6m >= 0.05:
-        urgency_score += 15
-        urgency_reasons.append(f"{growth_6m * 100:.0f}% growth in last 6M")
-
-    if funding_date:
-        # Recent funding (within 12 months) is a strong hiring signal
-        try:
-            from datetime import datetime, timezone
-            funded = datetime.fromisoformat(funding_date.replace("Z", "+00:00"))
-            months_ago = (datetime.now(timezone.utc) - funded).days / 30
-            if months_ago <= 6:
-                urgency_score += 25
-                urgency_reasons.append(f"funded {months_ago:.0f}M ago ({org.get('latest_funding_stage')})")
-            elif months_ago <= 12:
-                urgency_score += 15
-                urgency_reasons.append(f"funded {months_ago:.0f}M ago ({org.get('latest_funding_stage')})")
-        except Exception:
-            pass
-
-    signals["hiring_urgency_score"] = min(100, max(0, urgency_score))
-    signals["hiring_urgency_reason"] = "; ".join(urgency_reasons) if urgency_reasons else "no growth signals found"
-
-    # Email reliability
-    catchall = person.get("email_domain_catchall")
-    if catchall is True:
-        signals["email_reliability"] = "low"
-        signals["email_reliability_reason"] = "catchall domain — email may bounce"
-    elif catchall is False:
-        signals["email_reliability"] = "high"
-        signals["email_reliability_reason"] = "dedicated mailbox"
-    else:
-        signals["email_reliability"] = "unknown"
-        signals["email_reliability_reason"] = "catchall status unknown"
-
-    # Career prestige from employment history
-    tier1_companies = {
-        "google", "meta", "amazon", "apple", "microsoft", "netflix", "openai",
-        "stripe", "airbnb", "uber", "lyft", "twitter", "linkedin", "salesforce",
-        "adobe", "oracle", "ibm", "intel", "nvidia", "qualcomm", "goldman sachs",
-        "morgan stanley", "mckinsey", "bcg", "bain", "deloitte", "accenture",
-        "goldman", "jpmorgan", "jp morgan", "jane street", "two sigma", "citadel",
-        "databricks", "snowflake", "palantir", "figma", "notion", "atlassian",
-        "shopify", "spotify", "bytedance", "tiktok", "flipkart", "swiggy", "zomato",
-        "razorpay", "phonepe", "paytm", "meesho", "ola", "cred", "dream11",
-        "infosys", "tcs", "wipro", "hcl", "capgemini",
-    }
-    emp_history = person.get("employment_history") or []
-    prestige_companies = []
-    for job in emp_history:
-        company_name = (job.get("organization_name") or "").lower()
-        if any(t in company_name for t in tier1_companies):
-            prestige_companies.append(job.get("organization_name"))
-
-    if prestige_companies:
-        signals["career_prestige_tier"] = "tier1"
-        signals["career_prestige_reason"] = ", ".join(dict.fromkeys(prestige_companies))
-    elif emp_history:
-        signals["career_prestige_tier"] = "tier2_or_lower"
-        signals["career_prestige_reason"] = "no tier-1 companies detected"
-    else:
-        signals["career_prestige_tier"] = "unknown"
-        signals["career_prestige_reason"] = "no employment history available"
-
-    return signals
 
 
 def _activity_signal(count: int) -> str:
