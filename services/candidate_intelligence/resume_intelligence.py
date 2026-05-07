@@ -162,7 +162,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
     from openai import AzureOpenAI
 
     client = AzureOpenAI(
-        api_key=settings.AZURE_OPENAI_API_KEY,
+        api_key=settings.AZURE_OPENAI_KEY,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
         api_version=settings.AZURE_OPENAI_API_VERSION,
     )
@@ -170,7 +170,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
     trimmed = (resume_text or "")[:4000]  # slightly more context for richer extraction
 
     response = client.chat.completions.create(
-        model=settings.AZURE_OPENAI_DEPLOYMENT,
+        model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
         messages=[
             {"role": "system", "content": _ENHANCED_SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
