@@ -112,6 +112,78 @@ def _parse_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Enhanced extraction — additional intelligence fields for leadstest
+# ---------------------------------------------------------------------------
+
+_ENHANCED_SYSTEM_PROMPT = """You are a career intelligence extractor. Given a resume, extract a comprehensive structured profile.
+Output ONLY valid JSON — no markdown, no prose, no code fences.
+
+Required JSON schema (all fields from standard extraction PLUS the new ones below):
+{
+  "domain": "<primary field: software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
+  "subdomain": "<specific niche, e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design>",
+  "seniority": "<student | junior | mid | senior>",
+  "experience_years": <number or null>,
+  "top_skills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
+  "geography": {
+    "city": "<candidate's CURRENT city from contact/header section only>",
+    "country": "<candidate's CURRENT country>",
+    "country_code": "<ISO 3166-1 alpha-2 or null>"
+  },
+  "likely_roles": ["<role title 1>", "<role title 2>", "<role title 3>", "<role title 4>"],
+  "education_level": "<high_school | bachelors | masters | phd | other | unknown>",
+  "target_industries": ["<industry1>", "<industry2>"],
+
+  "achievement_density": <integer 0-100: percentage of resume bullets that include a number, percentage, team size, scale metric, or measurable outcome — e.g. "reduced latency by 40%", "led team of 5", "handled 10M requests/day" all count>,
+  "trajectory_speed": "<fast | normal | slow>: fast = multiple promotions, rapid scope growth, or level jumps within 1-2 years; slow = same title for 4+ years with no scope change",
+  "company_prestige_tier": "<tier1 | tier2 | tier3 | unknown>: tier1 = FAANG, McKinsey, Goldman, top-50 global brands (Stripe, Airbnb, Uber, etc.); tier2 = well-known regional or mid-size companies; tier3 = small or obscure companies",
+  "has_portfolio_signal": <true | false: any GitHub URL, personal website, portfolio link, or project URL is visible in the resume>,
+  "most_recent_stack": ["skill1", "skill2", "skill3"],
+  "role_progression": "<ic_only | ic_to_manager | multi_company_growth | same_company_growth>: ic_only = no management; ic_to_manager = became a manager; multi_company_growth = changed companies for higher roles; same_company_growth = grew within one company",
+  "strongest_hook": "<exactly 1 sentence starting with a strong verb or metric: the single most impressive, specific, concrete thing about this candidate's background — prefer quantified outcomes over vague descriptions>",
+  "candidate_pitch": "<exactly 2 sentences: what makes this candidate compelling for cold outreach? What type of team or hiring manager would find this profile exciting?>"
+}
+
+Rules:
+- achievement_density: count only bullets that contain real numbers or metrics; generic responsibility bullets ("responsible for", "helped with") do not count
+- strongest_hook: must be concrete and specific — bad: "experienced software engineer"; good: "Built a rate-limiter handling 400K req/s deployed at a Series B fintech"
+- candidate_pitch: write from the perspective of what a recruiter would notice, not generic praise
+- Use null for fields you cannot determine
+- Respond with JSON only"""
+
+
+def extract_enhanced_resume_profile(resume_text: str) -> dict:
+    """Run enhanced LLM extraction returning 8 additional intelligence fields.
+
+    Intended for the leadstest comparison tool. Not stored to DB — returned
+    directly to the caller for display purposes.
+    """
+    from core.config import settings
+    from openai import AzureOpenAI
+
+    client = AzureOpenAI(
+        api_key=settings.AZURE_OPENAI_API_KEY,
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
+    )
+
+    trimmed = (resume_text or "")[:4000]  # slightly more context for richer extraction
+
+    response = client.chat.completions.create(
+        model=settings.AZURE_OPENAI_DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": _ENHANCED_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Resume:\n{trimmed}"},
+        ],
+        temperature=0,
+        max_tokens=700,
+    )
+
+    raw = response.choices[0].message.content or ""
+    return _parse_json(raw)
+
+
+# ---------------------------------------------------------------------------
 # Background task wrapper — safe, logs errors, never raises
 # ---------------------------------------------------------------------------
 
