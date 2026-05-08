@@ -332,6 +332,11 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
         jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
 
+        logger.info(
+            "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
+            campaign_id, c.target_role, c.target_locations, c.target_industries, c.target_keywords,
+        )
+
         people = await search_linkedin_leads(
             li_at=li_at,
             jsessionid=jsessionid,
@@ -342,8 +347,10 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
             limit=60,
         )
 
+        logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
+
         if not people:
-            logger.warning("No leads found for campaign %d", campaign_id)
+            logger.warning("No leads found for campaign %d — check cookies validity and search params", campaign_id)
             return
 
         # Generate personalised connection notes for each lead

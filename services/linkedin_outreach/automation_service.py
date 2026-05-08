@@ -214,53 +214,49 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search LinkedIn for people matching ICP via Voyager search API."""
-    from urllib.parse import urlencode, quote
+    """Search LinkedIn for people via the stable Voyager REST blended-search endpoint.
 
-    query_parts = [f"keywords:{quote(target_role)}"]
+    Uses /voyager/api/search/blended (same endpoint as linkedin-api library) instead
+    of the GraphQL endpoint whose queryId hash changes with every LinkedIn deploy.
+    """
+    keyword_str = target_role
     if keywords:
-        query_parts[0] = f"keywords:{quote(target_role + ' ' + keywords)}"
+        keyword_str = f"{target_role} {keywords}"
 
-    filters = "List()"
-    filter_parts = []
+    filter_parts = ["resultType->List(PEOPLE)"]
     if locations:
-        geo = ",".join(quote(f"(text:{loc})") for loc in locations[:3])
-        filter_parts.append(f"geoUrn->List({geo})")
+        locs = ",".join(f"(text:{loc})" for loc in locations[:3])
+        filter_parts.append(f"geoUrn->List({locs})")
     if industries:
-        ind = ",".join(quote(f"(text:{i})") for i in industries[:3])
-        filter_parts.append(f"industry->List({ind})")
-    filter_parts.append("resultType->List(PEOPLE)")
-    if filter_parts:
-        filters = f"List({','.join(filter_parts)})"
+        inds = ",".join(f"(text:{i})" for i in industries[:3])
+        filter_parts.append(f"industry->List({inds})")
+
+    filters_str = f"List({','.join(filter_parts)})"
 
     params = {
         "count": min(limit, 49),
-        "filters": filters,
+        "filters": filters_str,
+        "keywords": keyword_str,
         "origin": "GLOBAL_SEARCH_HEADER",
         "q": "all",
         "start": 0,
-        "queryContext": "List(spellCorrectionEnabled->true)",
-        "includeWebMetadata": "true",
+        "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
     }
 
-    keywords_part = ",".join(query_parts)
-    url = (
-        f"https://www.linkedin.com/voyager/api/graphql"
-        f"?variables=(start:0,origin:GLOBAL_SEARCH_HEADER,"
-        f"query:({keywords_part},flagshipSearchIntent:SEARCH_SRP,"
-        f"queryParameters:{filters},includeFiltersInResponse:false))"
-        f"&queryId=voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0"
-    )
+    from urllib.parse import urlencode
+    url = "https://www.linkedin.com/voyager/api/search/blended?" + urlencode(params)
 
     people = []
     try:
-        async with httpx.AsyncClient(timeout=25, **_proxy(session_id)) as client:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True, **_proxy(session_id)) as client:
             res = await client.get(url, headers=_headers(li_at, jsessionid))
+        logger.info("Lead search status=%d url=%s", res.status_code, url)
         if res.status_code != 200:
-            logger.warning("Search returned %d", res.status_code)
+            logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
             return []
         data = res.json()
         people = _parse_search_results(data)
+        logger.info("Lead search parsed %d people", len(people))
     except Exception as e:
         logger.error("search_linkedin_leads failed: %s", e)
 
@@ -268,35 +264,72 @@ async def search_linkedin_leads(
 
 
 def _parse_search_results(data: dict) -> list[dict]:
-    people = []
-    included = data.get("data", {}).get("included", data.get("included", []))
+    """Parse /voyager/api/search/blended response.
 
-    entity_map = {}
+    The response shape is:
+      { "included": [...entities...],
+        "data": { "elements": [...clusters...] } }
+
+    Each cluster element has a "elements" list of search hits with
+    $type == "com.linkedin.voyager.search.SearchProfile".
+    We also build an entity map from "included" to look up profile details.
+    """
+    people = []
+    included = data.get("included", [])
+
+    # Build URN → entity lookup for richer profile data
+    entity_map: dict[str, dict] = {}
     for entity in included:
         urn = entity.get("entityUrn", "")
         if urn:
             entity_map[urn] = entity
 
-    elements = data.get("data", {}).get("data", {}).get(
-        "searchDashClustersByAll", {}
-    ).get("elements", [])
+    clusters = data.get("data", {}).get("elements", [])
+    for cluster in clusters:
+        for hit in cluster.get("elements", []):
+            # Each hit has a navigationUrl and may have a profile ref
+            hit_type = hit.get("$type", "")
+            if "SearchProfile" not in hit_type and "MiniProfile" not in hit_type:
+                # Also accept top-level hits that have a publicIdentifier
+                pass
 
-    for cluster in elements:
-        items = cluster.get("items", [])
-        for item in items:
-            result = item.get("item", {}).get("entityResult", {})
-            if not result:
+            nav_url = hit.get("navigationUrl", "")
+            # Resolve the actual profile entity if referenced
+            target_urn = hit.get("targetUrn", "") or hit.get("entityUrn", "")
+            profile = entity_map.get(target_urn, hit)
+
+            first = profile.get("firstName", {})
+            last = profile.get("lastName", {})
+            if isinstance(first, dict):
+                first = first.get("text", "")
+            if isinstance(last, dict):
+                last = last.get("text", "")
+            name = f"{first} {last}".strip() or hit.get("title", {}).get("text", "")
+
+            headline = profile.get("occupation", "") or hit.get("primarySubtitle", {}).get("text", "")
+
+            # company from included MiniCompany or subtitle
+            company = ""
+            company_urn = profile.get("currentCompany", "")
+            if company_urn and company_urn in entity_map:
+                company = entity_map[company_urn].get("name", "")
+            if not company:
+                company = hit.get("secondarySubtitle", {}).get("text", "")
+
+            public_id = profile.get("publicIdentifier", "")
+            if not nav_url and public_id:
+                nav_url = f"https://www.linkedin.com/in/{public_id}/"
+
+            if not name or not nav_url:
                 continue
-            title = result.get("title", {}).get("text", "")
-            subtitle = result.get("primarySubtitle", {}).get("text", "")
-            secondary = result.get("secondarySubtitle", {}).get("text", "")
-            nav_url = result.get("navigationUrl", "")
-            if not title or not nav_url:
+
+            if "/in/" not in nav_url:
                 continue
+
             people.append({
-                "name": title,
-                "headline": subtitle,
-                "company": secondary,
+                "name": name,
+                "headline": headline,
+                "company": company,
                 "profile_url": nav_url.split("?")[0],
                 "profile_image_url": None,
             })
