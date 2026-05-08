@@ -395,29 +395,27 @@ async def search_leads(
             for seg in filters.target_segments:
                 logger.info(f"[LeadSearch]   Segment: size={seg.company_size_range}, titles={seg.person_titles[:5]}{'...' if len(seg.person_titles) > 5 else ''}")
 
-        t_filter = time.perf_counter()
-        logger.info(f"[LeadSearch] Filter generation: {(t_filter - t_start)*1000:.0f}ms")
+            # LLM quality probe — lives inside the else block so prefs/preferred_roles
+            # are always defined. Pre-built filters (request.filters path) skip the probe.
+            from services.lead_discovery.lead_collector_service import quality_probe_loop
+            candidate_prefs_for_probe = {
+                "company_stage": [prefs.get("company_stage", "any")],
+                "niche_keywords": prefs.get("niche_keywords", []),
+                "preferred_roles": preferred_roles,
+                "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
+                "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
+            }
+            t_pre_probe = time.perf_counter()
+            filters = await asyncio.to_thread(
+                quality_probe_loop,
+                filters,
+                candidate_prefs_for_probe,
+                2,  # max_iterations
+            )
+            logger.info(f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms")
 
-        # LLM quality probe — evaluate a small sample from Apollo and adjust
-        # filters before committing to the full 500-lead collection.
-        # Qualitative counterpart to the loosening loop: this fixes *wrong* leads,
-        # not just *too few* leads.
-        from services.lead_discovery.lead_collector_service import quality_probe_loop
-        candidate_prefs_for_probe = {
-            "company_stage": [prefs.get("company_stage", "any")],
-            "niche_keywords": prefs.get("niche_keywords", []),
-            "preferred_roles": preferred_roles,
-            "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
-            "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
-        }
-        filters = await asyncio.to_thread(
-            quality_probe_loop,
-            filters,
-            candidate_prefs_for_probe,
-            2,  # max_iterations
-        )
-        t_probe = time.perf_counter()
-        logger.info(f"[LeadSearch] Quality probe complete: {(t_probe - t_filter)*1000:.0f}ms")
+        t_filter = time.perf_counter()
+        logger.info(f"[LeadSearch] Filter generation + probe: {(t_filter - t_start)*1000:.0f}ms")
 
         # Run blocking Apollo API calls in a thread to avoid blocking the event loop
         count = await asyncio.to_thread(
