@@ -165,6 +165,7 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
     # ── Step 2b: Restrict segments to candidate's preferred company stage ────
     # company_stage raw text handles multi-select ("early" + "growth" → union of ranges).
     # Reads from company_prefs which is populated from quiz Q5 (company_stage answer).
+    company_prefs = candidate_profile.company_preferences or {}
     stage_raw = str(
         (company_prefs.get("company_stage") or ["any"])[0]
         if isinstance(company_prefs.get("company_stage"), list)
@@ -215,7 +216,6 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
     # Niche keywords (q_organization_keyword_tags) deliver the same intent
     # with better quality lift on Indian companies. Kept opt-in if caller
     # explicitly enables APPLY_INDUSTRY_FILTER_BY_DEFAULT.
-    company_prefs = candidate_profile.company_preferences or {}
     normalized_industries = None
     if APPLY_INDUSTRY_FILTER_BY_DEFAULT:
         raw_industries = company_prefs.get("industries") or []
