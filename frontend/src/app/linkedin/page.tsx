@@ -130,7 +130,20 @@ export default function LinkedInOnboardingPage() {
   const router = useRouter();
   useAuth();
 
+  const STORAGE_KEY = 'li_wizard_v1';
+
   const [step, setStep] = useState<Step>(1);
+  const [restored, setRestored] = useState(false);
+
+  const saveWizard = (s: Step, q: QuizData, cid: number | null) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ step: s, quiz: q, campaignId: cid }));
+    } catch {}
+  };
+
+  const clearWizard = () => {
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+  };
 
   // Quiz state
   const [quiz, setQuiz] = useState<QuizData>({
@@ -198,8 +211,8 @@ export default function LinkedInOnboardingPage() {
     return true;
   };
 
-  const next = () => setStep(s => (s + 1) as Step);
-  const back = () => setStep(s => (s - 1) as Step);
+  const next = () => setStep(s => { const n = (s + 1) as Step; saveWizard(n, quiz, campaignId); return n; });
+  const back = () => setStep(s => { const n = (s - 1) as Step; saveWizard(n, quiz, campaignId); return n; });
 
   // Step 4 → connect + search leads
   const proceedAfterLogin = async () => {
@@ -215,6 +228,7 @@ export default function LinkedInOnboardingPage() {
     const id = res.data.id;
     setCampaignId(id);
     setStep(5);
+    saveWizard(5, quiz, id);
     setSearchingLeads(true);
     await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
     let attempts = 0;
@@ -335,6 +349,7 @@ export default function LinkedInOnboardingPage() {
       // Load dashboard data
       await fetchDashboard(campaignId);
       setStep(6);
+      saveWizard(6, quiz, campaignId);
 
       // Auto-refresh every 30s
       pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
@@ -378,9 +393,52 @@ export default function LinkedInOnboardingPage() {
   useEffect(() => {
     const onReady = () => setExtInstalled(true);
     window.addEventListener('STUDOJO_EXT_READY', onReady);
-    // Give content script 500ms to fire the ready event
     const t = setTimeout(() => window.removeEventListener('STUDOJO_EXT_READY', onReady), 500);
     return () => { clearTimeout(t); window.removeEventListener('STUDOJO_EXT_READY', onReady); };
+  }, []);
+
+  // Restore wizard state on mount
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) { setRestored(true); return; }
+    try {
+      const saved = JSON.parse(raw);
+      const savedStep: Step = saved.step ?? 1;
+      const savedQuiz: QuizData = saved.quiz ?? quiz;
+      const savedCampaignId: number | null = saved.campaignId ?? null;
+
+      setQuiz(savedQuiz);
+      setCampaignId(savedCampaignId);
+
+      if (savedStep === 6 && savedCampaignId) {
+        // Restore live dashboard
+        fetchDashboard(savedCampaignId).then(() => {
+          setStep(6);
+          setRestored(true);
+          pollRef.current = setInterval(() => fetchDashboard(savedCampaignId), 30000);
+        }).catch(() => { clearWizard(); setRestored(true); });
+      } else if (savedStep === 5 && savedCampaignId) {
+        // Restore leads step — re-fetch leads
+        api.get(`/linkedin/automation/campaigns/${savedCampaignId}/requests?limit=50`)
+          .then(r => {
+            if (r.data.length > 0) {
+              setLeads(r.data);
+            } else {
+              setLeadsError('No leads found. Try broadening your search criteria.');
+            }
+            setStep(5);
+            setRestored(true);
+          })
+          .catch(() => { clearWizard(); setRestored(true); });
+      } else {
+        setStep(savedStep);
+        setRestored(true);
+      }
+    } catch {
+      clearWizard();
+      setRestored(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredRequests = requests.filter(r => {
@@ -396,6 +454,14 @@ export default function LinkedInOnboardingPage() {
     <div className="min-h-screen bg-background">
       <Navbar />
       <Container className="py-10 max-w-xl">
+
+        {!restored && (
+          <div className="flex items-center justify-center py-20">
+            <Spinner className="w-6 h-6 text-primary" />
+          </div>
+        )}
+
+        {restored && <>
 
         {/* Progress */}
         <div className="mb-10">
@@ -957,6 +1023,8 @@ export default function LinkedInOnboardingPage() {
             </p>
           </div>
         )}
+
+        </> }
 
       </Container>
     </div>
