@@ -204,6 +204,74 @@ def _tracking_id() -> str:
 
 # ── Lead search via Voyager ────────────────────────────────────────────────────
 
+def _search_linkedin_leads_sync(
+    li_at: str,
+    jsessionid: str,
+    target_role: str,
+    locations: list[str],
+    industries: list[str],
+    keywords: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Synchronous search using linkedin-api's requests-based Client.
+
+    httpx re-encodes -> as -%3E which LinkedIn rejects with 400.
+    The linkedin-api Client uses requests, which preserves the Voyager
+    filter syntax correctly.
+    """
+    from linkedin_api.client import Client
+
+    client = Client(debug=False)
+    # Inject cookies directly — skip authentication
+    client.session.cookies.set("li_at", li_at, domain="www.linkedin.com")
+    client.session.cookies.set("JSESSIONID", f'"{jsessionid}"', domain="www.linkedin.com")
+    client.session.headers.update({
+        "csrf-token": jsessionid,
+        "x-restli-protocol-version": "2.0.0",
+        "x-li-lang": "en_US",
+        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        ),
+    })
+
+    keyword_str = target_role
+    if keywords:
+        keyword_str = f"{target_role} {keywords}"
+
+    # Voyager filter syntax — must NOT be URL-encoded (requests handles this correctly)
+    filter_parts = ["resultType->List(PEOPLE)"]
+    if locations:
+        locs = ",".join(f"(text~:{loc})" for loc in locations[:3])
+        filter_parts.append(f"geoUrn->List({locs})")
+    if industries:
+        inds = ",".join(f"(text~:{i})" for i in industries[:3])
+        filter_parts.append(f"industry->List({inds})")
+
+    params = {
+        "count": min(limit, 49),
+        "filters": f"List({','.join(filter_parts)})",
+        "keywords": keyword_str,
+        "origin": "GLOBAL_SEARCH_HEADER",
+        "q": "all",
+        "start": 0,
+        "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
+    }
+
+    url = f"{client.API_BASE_URL}search/blended"
+    res = client.session.get(url, params=params, timeout=25)
+    logger.info("Lead search status=%d", res.status_code)
+    if res.status_code != 200:
+        logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
+        return []
+
+    data = res.json()
+    people = _parse_search_results(data)
+    logger.info("Lead search parsed %d people from blended response", len(people))
+    return people[:limit]
+
+
 async def search_linkedin_leads(
     li_at: str,
     jsessionid: str,
@@ -214,53 +282,16 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search LinkedIn for people via the stable Voyager REST blended-search endpoint.
-
-    Uses /voyager/api/search/blended (same endpoint as linkedin-api library) instead
-    of the GraphQL endpoint whose queryId hash changes with every LinkedIn deploy.
-    """
-    keyword_str = target_role
-    if keywords:
-        keyword_str = f"{target_role} {keywords}"
-
-    filter_parts = ["resultType->List(PEOPLE)"]
-    if locations:
-        locs = ",".join(f"(text:{loc})" for loc in locations[:3])
-        filter_parts.append(f"geoUrn->List({locs})")
-    if industries:
-        inds = ",".join(f"(text:{i})" for i in industries[:3])
-        filter_parts.append(f"industry->List({inds})")
-
-    filters_str = f"List({','.join(filter_parts)})"
-
-    params = {
-        "count": min(limit, 49),
-        "filters": filters_str,
-        "keywords": keyword_str,
-        "origin": "GLOBAL_SEARCH_HEADER",
-        "q": "all",
-        "start": 0,
-        "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
-    }
-
-    from urllib.parse import urlencode
-    url = "https://www.linkedin.com/voyager/api/search/blended?" + urlencode(params)
-
-    people = []
+    """Async wrapper around the sync search (runs in thread to avoid blocking)."""
     try:
-        async with httpx.AsyncClient(timeout=25, follow_redirects=True, **_proxy(session_id)) as client:
-            res = await client.get(url, headers=_headers(li_at, jsessionid))
-        logger.info("Lead search status=%d url=%s", res.status_code, url)
-        if res.status_code != 200:
-            logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
-            return []
-        data = res.json()
-        people = _parse_search_results(data)
-        logger.info("Lead search parsed %d people", len(people))
+        people = await asyncio.to_thread(
+            _search_linkedin_leads_sync,
+            li_at, jsessionid, target_role, locations, industries, keywords, limit,
+        )
+        return people
     except Exception as e:
         logger.error("search_linkedin_leads failed: %s", e)
-
-    return people[:limit]
+        return []
 
 
 def _parse_search_results(data: dict) -> list[dict]:
