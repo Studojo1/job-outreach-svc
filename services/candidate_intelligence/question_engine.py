@@ -43,7 +43,7 @@ from .city_data import (
 _Q1_CAREER_STAGE = {
     "key": "career_stage",
     "ack": None,
-    "message": "Let's figure out the right companies for you. First — where are you right now?",
+    "message": "Let's figure out the right companies for you. First up, where are you right now?",
     "mcq": {
         "question": "Which best describes you right now?",
         "options": [
@@ -66,9 +66,9 @@ _Q_CLARITY = {
     "mcq": {
         "question": "How clear are you on what you want?",
         "options": [
-            {"label": "A", "text": "I know exactly — give me precise controls"},
-            {"label": "B", "text": "I have a general direction — help me narrow it down"},
-            {"label": "C", "text": "Still figuring it out — keep it simple"},
+            {"label": "A", "text": "I know exactly, give me precise controls"},
+            {"label": "B", "text": "I have a general direction, help me narrow it down"},
+            {"label": "C", "text": "Still figuring it out, keep it simple"},
         ],
         "allow_multiple": False,
     },
@@ -93,21 +93,14 @@ _Q2_JOB_TYPE = {
     "text_input": False,
 }
 
-# _Q4_COMPANY_STAGE is now built dynamically by _build_company_stage_question()
-# to inject resume-aware suggestions into the message.
-
-_Q5_CAREER_GOAL = {
-    "key": "career_goal",
-    "ack": None,
-    "message": "Paint me a picture — what does your ideal day-to-day actually look like? One sentence is enough. e.g. 'Running GTM for an early-stage AI startup', 'Closing enterprise deals in SaaS', 'Building and shipping AI agents end-to-end'",
-    "mcq": None,
-    "text_input": True,
-}
+# _Q4_COMPANY_STAGE and _Q5_CAREER_GOAL are now built dynamically by
+# _build_company_stage_question() and _build_career_goal_question()
+# to inject resume and answer-aware suggestions into the messages.
 
 _Q8_WORK_MODE = {
     "key": "work_mode",
     "ack": None,
-    "message": "Almost there — where do you actually want to be working from?",
+    "message": "Almost there. Where do you actually want to be working from?",
     "mcq": {
         "question": "What work setup are you targeting?",
         "options": [
@@ -124,7 +117,7 @@ _Q8_WORK_MODE = {
 _Q_NICHE_KEYWORDS = {
     "key": "niche_keywords",
     "ack": None,
-    "message": "Which of these spaces genuinely excites you? Pick up to 3 — we'll focus the search there.",
+    "message": "Which of these spaces genuinely excites you? Pick up to 3 and we'll focus the search there.",
     "mcq": {
         "question": "Which niches do you want us to prioritize?",
         "options": [
@@ -181,65 +174,64 @@ def _build_tech_stack_question(cluster_key: str) -> dict | None:
     }
 
 # ---------------------------------------------------------------------------
-# Contextual ack generator — warm, answer-aware acknowledgements
+# Contextual ack generator -- warm, answer-aware acknowledgements
 # ---------------------------------------------------------------------------
 
 def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profile: dict) -> str:
     """Generate a warm, specific acknowledgement of the previous answer.
 
-    Echoes back what the user said + adds a brief observation. For the
-    company_stage question, injects a resume-based suggestion.
-    No LLM — purely rule-based so there's zero added latency.
+    Echoes back what the user said plus a brief observation.
+    Purely rule-based, zero latency.
     """
     answer = (prev_answer or "").strip()
     al = answer.lower()
 
     if prev_q_key == "career_stage":
         if "not graduating" in al:
-            return "Nice — early in the journey, plenty of time to be strategic about where you land."
+            return "Nice, early in the journey. Plenty of time to be strategic about where you land."
         if "graduating" in al or "6 months" in al:
-            return "Exciting timing — the market moves fast and now is exactly when to get ahead of it."
+            return "Exciting timing. The market moves fast and now is exactly when to get ahead of it."
         if "recent graduate" in al or "0-2" in al:
-            return "Fresh into it — that's actually the best time to go on the offensive with outreach."
+            return "Fresh into it, and honestly that's the best time to go on the offensive with outreach."
         if "experienced" in al or "3+" in al:
             return "Solid base to work from."
         if "switching" in al or "exploring" in al:
-            return "A career pivot can be one of the best moves you make — let's find companies that'll value the cross-functional perspective."
+            return "A career pivot can be one of the best moves you make. Let's find companies that'll value the cross-functional perspective."
         return "Got it."
 
     if prev_q_key == "clarity":
         if "exactly" in al or al.startswith("a"):
-            return "Love it — the more specific you are, the sharper the targeting."
+            return "Love it. The more specific you are, the sharper the targeting."
         if "general" in al or "narrow" in al or al.startswith("b"):
-            return "That's the most common starting point honestly. We'll help you zero in."
+            return "That's honestly the most common starting point. We'll help you zero in."
         if "figuring" in al or "simple" in al or al.startswith("c"):
-            return "Totally fine — we'll keep it open and let the options speak for themselves."
+            return "Totally fine, we'll keep it open and let the options speak for themselves."
         return "Got it."
 
     if prev_q_key == "job_type":
         if "full-time" in al:
             return "Full-time it is."
         if "internship" in al:
-            return "Internship mode — let's find you a good one."
+            return "Internship mode, let's find you a good one."
         if "part-time" in al or "freelance" in al:
-            return "Part-time or freelance — flexible, I like it."
+            return "Part-time or freelance, keeping it flexible. Got it."
         if "open to all" in al:
-            return "Open to everything — gives us the most to work with."
+            return "Open to everything, gives us the most to work with."
         return "Got it."
 
     if prev_q_key == "location":
         if "remote" in al and "relocate" not in al:
-            return "Remote — no office, no schedule constraints. Makes sense."
+            return "Remote, no office and no schedule constraints. Makes sense."
         if "relocate" in al or "international" in al:
-            return "Open to relocating — that expands the universe significantly."
+            return "Open to relocating, that expands the universe significantly."
         _city_map = {
-            "bengaluru": "Bengaluru — strong ecosystem, a lot of the best companies are there.",
-            "bangalore": "Bengaluru — strong ecosystem, a lot of the best companies are there.",
-            "mumbai": "Mumbai — financial hub, lots to work with.",
-            "delhi": "Delhi/NCR — great mix of MNCs and home-grown startups.",
-            "hyderabad": "Hyderabad — solid tech scene, growing fast.",
-            "pune": "Pune — increasingly strong startup and tech ecosystem.",
-            "chennai": "Chennai — great SaaS and tech presence.",
+            "bengaluru": "Bengaluru, strong ecosystem and a lot of the best companies are right there.",
+            "bangalore": "Bengaluru, strong ecosystem and a lot of the best companies are right there.",
+            "mumbai": "Mumbai, financial hub with a lot to work with.",
+            "delhi": "Delhi/NCR, great mix of MNCs and home-grown startups.",
+            "hyderabad": "Hyderabad, solid tech scene growing fast.",
+            "pune": "Pune, increasingly strong startup and tech ecosystem.",
+            "chennai": "Chennai, great SaaS and tech presence.",
         }
         for city_key, resp in _city_map.items():
             if city_key in al:
@@ -248,45 +240,45 @@ def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profil
 
     if prev_q_key == "company_stage":
         if "early" in al or "seed" in al:
-            return "Early-stage — where things actually move. Good call."
+            return "Early-stage, where things actually move. Good call."
         if "growth" in al or "50-500" in al:
-            return "Growth-stage — that's the sweet spot: some structure, still fast."
+            return "Growth-stage, sweet spot of structure and speed."
         if "large" in al or "mnc" in al or "enterprise" in al:
-            return "Enterprise — stability and scale, noted."
+            return "Enterprise, stability and scale. Noted."
         if "no strong" in al:
-            return "Open book — we'll cast a wide net and let the fit show itself."
+            return "Open book, we'll cast a wide net and let fit show itself."
         return "Good to know."
 
     if prev_q_key == "career_goal":
-        return "Clear picture — that's exactly what we need to write a sharp pitch."
+        return "Clear picture, that's exactly what we need to write a sharp pitch."
 
     if prev_q_key == "dream_companies":
         if al in ("skip", "none", "n/a", "na", ""):
-            return "No worries — we'll figure out the right companies from your profile."
+            return "No worries, we'll figure out the right companies from your profile."
         return "Good companies to calibrate against."
 
     if prev_q_key == "target_role":
-        return "Noted — that narrows the search nicely."
+        return "Noted, that narrows the search nicely."
 
     if prev_q_key == "work_mode":
         if "remote" in al:
-            return "Remote — we'll filter for companies that genuinely support it, not just list it."
+            return "Remote, we'll filter for companies that genuinely support it, not just list it."
         if "hybrid" in al:
-            return "Hybrid — the most common setup at good companies right now."
+            return "Hybrid, most common setup at good companies right now."
         if "in-office" in al or ("office" in al and "remote" not in al):
-            return "In-office — we'll focus on companies in your city."
+            return "In-office, we'll focus on companies in your city."
         if "open to all" in al:
-            return "Open to all — we'll match on fit first, setup second."
+            return "Open to all, we'll match on fit first and setup second."
         return "Got it."
 
     if prev_q_key == "niche_keywords":
-        return "Those spaces have a lot of action right now — good picks."
+        return "Those spaces have a lot of action right now. Good picks."
 
     if prev_q_key == "tech_stack":
-        return "Stack noted — we'll weight companies that use those tools."
+        return "Stack noted, we'll weight companies that use those tools."
 
     if prev_q_key == "flex_best_project":
-        return "That's a strong signal — exactly the kind of thing that lands well in outreach."
+        return "That's a strong signal, exactly the kind of thing that lands well in outreach."
 
     if prev_q_key == "flex_outcome":
         return "Numbers make the story concrete. Good."
@@ -295,44 +287,92 @@ def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profil
 
 
 # ---------------------------------------------------------------------------
-# Resume-aware company stage question builder
+# Resume + answer-aware question builders (company stage, career goal)
 # ---------------------------------------------------------------------------
 
-def _infer_stage_suggestion(resume_profile: dict) -> str | None:
-    """Return a 1-sentence resume-based suggestion for company stage, or None."""
-    speed = (resume_profile.get("trajectory_speed") or "").lower()
-    tier = (resume_profile.get("company_prestige_tier") or "").lower()
-    progression = (resume_profile.get("role_progression") or "").lower()
+_STARTUP_HUB_CITIES = {
+    "bengaluru", "bangalore", "mumbai", "delhi", "hyderabad", "pune",
+    "chennai", "gurgaon", "noida", "kolkata", "ahmedabad",
+    "san francisco", "new york", "london", "singapore", "berlin",
+}
+
+_AI_SUBDOMAINS = {
+    "ai_engineering", "ml_engineering", "data_science", "ai_product",
+    "llm", "generative_ai", "nlp", "computer_vision", "voice_ai",
+}
+
+
+def _infer_stage_suggestion(resume_profile: dict, answers: dict) -> str | None:
+    """Return a 1-2 sentence stage suggestion using standard profile fields + collected answers.
+
+    Uses only the fields in the production resume_profile (domain, subdomain,
+    seniority, top_skills, likely_roles). Falls back to answer signals when
+    profile is sparse or not yet extracted.
+    """
+    domain = (resume_profile.get("domain") or "").lower()
+    subdomain = (resume_profile.get("subdomain") or "").lower()
     seniority = (resume_profile.get("seniority") or "").lower()
+    top_skills = [s.lower() for s in (resume_profile.get("top_skills") or [])]
+    likely_roles = " ".join(resume_profile.get("likely_roles") or []).lower()
 
-    # Not enough signal for students with nothing else
-    if seniority == "student" and not speed and tier in ("", "unknown"):
-        return None
+    career_stage_ans = answers.get("career_stage", "").lower()
+    location_ans = answers.get("location", "").lower()
+    job_type_ans = answers.get("job_type", "").lower()
 
-    # Strong startup DNA
-    if speed == "fast" and tier in ("tier3", "unknown"):
-        return "From your background it looks like you move fast and like owning things end-to-end — early-stage tends to suit that."
-    if tier == "tier3" and "growth" in progression:
-        return "Looks like you've been in startup environments — early-stage companies tend to be a natural fit."
-    if speed == "fast" and "multi_company" in progression:
-        return "You've moved quickly across companies and built a lot — early-stage tends to reward that most."
+    in_startup_hub = any(h in location_ans for h in _STARTUP_HUB_CITIES)
+    is_ai_profile = (
+        subdomain in _AI_SUBDOMAINS
+        or any(kw in top_skills for kw in ("ai", "llm", "openai", "machine learning", "pytorch"))
+        or any(kw in likely_roles for kw in ("ai engineer", "ml engineer", "data scientist", "ai agent"))
+        or domain in ("data", "data_analytics")
+    )
+    is_student = "student" in career_stage_ans or seniority == "student"
+    is_internship = "internship" in job_type_ans
 
-    # Strong brand / tier1 background
-    if tier == "tier1":
-        return "You've got strong brand names on there — worth thinking about whether you want to stay on that track or go earlier-stage where ownership is broader."
+    # AI profile seeking internship in a startup hub
+    if is_ai_profile and is_internship and in_startup_hub:
+        city = next(
+            (c for c in ["Bengaluru", "Mumbai", "Delhi", "Hyderabad", "Pune"]
+             if c.lower() in location_ans or c.lower()[:4] in location_ans),
+            None,
+        )
+        city_str = f"{city} has" if city else "Your city has"
+        return (
+            f"{city_str} a strong AI startup scene right now. "
+            f"Early-stage companies are where you'll get real AI work from day one rather than scoped tasks."
+        )
 
-    # General fast mover
-    if speed == "fast":
-        return "You seem like someone who moves fast — earlier-stage companies tend to reward that more than larger ones."
+    # AI profile, any internship
+    if is_ai_profile and is_internship:
+        return (
+            "For AI internships, early-stage startups tend to give you the most hands-on work from day one. "
+            "Growth-stage can work too but you'll likely get a narrower scope."
+        )
+
+    # AI profile, full-time, junior/mid
+    if is_ai_profile and not is_internship and seniority in ("junior", "mid"):
+        return "Your AI background maps well to early-stage or growth-stage companies right now. Both are actively hiring in this space."
+
+    # AI profile, full-time, senior
+    if is_ai_profile and not is_internship and seniority == "senior":
+        return "With your background, growth-stage AI companies are often the sweet spot: real scale and still moving fast."
+
+    # General student in startup hub for internship
+    if is_student and is_internship and in_startup_hub:
+        return "Early-stage startups tend to be the sharpest learning environment for internships, especially in a hub like yours."
+
+    # Experienced professional (from answers, not resume)
+    if "experienced" in career_stage_ans or seniority in ("mid", "senior"):
+        return "With your experience level, growth-stage companies are often the sweet spot: real scale but still moving fast enough to matter."
 
     return None
 
 
-def _build_company_stage_question(resume_profile: dict) -> dict:
-    """Build the company stage question — injects a resume-based suggestion when available."""
-    suggestion = _infer_stage_suggestion(resume_profile)
+def _build_company_stage_question(resume_profile: dict, answers: dict) -> dict:
+    """Build the company stage question with a profile and answer-aware suggestion."""
+    suggestion = _infer_stage_suggestion(resume_profile, answers)
     if suggestion:
-        message = f"What kind of company environment are you after? {suggestion} But you know yourself best — what actually appeals?"
+        message = f"What kind of company environment are you after? {suggestion} But you know yourself best, pick what actually resonates."
     else:
         message = "What kind of company environment are you targeting?"
 
@@ -353,6 +393,70 @@ def _build_company_stage_question(resume_profile: dict) -> dict:
             "allow_multiple": True,
         },
         "text_input": False,
+    }
+
+
+def _build_career_goal_question(resume_profile: dict, answers: dict) -> dict:
+    """Build the career goal question with a day-to-day suggestion seeded from profile + answers."""
+    domain = (resume_profile.get("domain") or "").lower()
+    subdomain = (resume_profile.get("subdomain") or "").lower()
+    top_skills = [s.lower() for s in (resume_profile.get("top_skills") or [])]
+    company_stage_ans = answers.get("company_stage", "").lower()
+    is_early = "early" in company_stage_ans or "seed" in company_stage_ans
+
+    suggestion = None
+    placeholder = "e.g. Running GTM for an early-stage AI startup, Closing enterprise deals in SaaS"
+
+    is_ai = (
+        subdomain in _AI_SUBDOMAINS
+        or any(kw in top_skills for kw in ("ai", "llm", "openai", "langchain", "pytorch"))
+    )
+
+    if is_ai:
+        if is_early:
+            suggestion = "building and shipping AI features end-to-end at a fast-moving startup"
+            placeholder = "e.g. Building and deploying AI agents end-to-end at a seed-stage startup"
+        else:
+            suggestion = "designing and shipping AI systems, owning a product surface end-to-end"
+            placeholder = "e.g. Owning the ML pipeline for a product used by thousands"
+    elif domain == "software_engineering":
+        suggestion = "writing code, shipping features, and owning a product area end-to-end"
+        placeholder = "e.g. Building backend systems for a fast-moving B2B SaaS startup"
+    elif domain in ("data_analytics", "data"):
+        suggestion = "running analysis, building dashboards, and helping the team make better decisions with data"
+        placeholder = "e.g. Building the analytics stack and owning data insights for a growth-stage startup"
+    elif domain == "marketing":
+        suggestion = "running growth experiments, owning user acquisition channels, and iterating fast on what works"
+        placeholder = "e.g. Running performance marketing and owning the growth funnel at a Series A startup"
+    elif domain in ("product", "product_management"):
+        suggestion = "writing specs, talking to users, and working closely with eng to ship product"
+        placeholder = "e.g. Owning a product vertical from roadmap to launch at a fast-moving startup"
+    elif domain in ("sales", "sales_bd"):
+        suggestion = "closing deals, managing a pipeline, and owning revenue targets"
+        placeholder = "e.g. Running outbound, closing pilots, and building the early revenue engine"
+    elif domain in ("consulting", "consulting_strategy"):
+        suggestion = "framing problems, running structured analysis, and turning insights into decisions"
+        placeholder = "e.g. Supporting strategy work for high-growth startups or running client engagements"
+    elif domain == "finance":
+        suggestion = "building financial models, running analysis, and supporting investment or strategy decisions"
+        placeholder = "e.g. Building the financial model for a Series B raise, owning FP&A at a growth-stage company"
+
+    if suggestion:
+        message = (
+            f"Paint me a picture of your ideal day-to-day. "
+            f"Based on your background I'd guess something like {suggestion}. "
+            f"Does that track, or do you have a different picture?"
+        )
+    else:
+        message = "Paint me a picture of your ideal day-to-day. One sentence is enough."
+
+    return {
+        "key": "career_goal",
+        "ack": None,
+        "message": message,
+        "mcq": None,
+        "text_input": True,
+        "input_placeholder": placeholder,
     }
 
 
@@ -410,7 +514,7 @@ _FLEX_OUTCOME_COPY: dict[str, tuple[str, str]] = {
         "e.g. $2M ARR identified at risk, 89% precision, dashboard now used by 3 ops teams",
     ),
     "product": (
-        "What's the most concrete number you can share? Anything quantitative — adoption, retention, revenue moved.",
+        "What's the most concrete number you can share? Anything quantitative: adoption, retention, revenue moved.",
         "e.g. 22% of new signups via referral, retention +14%, shipped under a 6-week PRD",
     ),
     "design": (
@@ -426,11 +530,11 @@ _FLEX_OUTCOME_COPY: dict[str, tuple[str, str]] = {
         "e.g. ~$8k ARR, became the company's first enterprise reference customer",
     ),
     "finance": (
-        "What's the most concrete number — deal size, valuation, cost saved?",
+        "What's the most concrete number? Deal size, valuation, cost saved, anything.",
         "e.g. Raise closed at $30M with 18x revenue multiple, model used in IC pitch",
     ),
     "consulting": (
-        "What's the most concrete result — cost saved, time cut, revenue lift?",
+        "What's the most concrete result? Cost saved, time cut, revenue lift.",
         "e.g. Fulfilment cost down 18%, recommendations adopted within 30 days",
     ),
     "other": (
@@ -566,8 +670,8 @@ def build_question_sequence(state: dict) -> list[dict]:
     if not skip_job_type:
         sequence.append(_Q2_JOB_TYPE)
     sequence.append(_build_location_question(resume_profile, resume_text, parsed_json))
-    sequence.append(_build_company_stage_question(resume_profile))
-    sequence.append(_Q5_CAREER_GOAL)
+    sequence.append(_build_company_stage_question(resume_profile, answers))
+    sequence.append(_build_career_goal_question(resume_profile, answers))
     sequence.append(_build_dream_companies_question(answers))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q8_WORK_MODE)
@@ -664,7 +768,7 @@ def _build_dream_companies_question(answers: dict) -> dict:
         "key": "dream_companies",
         "ack": None,
         "message": (
-            f"Any companies you'd genuinely love to work at? Even stretch goals are useful — "
+            f"Any companies you'd genuinely love to work at? Even stretch goals are useful, "
             f"they tell me a lot about the type of company you're drawn to. "
             f"Separate with commas. e.g. '{examples}' (or type 'skip' if none come to mind)"
         ),
@@ -946,7 +1050,7 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     return {
         "key": "target_role",
         "ack": None,
-        "message": "Which of these roles feels closest to what you're actually going after? I pulled these from your background — but if none fit, pick 'Something else'.",
+        "message": "Which of these roles feels closest to what you're actually going after? I pulled these from your background, but if none fit just pick 'Something else'.",
         "mcq": {
             "question": "Which role fits best?",
             "options": options,
