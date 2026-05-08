@@ -320,7 +320,9 @@ export default function LinkedInOnboardingPage() {
       <Container className="py-10 max-w-xl">
 
         {/* Progress */}
-        <ProgressSteps steps={STEPS} currentStep={step} className="mb-10" />
+        <div className="mb-10">
+          <ProgressSteps steps={STEPS} currentStep={step} />
+        </div>
 
         {/* ── Step 1: Target role ─────────────────────────────────────── */}
         {step === 1 && (
