@@ -213,34 +213,20 @@ def _search_linkedin_leads_sync(
     keywords: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Synchronous search using linkedin-api's requests-based Client.
+    """Synchronous search using a plain requests.Session.
 
-    httpx re-encodes -> as -%3E which LinkedIn rejects with 400.
-    The linkedin-api Client uses requests, which preserves the Voyager
-    filter syntax correctly.
+    We use requests (not httpx) because requests preserves the Voyager
+    filter string `->` literally, while httpx encodes it as `%3E`.
+    We set the Cookie header directly rather than using the linkedin-api
+    Client to avoid its redirect/auth intercept logic.
     """
-    from linkedin_api.client import Client
+    import requests
 
-    client = Client(debug=False)
-    # Inject cookies directly — skip authentication
-    client.session.cookies.set("li_at", li_at, domain="www.linkedin.com")
-    client.session.cookies.set("JSESSIONID", f'"{jsessionid}"', domain="www.linkedin.com")
-    client.session.headers.update({
-        "csrf-token": jsessionid,
-        "x-restli-protocol-version": "2.0.0",
-        "x-li-lang": "en_US",
-        "Accept": "application/vnd.linkedin.normalized+json+2.1",
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-        ),
-    })
+    session = requests.Session()
+    session.max_redirects = 3
 
-    keyword_str = target_role
-    if keywords:
-        keyword_str = f"{target_role} {keywords}"
+    keyword_str = f"{target_role} {keywords}".strip() if keywords else target_role
 
-    # Voyager filter syntax — must NOT be URL-encoded (requests handles this correctly)
     filter_parts = ["resultType->List(PEOPLE)"]
     if locations:
         locs = ",".join(f"(text~:{loc})" for loc in locations[:3])
@@ -259,8 +245,21 @@ def _search_linkedin_leads_sync(
         "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
     }
 
-    url = f"{client.API_BASE_URL}search/blended"
-    res = client.session.get(url, params=params, timeout=25)
+    headers = {
+        "Cookie": f'li_at={li_at}; JSESSIONID="{jsessionid}"',
+        "csrf-token": jsessionid,
+        "x-restli-protocol-version": "2.0.0",
+        "x-li-lang": "en_US",
+        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.linkedin.com/search/results/people/",
+    }
+
+    url = "https://www.linkedin.com/voyager/api/search/blended"
+    res = session.get(url, params=params, headers=headers, timeout=25, allow_redirects=False)
     logger.info("Lead search status=%d", res.status_code)
     if res.status_code != 200:
         logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
@@ -268,7 +267,7 @@ def _search_linkedin_leads_sync(
 
     data = res.json()
     people = _parse_search_results(data)
-    logger.info("Lead search parsed %d people from blended response", len(people))
+    logger.info("Lead search parsed %d people", len(people))
     return people[:limit]
 
 
