@@ -156,6 +156,8 @@ export default function LinkedInOnboardingPage() {
   const [liAtCookie, setLiAtCookie] = useState('');
   const [jsessionidCookie, setJsessionidCookie] = useState('');
   const [cookieLoading, setCookieLoading] = useState(false);
+  const [extInstalled, setExtInstalled] = useState(false);
+  const [extLoading, setExtLoading] = useState(false);
 
   // Messages state
   const [connectionNote, setConnectionNote] = useState('');
@@ -276,6 +278,39 @@ export default function LinkedInOnboardingPage() {
     }
   };
 
+  const handleExtensionLogin = () => {
+    setExtLoading(true);
+    setConnectError('');
+
+    const onCookies = (e: Event) => {
+      const { li_at, jsessionid, error } = (e as CustomEvent).detail || {};
+      window.removeEventListener('STUDOJO_LI_COOKIES', onCookies);
+      if (error || !li_at) {
+        setConnectError(error || 'Extension could not read LinkedIn cookies. Make sure you\'re logged in to LinkedIn.');
+        setExtLoading(false);
+        return;
+      }
+      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '' })
+        .then(() => proceedAfterLogin())
+        .catch((err: any) => {
+          setConnectError(err.response?.data?.detail || 'LinkedIn session invalid. Please re-login to LinkedIn and try again.');
+        })
+        .finally(() => setExtLoading(false));
+    };
+
+    window.addEventListener('STUDOJO_LI_COOKIES', onCookies);
+    window.dispatchEvent(new CustomEvent('STUDOJO_REQUEST_LI_COOKIES'));
+
+    // Timeout if extension doesn't respond
+    setTimeout(() => {
+      window.removeEventListener('STUDOJO_LI_COOKIES', onCookies);
+      if (extLoading) {
+        setConnectError('Extension did not respond. Try refreshing or installing the extension.');
+        setExtLoading(false);
+      }
+    }, 5000);
+  };
+
   // Step 6 → launch
   const handleLaunch = async () => {
     if (!campaignId) return;
@@ -335,6 +370,15 @@ export default function LinkedInOnboardingPage() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
+  }, []);
+
+  // Detect Studojo extension
+  useEffect(() => {
+    const onReady = () => setExtInstalled(true);
+    window.addEventListener('STUDOJO_EXT_READY', onReady);
+    // Give content script 500ms to fire the ready event
+    const t = setTimeout(() => window.removeEventListener('STUDOJO_EXT_READY', onReady), 500);
+    return () => { clearTimeout(t); window.removeEventListener('STUDOJO_EXT_READY', onReady); };
   }, []);
 
   const filteredRequests = requests.filter(r => {
@@ -497,7 +541,7 @@ export default function LinkedInOnboardingPage() {
                   onClick={() => { setLoginTab('cookies'); setConnectError(''); }}
                   className={`flex-1 py-2.5 text-sm font-medium transition-colors ${loginTab === 'cookies' ? 'bg-primary text-white' : 'bg-white text-muted-foreground hover:text-foreground'}`}
                 >
-                  Paste cookies
+                  Use extension
                 </button>
               </div>
             )}
@@ -551,43 +595,103 @@ export default function LinkedInOnboardingPage() {
                   </>
                 ) : (
                   <>
-                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4 text-sm text-blue-800 space-y-1.5">
-                      <p className="font-medium">How to get your cookies:</p>
-                      <ol className="list-decimal list-inside space-y-1 text-blue-700">
-                        <li>Open <strong>linkedin.com</strong> and log in</li>
-                        <li>Press <strong>F12</strong> → Application → Cookies → linkedin.com</li>
-                        <li>Copy the value of <strong>li_at</strong></li>
-                        <li>Copy the value of <strong>JSESSIONID</strong> (without quotes)</li>
-                      </ol>
-                    </div>
-                    <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
-                      <div>
-                        <label className="text-sm font-medium block mb-1.5">li_at cookie</label>
-                        <textarea value={liAtCookie} onChange={e => setLiAtCookie(e.target.value)}
-                          placeholder="AQEDATxxxxxx..."
-                          rows={2}
-                          className="w-full border border-border rounded-xl px-4 py-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none" />
-                      </div>
-                      <div>
-                        <label className="text-sm font-medium block mb-1.5">JSESSIONID cookie</label>
-                        <input type="text" value={jsessionidCookie} onChange={e => setJsessionidCookie(e.target.value)}
-                          placeholder="ajax:xxxxxxxxxx"
-                          className="w-full border border-border rounded-xl px-4 py-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                      </div>
-                      {connectError && (
-                        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
+                    {extInstalled ? (
+                      /* Extension detected — one-click flow */
+                      <div className="space-y-4">
+                        <div className="bg-white border border-border rounded-2xl p-6 text-center space-y-3">
+                          <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mx-auto">
+                            <ShieldCheck className="w-6 h-6 text-primary" />
+                          </div>
+                          <p className="font-medium text-sm">Studojo extension detected</p>
+                          <p className="text-xs text-muted-foreground">
+                            Click below and the extension will securely read your LinkedIn session — no copy-pasting needed.
+                          </p>
+                          {connectError && (
+                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700 text-left">
+                              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
+                            </div>
+                          )}
+                          <Button onClick={handleExtensionLogin} disabled={extLoading} className="w-full mt-1">
+                            {extLoading ? 'Reading cookies...' : 'Connect via extension'}
+                            {!extLoading && <ChevronRight className="w-4 h-4 ml-1" />}
+                          </Button>
                         </div>
-                      )}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-                        <ChevronLeft className="w-4 h-4" /> Back
-                      </button>
-                      <Button onClick={handleCookieLogin} disabled={!liAtCookie.trim() || !jsessionidCookie.trim() || cookieLoading}>
-                        {cookieLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
-                      </Button>
-                    </div>
+                        <p className="text-center text-xs text-muted-foreground">
+                          Make sure you&apos;re logged in to{' '}
+                          <a href="https://www.linkedin.com" target="_blank" rel="noreferrer" className="underline">linkedin.com</a>{' '}
+                          in this browser first.
+                        </p>
+                        <div className="flex items-center justify-between pt-1">
+                          <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                            <ChevronLeft className="w-4 h-4" /> Back
+                          </button>
+                          <button
+                            onClick={() => setExtInstalled(false)}
+                            className="text-xs text-muted-foreground hover:text-foreground underline"
+                          >
+                            Paste manually instead
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      /* No extension — show install prompt + manual paste fallback */
+                      <div className="space-y-4">
+                        <div className="bg-primary/5 border border-primary/20 rounded-2xl p-5 space-y-3">
+                          <p className="font-medium text-sm">Install the Studojo extension</p>
+                          <p className="text-xs text-muted-foreground">
+                            The extension reads your LinkedIn session in one click — no DevTools needed.
+                          </p>
+                          <a
+                            href="/studojo-linkedin-connector.zip"
+                            download
+                            className="inline-flex items-center gap-2 text-sm text-primary font-medium hover:underline"
+                          >
+                            Download extension (.zip)
+                          </a>
+                          <p className="text-xs text-muted-foreground">
+                            Then open <strong>chrome://extensions</strong> → Enable Developer mode → Load unpacked → select the folder.
+                          </p>
+                        </div>
+
+                        <div className="border-t border-border pt-4">
+                          <p className="text-xs text-muted-foreground mb-3 font-medium">Or paste cookies manually:</p>
+                          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 mb-3 text-xs text-blue-700 space-y-1">
+                            <p>1. Open <strong>linkedin.com</strong> and log in</p>
+                            <p>2. Press <strong>F12</strong> → Application → Cookies → linkedin.com</p>
+                            <p>3. Copy <strong>li_at</strong> and <strong>JSESSIONID</strong> values below</p>
+                          </div>
+                          <div className="bg-white border border-border rounded-2xl p-4 space-y-3">
+                            <div>
+                              <label className="text-xs font-medium block mb-1">li_at cookie</label>
+                              <textarea value={liAtCookie} onChange={e => setLiAtCookie(e.target.value)}
+                                placeholder="AQEDATxxxxxx..."
+                                rows={2}
+                                className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none" />
+                            </div>
+                            <div>
+                              <label className="text-xs font-medium block mb-1">JSESSIONID cookie</label>
+                              <input type="text" value={jsessionidCookie} onChange={e => setJsessionidCookie(e.target.value)}
+                                placeholder="ajax:xxxxxxxxxx"
+                                className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                            </div>
+                            {connectError && (
+                              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                            <ChevronLeft className="w-4 h-4" /> Back
+                          </button>
+                          <Button onClick={handleCookieLogin} disabled={!liAtCookie.trim() || !jsessionidCookie.trim() || cookieLoading}>
+                            {cookieLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </>
@@ -635,7 +739,7 @@ export default function LinkedInOnboardingPage() {
                     onClick={() => { setChallengeRequired(false); setLoginTab('cookies'); setPin(''); setConnectError(''); }}
                     className="text-sm text-primary hover:underline font-medium"
                   >
-                    Try another way — paste cookies instead
+                    Try another way — use the extension instead
                   </button>
                 </div>
               </>
