@@ -114,30 +114,107 @@ _Q8_WORK_MODE = {
     "text_input": False,
 }
 
-_Q_NICHE_KEYWORDS = {
-    "key": "niche_keywords",
-    "ack": None,
-    "message": "Which of these spaces genuinely excites you? Pick up to 3 and we'll focus the search there.",
-    "mcq": {
-        "question": "Which niches do you want us to prioritize?",
-        "options": [
-            {"label": "A", "text": "Fintech / Payments"},
-            {"label": "B", "text": "SaaS / B2B"},
-            {"label": "C", "text": "Consumer apps / D2C"},
-            {"label": "D", "text": "AI / ML"},
-            {"label": "E", "text": "Edtech"},
-            {"label": "F", "text": "Healthtech / Biotech"},
-            {"label": "G", "text": "Devtools / Developer-first"},
-            {"label": "H", "text": "Logistics / Supply chain"},
-            {"label": "I", "text": "Climate / Sustainability"},
-            {"label": "J", "text": "Gaming / Media"},
-            {"label": "K", "text": "Agritech"},
-            {"label": "L", "text": "No strong preference"},
-        ],
-        "allow_multiple": True,
-    },
-    "text_input": False,
+# Niche options — ordered here, but dynamically reordered by _build_niche_question
+_NICHE_OPTIONS_BASE = [
+    "Fintech / Payments",
+    "SaaS / B2B",
+    "Consumer apps / D2C",
+    "AI / ML",
+    "Edtech",
+    "Healthtech / Biotech",
+    "Devtools / Developer-first",
+    "Logistics / Supply chain",
+    "Climate / Sustainability",
+    "Gaming / Media",
+    "Agritech",
+    "No strong preference",
+]
+
+# Maps v2 vertical_exposure values to their display niche option
+_VERTICAL_TO_NICHE = {
+    "fintech": "Fintech / Payments",
+    "payments": "Fintech / Payments",
+    "insurtech": "Fintech / Payments",
+    "regtech": "Fintech / Payments",
+    "saas": "SaaS / B2B",
+    "b2b-saas": "SaaS / B2B",
+    "b2b": "SaaS / B2B",
+    "enterprise-software": "SaaS / B2B",
+    "consumer": "Consumer apps / D2C",
+    "d2c": "Consumer apps / D2C",
+    "ecommerce": "Consumer apps / D2C",
+    "consumer-tech": "Consumer apps / D2C",
+    "ai": "AI / ML",
+    "ml": "AI / ML",
+    "voice-ai": "AI / ML",
+    "generative-ai": "AI / ML",
+    "ai-native": "AI / ML",
+    "nlp": "AI / ML",
+    "llm": "AI / ML",
+    "edtech": "Edtech",
+    "education": "Edtech",
+    "career-tech": "Edtech",
+    "hr-tech": "Edtech",
+    "healthtech": "Healthtech / Biotech",
+    "biotech": "Healthtech / Biotech",
+    "healthcare": "Healthtech / Biotech",
+    "medtech": "Healthtech / Biotech",
+    "devtools": "Devtools / Developer-first",
+    "developer-tools": "Devtools / Developer-first",
+    "infrastructure": "Devtools / Developer-first",
+    "cybersecurity": "Devtools / Developer-first",
+    "logistics": "Logistics / Supply chain",
+    "supply-chain": "Logistics / Supply chain",
+    "proptech": "SaaS / B2B",
+    "legaltech": "SaaS / B2B",
+    "martech": "SaaS / B2B",
+    "adtech": "SaaS / B2B",
+    "climate": "Climate / Sustainability",
+    "cleantech": "Climate / Sustainability",
+    "sustainability": "Climate / Sustainability",
+    "gaming": "Gaming / Media",
+    "media": "Gaming / Media",
+    "agritech": "Agritech",
+    "agriculture": "Agritech",
 }
+
+
+def _build_niche_question(resume_profile: dict) -> dict:
+    """Build niche question, reordering options to front-rank verticals from v2 vertical_exposure."""
+    vertical_exposure: list = resume_profile.get("vertical_exposure") or []
+
+    # Map each vertical_exposure entry to a niche option label
+    matched_niches: list[str] = []
+    for v in (vertical_exposure if isinstance(vertical_exposure, list) else []):
+        niche = _VERTICAL_TO_NICHE.get(v.lower().replace(" ", "-"))
+        if niche and niche not in matched_niches and niche != "No strong preference":
+            matched_niches.append(niche)
+
+    # Reorder: matched first, then remaining, always with "No strong preference" last
+    remaining = [n for n in _NICHE_OPTIONS_BASE if n not in matched_niches and n != "No strong preference"]
+    ordered = matched_niches + remaining + ["No strong preference"]
+    options = [{"label": chr(65 + i), "text": n} for i, n in enumerate(ordered)]
+
+    if matched_niches:
+        vertical_str = " and ".join(matched_niches[:2])
+        message = (
+            f"Based on your background in {vertical_str}, these spaces probably feel most natural. "
+            f"Pick up to 3 and we'll focus the search there."
+        )
+    else:
+        message = "Which of these spaces genuinely excites you? Pick up to 3 and we'll focus the search there."
+
+    return {
+        "key": "niche_keywords",
+        "ack": None,
+        "message": message,
+        "mcq": {
+            "question": "Which niches do you want us to prioritize?",
+            "options": options,
+            "allow_multiple": True,
+        },
+        "text_input": False,
+    }
 
 # Tech-stack chip pickers per cluster — only fired for high-clarity technical candidates
 _TECH_STACK_BY_CLUSTER: dict[str, list[str]] = {
@@ -239,11 +316,18 @@ def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profil
         return "Location noted."
 
     if prev_q_key == "company_stage":
+        company_type_avoid: list = resume_profile.get("company_type_avoid") or []
+        avoid_enterprise = any(t in company_type_avoid for t in ("large-mnc", "enterprise", "corporate"))
+        avoid_early = any(t in company_type_avoid for t in ("pre-seed", "early-stage", "seed-stage"))
         if "early" in al or "seed" in al:
+            if avoid_early:
+                return "Early-stage, worth noting your background tends to thrive with more structure. But if that energy is what you want, go for it."
             return "Early-stage, where things actually move. Good call."
         if "growth" in al or "50-500" in al:
             return "Growth-stage, sweet spot of structure and speed."
         if "large" in al or "mnc" in al or "enterprise" in al:
+            if avoid_enterprise:
+                return "Enterprise noted. Just flagging that your profile tends to fit faster-moving environments better. Your call though."
             return "Enterprise, stability and scale. Noted."
         if "no strong" in al:
             return "Open book, we'll cast a wide net and let fit show itself."
@@ -567,12 +651,20 @@ _FLEX_OUTCOME_COPY: dict[str, tuple[str, str]] = {
 }
 
 
-def _build_flex_project_question(cluster_key: str) -> dict:
+def _build_flex_project_question(cluster_key: str, resume_profile: dict | None = None) -> dict:
     prompt, placeholder = _FLEX_PROJECT_COPY.get(cluster_key, _FLEX_PROJECT_COPY["other"])
+    strongest_hook: str = ((resume_profile or {}).get("strongest_hook") or "").strip()
+    if strongest_hook:
+        hook = strongest_hook.rstrip(".")
+        # Capitalise first char, lowercase the rest for mid-sentence fit
+        hook_lower = hook[0].lower() + hook[1:] if hook else hook
+        message = f"Based on your resume, you've {hook_lower}. Tell me about the specific project behind that."
+    else:
+        message = prompt
     return {
         "key": "flex_best_project",
         "ack": None,
-        "message": prompt,
+        "message": message,
         "mcq": None,
         "text_input": True,
         "input_placeholder": placeholder,
@@ -640,8 +732,22 @@ _CLUSTER_TO_FLEX_COPY = {
 
 
 def _flex_copy_key(answers: dict, resume_profile: dict) -> str:
-    """Pick the flex prompt bucket from cluster + target_role + resume."""
+    """Pick the flex prompt bucket from cluster + target_role + resume.
+
+    v2 override: if distribution_signal=True on a technical profile, use "product"
+    copy — their stories are about impact and distribution, not just code shipped.
+    """
     cluster = _detect_role_cluster(answers, resume_profile)
+    distribution_signal: bool = bool(resume_profile.get("distribution_signal"))
+    execution_style: str = (resume_profile.get("execution_style") or "").lower()
+
+    # v2: builder/engineer with distribution signal → product copy fits better
+    if cluster in ("software_engineering", "ml_engineering") and distribution_signal:
+        return "product"
+    # v2: execution_style "builder" with growth/gtm archetype hint
+    if "builder" in execution_style and "gtm" in (resume_profile.get("archetype_label") or "").lower():
+        return "product"
+
     if cluster in _CLUSTER_TO_FLEX_COPY:
         return _CLUSTER_TO_FLEX_COPY[cluster]
     target = (answers.get("target_role") or "").lower()
@@ -695,7 +801,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_build_location_question(resume_profile, resume_text, parsed_json))
     sequence.append(_build_company_stage_question(resume_profile, answers))
     sequence.append(_build_career_goal_question(resume_profile, answers))
-    sequence.append(_build_dream_companies_question(answers))
+    sequence.append(_build_dream_companies_question(answers, resume_profile))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q8_WORK_MODE)
 
@@ -703,7 +809,7 @@ def build_question_sequence(state: dict) -> list[dict]:
 
     # Niche keywords — asked for medium + high (skipped only on "still figuring out")
     if clarity in ("medium", "high"):
-        sequence.append(_Q_NICHE_KEYWORDS)
+        sequence.append(_build_niche_question(resume_profile))
 
     # Tech stack — asked for high clarity AND technical cluster
     if clarity == "high":
@@ -714,7 +820,7 @@ def build_question_sequence(state: dict) -> list[dict]:
 
     # Flex (email-fuel) questions — always asked, role-adaptive copy
     flex_key = _flex_copy_key(answers, resume_profile)
-    sequence.append(_build_flex_project_question(flex_key))
+    sequence.append(_build_flex_project_question(flex_key, resume_profile))
     sequence.append(_build_flex_outcome_question(flex_key))
 
     return sequence
@@ -771,21 +877,49 @@ def build_message(
 # ---------------------------------------------------------------------------
 
 
-def _build_dream_companies_question(answers: dict) -> dict:
+# Maps v2 company_type_best_fit values to aspirational example companies
+_COMPANY_TYPE_EXAMPLES = {
+    "ai-native-startup": "ElevenLabs, Glean, Cohere",
+    "vertical-saas": "Rippling, Ironclad, Leapwork",
+    "b2b-saas": "Notion, Linear, Loom",
+    "fintech": "Razorpay, Stripe, Brex",
+    "devtools": "Vercel, Supabase, Railway",
+    "automation-agency": "Bardeen, Copy.ai, Jasper",
+    "consulting-firm": "McKinsey, BCG, Bain",
+    "large-mnc": "Google, Microsoft, Goldman Sachs",
+    "growth-stage-startup": "Swiggy, Meesho, Gupshup",
+    "deep-tech": "DeepMind, OpenAI, Mistral",
+    "consumer-tech": "Zepto, Blinkit, CRED",
+    "edtech": "Teachable, Maven, Outlier",
+}
+
+
+def _build_dream_companies_question(answers: dict, resume_profile: dict | None = None) -> dict:
     """
     Build Q6 dream companies question — text input with adaptive examples
-    based on Q4 company_stage answer.
+    based on company_type_best_fit (v2) or company_stage answer.
     """
     stage = (answers.get("company_stage") or "").lower()
+    profile = resume_profile or {}
 
-    if "early" in stage or "seed" in stage:
-        examples = "Stripe, Zerodha, Notion"
-    elif "growth" in stage:
-        examples = "Razorpay, Swiggy, Meesho"
-    elif "large" in stage or "mnc" in stage or "enterprise" in stage:
-        examples = "EY, Google, McKinsey"
-    else:
-        examples = "Google, Deloitte, Flipkart"
+    # v2: use company_type_best_fit for sharp, profile-matched examples
+    company_type_best_fit: list = profile.get("company_type_best_fit") or []
+    examples = None
+    for ctype in company_type_best_fit:
+        examples = _COMPANY_TYPE_EXAMPLES.get(ctype)
+        if examples:
+            break
+
+    # fallback to stage-based defaults
+    if not examples:
+        if "early" in stage or "seed" in stage:
+            examples = "Stripe, Zerodha, Notion"
+        elif "growth" in stage:
+            examples = "Razorpay, Swiggy, Meesho"
+        elif "large" in stage or "mnc" in stage or "enterprise" in stage:
+            examples = "EY, Google, McKinsey"
+        else:
+            examples = "Google, Deloitte, Flipkart"
 
     return {
         "key": "dream_companies",
@@ -1058,6 +1192,14 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
             "Management Consultant (Analyst)",
         ]
 
+    # v2: prepend archetype_label as first option if it isn't already covered
+    archetype_label: str = (profile.get("archetype_label") or "").strip()
+    if archetype_label:
+        archetype_lower = archetype_label.lower()
+        already_covered = any(archetype_lower in r.lower() or r.lower() in archetype_lower for r in ontology_roles)
+        if not already_covered:
+            ontology_roles.insert(0, archetype_label)
+
     # Deduplicate, cap at 6, add "Something else"
     seen, final_roles = set(), []
     for r in ontology_roles:
@@ -1070,10 +1212,17 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     options = [{"label": chr(65 + i), "text": r} for i, r in enumerate(final_roles)]
     options.append({"label": chr(65 + len(final_roles)), "text": "Something else"})
 
+    msg = (
+        f"Which of these roles feels closest to what you're actually going after? "
+        f"I pulled these from your background"
+        + (f", and '{archetype_label}' is what your profile most reads as" if archetype_label else "")
+        + ". If none fit just pick 'Something else'."
+    )
+
     return {
         "key": "target_role",
         "ack": None,
-        "message": "Which of these roles feels closest to what you're actually going after? I pulled these from your background, but if none fit just pick 'Something else'.",
+        "message": msg,
         "mcq": {
             "question": "Which role fits best?",
             "options": options,
