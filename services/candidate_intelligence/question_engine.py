@@ -303,12 +303,33 @@ _AI_SUBDOMAINS = {
 
 
 def _infer_stage_suggestion(resume_profile: dict, answers: dict) -> str | None:
-    """Return a 1-2 sentence stage suggestion using standard profile fields + collected answers.
+    """Return a 1-2 sentence stage suggestion, using v2 fields when available.
 
-    Uses only the fields in the production resume_profile (domain, subdomain,
-    seniority, top_skills, likely_roles). Falls back to answer signals when
-    profile is sparse or not yet extracted.
+    Priority: v2 company_stage_fit > v2 archetype_label > domain/subdomain signals > answer signals.
     """
+    # --- v2 fields (populated when extract_enhanced_resume_profile ran) ---
+    company_stage_fit: list = resume_profile.get("company_stage_fit") or []
+    archetype_label: str = (resume_profile.get("archetype_label") or "").strip()
+    company_type_best_fit: list = resume_profile.get("company_type_best_fit") or []
+
+    if company_stage_fit:
+        early = any(s in company_stage_fit for s in ("pre-seed", "seed", "series-a"))
+        growth = any(s in company_stage_fit for s in ("series-b", "growth"))
+        enterprise = "enterprise" in company_stage_fit
+
+        if archetype_label and early:
+            ai_type = any(t in (company_type_best_fit or []) for t in ("ai-native-startup", "automation-agency", "vertical-saas"))
+            if ai_type:
+                return f"Your profile reads as a {archetype_label}. AI-native early-stage companies are where that profile is most in demand right now."
+            return f"Your profile reads as a {archetype_label}. Early-stage companies are where that kind of end-to-end ownership tends to be valued most."
+        if early and not enterprise:
+            return "Based on your background, early-stage companies are where you'd likely have the most impact and ownership."
+        if growth and not early:
+            return "Based on your background, growth-stage companies look like the strongest fit: real scale but still moving fast."
+        if enterprise and not early and not growth:
+            return "Your background maps well to established companies with structured environments."
+
+    # --- v1 / standard fields fallback ---
     domain = (resume_profile.get("domain") or "").lower()
     subdomain = (resume_profile.get("subdomain") or "").lower()
     seniority = (resume_profile.get("seniority") or "").lower()
@@ -329,7 +350,6 @@ def _infer_stage_suggestion(resume_profile: dict, answers: dict) -> str | None:
     is_student = "student" in career_stage_ans or seniority == "student"
     is_internship = "internship" in job_type_ans
 
-    # AI profile seeking internship in a startup hub
     if is_ai_profile and is_internship and in_startup_hub:
         city = next(
             (c for c in ["Bengaluru", "Mumbai", "Delhi", "Hyderabad", "Pune"]
@@ -341,27 +361,14 @@ def _infer_stage_suggestion(resume_profile: dict, answers: dict) -> str | None:
             f"{city_str} a strong AI startup scene right now. "
             f"Early-stage companies are where you'll get real AI work from day one rather than scoped tasks."
         )
-
-    # AI profile, any internship
     if is_ai_profile and is_internship:
-        return (
-            "For AI internships, early-stage startups tend to give you the most hands-on work from day one. "
-            "Growth-stage can work too but you'll likely get a narrower scope."
-        )
-
-    # AI profile, full-time, junior/mid
+        return "For AI internships, early-stage startups tend to give you the most hands-on work from day one."
     if is_ai_profile and not is_internship and seniority in ("junior", "mid"):
         return "Your AI background maps well to early-stage or growth-stage companies right now. Both are actively hiring in this space."
-
-    # AI profile, full-time, senior
     if is_ai_profile and not is_internship and seniority == "senior":
         return "With your background, growth-stage AI companies are often the sweet spot: real scale and still moving fast."
-
-    # General student in startup hub for internship
     if is_student and is_internship and in_startup_hub:
         return "Early-stage startups tend to be the sharpest learning environment for internships, especially in a hub like yours."
-
-    # Experienced professional (from answers, not resume)
     if "experienced" in career_stage_ans or seniority in ("mid", "senior"):
         return "With your experience level, growth-stage companies are often the sweet spot: real scale but still moving fast enough to matter."
 
@@ -397,7 +404,8 @@ def _build_company_stage_question(resume_profile: dict, answers: dict) -> dict:
 
 
 def _build_career_goal_question(resume_profile: dict, answers: dict) -> dict:
-    """Build the career goal question with a day-to-day suggestion seeded from profile + answers."""
+    """Build the career goal question with a day-to-day suggestion from v2 archetype or domain signals."""
+    archetype_label: str = (resume_profile.get("archetype_label") or "").strip()
     domain = (resume_profile.get("domain") or "").lower()
     subdomain = (resume_profile.get("subdomain") or "").lower()
     top_skills = [s.lower() for s in (resume_profile.get("top_skills") or [])]
@@ -407,39 +415,54 @@ def _build_career_goal_question(resume_profile: dict, answers: dict) -> dict:
     suggestion = None
     placeholder = "e.g. Running GTM for an early-stage AI startup, Closing enterprise deals in SaaS"
 
-    is_ai = (
-        subdomain in _AI_SUBDOMAINS
-        or any(kw in top_skills for kw in ("ai", "llm", "openai", "langchain", "pytorch"))
-    )
+    # v2: use archetype_label for a sharp, personalised suggestion
+    _archetype_day_to_day = {
+        "founding product engineer": "shipping AI products from zero to one, talking to users, and owning the full stack from idea to deployment",
+        "ai-native founder's office hire": "owning cross-functional execution across product, growth, and ops at a fast-moving AI startup",
+        "zero-to-one growth systems builder": "building and running growth systems end-to-end, from acquisition to activation",
+        "applied ai solutions architect": "designing and delivering AI automations for clients, owning the whole solution from scoping to deployment",
+        "gtm automation engineer": "building automated GTM systems that turn outbound into a repeatable, scalable motion",
+        "full-stack ai builder": "designing, building, and deploying AI-powered products end-to-end",
+        "product-led growth operator": "owning the product growth loop, running experiments, and turning activation into retention",
+        "ai product strategist": "sitting at the intersection of AI engineering and product, deciding what to build and then building it",
+        "founder's office": "owning execution across product, growth, and ops for a fast-moving founding team",
+        "ai automation consultant": "diagnosing business problems and building AI-powered automations that save real time and money",
+    }
 
-    if is_ai:
-        if is_early:
-            suggestion = "building and shipping AI features end-to-end at a fast-moving startup"
+    archetype_lower = archetype_label.lower()
+    for key, day_to_day in _archetype_day_to_day.items():
+        if key in archetype_lower or archetype_lower in key:
+            suggestion = day_to_day
+            placeholder = f"e.g. {day_to_day[:80]}..."
+            break
+
+    # fallback to domain signals if no archetype match
+    if not suggestion:
+        is_ai = subdomain in _AI_SUBDOMAINS or any(kw in top_skills for kw in ("ai", "llm", "openai", "langchain", "pytorch"))
+        if is_ai:
+            suggestion = "building and shipping AI features end-to-end at a fast-moving startup" if is_early else "designing and shipping AI systems, owning a product surface end-to-end"
             placeholder = "e.g. Building and deploying AI agents end-to-end at a seed-stage startup"
-        else:
-            suggestion = "designing and shipping AI systems, owning a product surface end-to-end"
-            placeholder = "e.g. Owning the ML pipeline for a product used by thousands"
-    elif domain == "software_engineering":
-        suggestion = "writing code, shipping features, and owning a product area end-to-end"
-        placeholder = "e.g. Building backend systems for a fast-moving B2B SaaS startup"
-    elif domain in ("data_analytics", "data"):
-        suggestion = "running analysis, building dashboards, and helping the team make better decisions with data"
-        placeholder = "e.g. Building the analytics stack and owning data insights for a growth-stage startup"
-    elif domain == "marketing":
-        suggestion = "running growth experiments, owning user acquisition channels, and iterating fast on what works"
-        placeholder = "e.g. Running performance marketing and owning the growth funnel at a Series A startup"
-    elif domain in ("product", "product_management"):
-        suggestion = "writing specs, talking to users, and working closely with eng to ship product"
-        placeholder = "e.g. Owning a product vertical from roadmap to launch at a fast-moving startup"
-    elif domain in ("sales", "sales_bd"):
-        suggestion = "closing deals, managing a pipeline, and owning revenue targets"
-        placeholder = "e.g. Running outbound, closing pilots, and building the early revenue engine"
-    elif domain in ("consulting", "consulting_strategy"):
-        suggestion = "framing problems, running structured analysis, and turning insights into decisions"
-        placeholder = "e.g. Supporting strategy work for high-growth startups or running client engagements"
-    elif domain == "finance":
-        suggestion = "building financial models, running analysis, and supporting investment or strategy decisions"
-        placeholder = "e.g. Building the financial model for a Series B raise, owning FP&A at a growth-stage company"
+        elif domain == "software_engineering":
+            suggestion = "writing code, shipping features, and owning a product area end-to-end"
+            placeholder = "e.g. Building backend systems for a fast-moving B2B SaaS startup"
+        elif domain in ("data_analytics", "data"):
+            suggestion = "running analysis, building dashboards, and helping the team make better decisions with data"
+            placeholder = "e.g. Building the analytics stack and owning data insights for a growth-stage startup"
+        elif domain == "marketing":
+            suggestion = "running growth experiments, owning user acquisition channels, and iterating fast on what works"
+            placeholder = "e.g. Running performance marketing and owning the growth funnel at a Series A startup"
+        elif domain in ("product", "product_management"):
+            suggestion = "writing specs, talking to users, and working closely with eng to ship product"
+            placeholder = "e.g. Owning a product vertical from roadmap to launch at a fast-moving startup"
+        elif domain in ("sales", "sales_bd"):
+            suggestion = "closing deals, managing a pipeline, and owning revenue targets"
+            placeholder = "e.g. Running outbound, closing pilots, and building the early revenue engine"
+        elif domain in ("consulting", "consulting_strategy"):
+            suggestion = "framing problems, running structured analysis, and turning insights into decisions"
+            placeholder = "e.g. Supporting strategy work for high-growth startups or running client engagements"
+        elif domain == "finance":
+            suggestion = "building financial models and supporting investment or strategy decisions"
+            placeholder = "e.g. Building the financial model for a Series B raise, owning FP&A at a growth-stage company"
 
     if suggestion:
         message = (

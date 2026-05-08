@@ -224,10 +224,12 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def extract_and_store_resume_profile(candidate_id: int, db_session_factory: Any) -> None:
-    """
-    Intended to be called as a FastAPI BackgroundTask.
-    Opens its own DB session (background tasks run after response is sent,
-    so the request session is already closed).
+    """FastAPI BackgroundTask wrapper. Uses the v2 enhanced extraction so that
+    archetype_label, company_stage_fit, company_type_avoid, execution_style,
+    distribution_signal, etc. are stored to candidates.resume_profile and
+    available to the quiz engine for personalised suggestions.
+
+    Re-extracts if the stored profile is v1 (missing archetype_label).
     """
     try:
         db = db_session_factory()
@@ -237,18 +239,23 @@ def extract_and_store_resume_profile(candidate_id: int, db_session_factory: Any)
             if not candidate:
                 logger.warning(f"[ResumeIntelligence] Candidate {candidate_id} not found")
                 return
-            if candidate.resume_profile:
-                logger.info(f"[ResumeIntelligence] Candidate {candidate_id} already has profile, skipping")
+
+            existing = candidate.resume_profile
+            if isinstance(existing, dict) and existing.get("archetype_label"):
+                logger.info(f"[ResumeIntelligence] Candidate {candidate_id} already has v2 profile, skipping")
                 return
 
-            logger.info(f"[ResumeIntelligence] Extracting profile for candidate {candidate_id}")
-            profile = extract_resume_profile(
+            logger.info(f"[ResumeIntelligence] Extracting v2 profile for candidate {candidate_id}")
+            profile = extract_enhanced_resume_profile(
                 resume_text=candidate.resume_text or "",
-                parsed_json=candidate.parsed_json,
             )
             candidate.resume_profile = profile
             db.commit()
-            logger.info(f"[ResumeIntelligence] Profile stored for candidate {candidate_id}: domain={profile.get('domain')}, seniority={profile.get('seniority')}")
+            logger.info(
+                f"[ResumeIntelligence] v2 profile stored for candidate {candidate_id}: "
+                f"domain={profile.get('domain')}, archetype={profile.get('archetype_label')}, "
+                f"stage_fit={profile.get('company_stage_fit')}"
+            )
         finally:
             db.close()
     except Exception as exc:
