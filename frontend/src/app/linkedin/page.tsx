@@ -608,7 +608,7 @@ export default function LinkedInOnboardingPage() {
                             </p>
                           </div>
                           <a
-                            href="/studojo-linkedin-connector.zip"
+                            href="/outreach/studojo-linkedin-connector.zip"
                             download
                             className="flex-shrink-0 inline-flex items-center gap-1.5 bg-primary text-white text-xs font-medium px-3 py-2 rounded-lg hover:bg-primary/90 transition-colors"
                           >
