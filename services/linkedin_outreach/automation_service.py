@@ -212,18 +212,20 @@ def _search_linkedin_leads_sync(
     industries: list[str],
     keywords: Optional[str] = None,
     limit: int = 50,
+    proxy_url: str = "",
 ) -> list[dict]:
-    """Synchronous search using a plain requests.Session.
+    """Synchronous search using a plain requests.Session routed via residential proxy.
 
-    We use requests (not httpx) because requests preserves the Voyager
-    filter string `->` literally, while httpx encodes it as `%3E`.
-    We set the Cookie header directly rather than using the linkedin-api
-    Client to avoid its redirect/auth intercept logic.
+    We use requests (not httpx) because requests preserves Voyager filter
+    syntax literally, while httpx encodes -> as %3E. Routed through the
+    Evomi residential proxy so LinkedIn doesn't reject the datacenter IP.
     """
     import requests
 
     session = requests.Session()
     session.max_redirects = 3
+    if proxy_url:
+        session.proxies = {"http": proxy_url, "https": proxy_url}
 
     keyword_str = f"{target_role} {keywords}".strip() if keywords else target_role
 
@@ -285,9 +287,11 @@ async def search_linkedin_leads(
 ) -> list[dict]:
     """Async wrapper around the sync search (runs in thread to avoid blocking)."""
     try:
+        from core.config import settings
+        proxy_url = settings.LINKEDIN_PROXY_URL.strip() if settings.LINKEDIN_PROXY_URL else ""
         people = await asyncio.to_thread(
             _search_linkedin_leads_sync,
-            li_at, jsessionid, target_role, locations, industries, keywords, limit,
+            li_at, jsessionid, target_role, locations, industries, keywords, limit, proxy_url,
         )
         return people
     except Exception as e:
