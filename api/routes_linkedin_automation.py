@@ -109,6 +109,50 @@ async def verify_pin(
     return {"ok": True, "linkedin_name": display_name}
 
 
+class LinkedInCookieLoginRequest(BaseModel):
+    li_at: str
+    jsessionid: str
+
+
+@router.post("/login/cookies")
+async def login_with_cookies(
+    body: LinkedInCookieLoginRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Store LinkedIn session cookies directly (bypasses email+password challenge)."""
+    if not body.li_at or not body.jsessionid:
+        raise HTTPException(status_code=400, detail="li_at and jsessionid are required")
+
+    display_name = None
+    try:
+        import re as _re
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            res = await client.get(
+                "https://www.linkedin.com/in/me/",
+                headers={
+                    "Cookie": f"li_at={body.li_at}; JSESSIONID={body.jsessionid}",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                    ),
+                },
+            )
+        match = _re.search(r"<title>([^|<]+)", res.text)
+        if match:
+            display_name = match.group(1).strip()
+        if not display_name or "Sign In" in (display_name or ""):
+            raise HTTPException(status_code=400, detail="Cookies are invalid or expired. Please copy fresh cookies from your browser.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}")
+
+    _store_token(db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name)
+    return {"ok": True, "linkedin_name": display_name}
+
+
 # ── Campaign CRUD ──────────────────────────────────────────────────────────────
 
 class CreateCampaignRequest(BaseModel):
