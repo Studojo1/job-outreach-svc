@@ -301,11 +301,13 @@ async def search_leads(
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first.")
 
-    # Clear existing pending leads before a new search
+    # Clear existing pending leads and reset search_failed status before a new search
     db.query(LinkedInConnectionRequest).filter(
         LinkedInConnectionRequest.campaign_id == campaign_id,
         LinkedInConnectionRequest.status == "pending",
     ).delete()
+    if c.status == "search_failed":
+        c.status = "draft"
     db.commit()
 
     background_tasks.add_task(
@@ -350,7 +352,10 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
 
         if not people:
-            logger.warning("No leads found for campaign %d — check cookies validity and search params", campaign_id)
+            logger.warning("No leads found for campaign %d — check search params and Apollo key", campaign_id)
+            c.status = "search_failed"
+            c.updated_at = datetime.utcnow()
+            db.commit()
             return
 
         # Generate personalised connection notes for each lead
@@ -475,7 +480,7 @@ async def resume_campaign(
     db: Session = Depends(get_db),
 ):
     c = _get_campaign_or_404(campaign_id, current_user.id, db)
-    if c.status != "paused":
+    if c.status not in ("paused", "auth_failed"):
         raise HTTPException(status_code=400, detail="Campaign is not paused")
     c.status = "running"
     c.updated_at = datetime.utcnow()

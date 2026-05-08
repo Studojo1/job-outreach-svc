@@ -215,7 +215,43 @@ export default function LinkedInOnboardingPage() {
   const back = () => setStep(s => { const n = (s - 1) as Step; saveWizard(n, quiz, campaignId); return n; });
 
   // Step 4 → connect + search leads
+  const startLeadSearch = async (id: number) => {
+    setSearchingLeads(true);
+    setLeadsError('');
+    setLeads([]);
+    await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const [rRes, cRes] = await Promise.all([
+          api.get(`/linkedin/automation/campaigns/${id}/requests?limit=50`),
+          api.get(`/linkedin/automation/campaigns/${id}`),
+        ]);
+        if (rRes.data.length > 0) { setLeads(rRes.data); setSearchingLeads(false); return; }
+        if (cRes.data.status === 'search_failed') {
+          setSearchingLeads(false);
+          setLeadsError('search_failed');
+          return;
+        }
+      } catch {}
+      attempts++;
+      if (attempts < 20) pollRef.current = setTimeout(poll, 3000);
+      else { setSearchingLeads(false); setLeadsError('No leads found. Try broadening your search criteria.'); }
+    };
+    poll();
+  };
+
   const proceedAfterLogin = async () => {
+    // If we already have a campaign (reconnect from dashboard), just resume it
+    if (campaignId && campaign?.status === 'auth_failed') {
+      await api.post(`/linkedin/automation/campaigns/${campaignId}/resume`);
+      await fetchDashboard(campaignId);
+      setStep(6);
+      saveWizard(6, quiz, campaignId);
+      pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
+      return;
+    }
+
     const res = await api.post('/linkedin/automation/campaigns', {
       name: quiz.campaign_name || `${quiz.target_role} outreach`,
       target_role: quiz.target_role,
@@ -229,19 +265,7 @@ export default function LinkedInOnboardingPage() {
     setCampaignId(id);
     setStep(5);
     saveWizard(5, quiz, id);
-    setSearchingLeads(true);
-    await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
-    let attempts = 0;
-    const poll = async () => {
-      try {
-        const r = await api.get(`/linkedin/automation/campaigns/${id}/requests?limit=50`);
-        if (r.data.length > 0) { setLeads(r.data); setSearchingLeads(false); return; }
-      } catch {}
-      attempts++;
-      if (attempts < 20) pollRef.current = setTimeout(poll, 3000);
-      else { setSearchingLeads(false); setLeadsError('No leads found. Try broadening your search criteria.'); }
-    };
-    poll();
+    await startLeadSearch(id);
   };
 
   const handleConnect = async () => {
@@ -418,7 +442,7 @@ export default function LinkedInOnboardingPage() {
           pollRef.current = setInterval(() => fetchDashboard(savedCampaignId), 30000);
         }).catch(() => { clearWizard(); setRestored(true); });
       } else if (savedStep === 5 && savedCampaignId) {
-        // Restore leads step — re-fetch leads
+        // Restore leads step — re-fetch existing leads (don't re-trigger search)
         api.get(`/linkedin/automation/campaigns/${savedCampaignId}/requests?limit=50`)
           .then(r => {
             if (r.data.length > 0) {
@@ -834,8 +858,46 @@ export default function LinkedInOnboardingPage() {
                   <p className="font-medium text-sm">Finding {quiz.target_role}s...</p>
                   <p className="text-xs text-muted-foreground mt-1">Searching LinkedIn for your target profiles</p>
                 </div>
+              ) : leadsError === 'search_failed' ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 space-y-3">
+                  <div className="flex items-start gap-2 text-amber-800">
+                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-medium">No leads found</p>
+                      <p className="text-xs mt-0.5 text-amber-700">
+                        This usually means your LinkedIn session expired or the search criteria returned no results.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      onClick={() => campaignId && startLeadSearch(campaignId)}
+                      className="w-full text-sm"
+                    >
+                      <Search className="w-3.5 h-3.5 mr-1.5" /> Retry search
+                    </Button>
+                    <button
+                      onClick={() => {
+                        setLeadsError('');
+                        setStep(4);
+                        saveWizard(4, quiz, campaignId);
+                      }}
+                      className="text-xs text-amber-700 hover:underline text-center"
+                    >
+                      Reconnect LinkedIn session instead
+                    </button>
+                  </div>
+                </div>
               ) : leadsError ? (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">{leadsError}</div>
+                <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-3">
+                  <p className="text-sm text-red-700">{leadsError}</p>
+                  <Button
+                    onClick={() => campaignId && startLeadSearch(campaignId)}
+                    className="w-full text-sm"
+                  >
+                    <Search className="w-3.5 h-3.5 mr-1.5" /> Retry search
+                  </Button>
+                </div>
               ) : (
                 <div className="bg-white border border-border rounded-2xl overflow-hidden">
                   <div className="px-4 py-3 border-b border-border flex items-center gap-2">
@@ -951,7 +1013,7 @@ export default function LinkedInOnboardingPage() {
               </div>
               <Button
                 onClick={toggleCampaign}
-                disabled={toggling}
+                disabled={toggling || campaign.status === 'auth_failed'}
                 variant={campaign.status === 'running' ? 'outline' : 'primary'}
                 className="flex items-center gap-1.5 text-sm"
               >
@@ -961,6 +1023,26 @@ export default function LinkedInOnboardingPage() {
                 }
               </Button>
             </div>
+
+            {/* Auth failed banner */}
+            {campaign.status === 'auth_failed' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-5 flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-amber-800">LinkedIn session expired</p>
+                  <p className="text-xs text-amber-700 mt-0.5">Campaign paused — reconnect to resume sending.</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setStep(4);
+                    saveWizard(4, quiz, campaignId);
+                  }}
+                  className="flex-shrink-0 text-xs font-medium text-amber-800 underline hover:no-underline"
+                >
+                  Reconnect
+                </button>
+              </div>
+            )}
 
             {/* Metrics */}
             <div className="grid grid-cols-4 gap-3 mb-6">

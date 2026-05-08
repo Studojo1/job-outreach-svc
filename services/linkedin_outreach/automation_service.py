@@ -82,6 +82,10 @@ async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, ses
     return None
 
 
+class LinkedInAuthError(Exception):
+    """Raised when LinkedIn returns 401/403 indicating an expired or invalid session."""
+
+
 async def send_connection_request(
     li_at: str,
     jsessionid: str,
@@ -89,7 +93,10 @@ async def send_connection_request(
     note: str = "",
     session_id: str | None = None,
 ) -> bool:
-    """Send a LinkedIn connection request via Voyager. Returns True on success."""
+    """Send a LinkedIn connection request via Voyager. Returns True on success.
+
+    Raises LinkedInAuthError when the session is expired (401/403).
+    """
     payload = {
         "trackingId": _tracking_id(),
         "invitations": [],
@@ -112,8 +119,12 @@ async def send_connection_request(
             )
         if res.status_code in (200, 201):
             return True
+        if res.status_code in (401, 403):
+            raise LinkedInAuthError(f"Session expired (status {res.status_code})")
         logger.warning("Connection request got status %d: %s", res.status_code, res.text[:200])
         return False
+    except LinkedInAuthError:
+        raise
     except Exception as e:
         logger.error("send_connection_request failed: %s", e)
         return False
@@ -202,7 +213,122 @@ def _tracking_id() -> str:
     return base64.b64encode(os.urandom(16)).decode()
 
 
-# ── Lead search via Voyager ────────────────────────────────────────────────────
+# ── Lead search via Apollo.io (primary) ───────────────────────────────────────
+
+_LOCATION_MAP: dict[str, str] = {
+    "India": "India",
+    "United States": "United States",
+    "United Kingdom": "United Kingdom",
+    "UAE / Dubai": "United Arab Emirates",
+    "Singapore": "Singapore",
+    "Europe": "Europe",
+    "Southeast Asia": "Southeast Asia",
+    "Global": "",
+}
+
+_INDUSTRY_MAP: dict[str, str] = {
+    "SaaS / Software": "Information Technology and Services",
+    "Fintech": "Financial Services",
+    "E-commerce": "Retail",
+    "Health Tech": "Hospital & Health Care",
+    "Ed Tech": "Education Management",
+    "Climate Tech": "Renewables & Environment",
+    "Media / Content": "Online Media",
+    "Consulting": "Management Consulting",
+    "D2C / Consumer": "Consumer Goods",
+    "AI / ML": "Artificial Intelligence",
+}
+
+_ROLE_EXPANSION: dict[str, list[str]] = {
+    "Founder / Co-founder": ["Founder", "Co-Founder", "Co-founder"],
+    "Head of Marketing": ["Head of Marketing", "VP Marketing", "VP of Marketing", "Director of Marketing"],
+    "VP Sales": ["VP Sales", "VP of Sales", "Head of Sales", "Director of Sales"],
+    "Product Manager": ["Product Manager", "Senior Product Manager", "VP Product", "Head of Product"],
+    "CTO": ["CTO", "Chief Technology Officer", "VP Engineering", "Head of Engineering"],
+    "HR Manager": ["HR Manager", "HR Director", "Head of HR", "Head of People"],
+    "Chief of Staff": ["Chief of Staff"],
+}
+
+
+async def search_linkedin_leads_apollo(
+    target_role: str,
+    locations: list[str],
+    industries: list[str],
+    keywords: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Find leads via Apollo.io people search. Does not require LinkedIn session."""
+    import requests as _req
+    try:
+        from core.config import settings
+        api_key = (settings.APOLLO_API_KEY or "").strip()
+    except Exception:
+        api_key = ""
+
+    if not api_key or api_key == "your_apollo_key_here":
+        logger.warning("APOLLO_API_KEY not configured — skipping Apollo lead search")
+        return []
+
+    person_titles = _ROLE_EXPANSION.get(target_role, [target_role])
+
+    mapped_locations = [_LOCATION_MAP.get(loc, loc) for loc in locations]
+    mapped_locations = [l for l in mapped_locations if l]  # drop blanks (Global)
+
+    mapped_industries = [_INDUSTRY_MAP.get(ind, ind) for ind in industries]
+
+    payload: dict = {
+        "person_titles": person_titles,
+        "per_page": min(limit, 100),
+        "page": 1,
+    }
+    if mapped_locations:
+        payload["person_locations"] = mapped_locations
+    if mapped_industries:
+        payload["organization_industries"] = mapped_industries
+
+    try:
+        r = await asyncio.to_thread(
+            _req.post,
+            "https://api.apollo.io/api/v1/mixed_people/api_search",
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "X-Api-Key": api_key,
+            },
+            timeout=30,
+        )
+        if not r.ok:
+            logger.warning("Apollo API returned %d: %s", r.status_code, r.text[:200])
+            return []
+        data = r.json()
+        people = []
+        for p in data.get("people", []):
+            linkedin_url = (p.get("linkedin_url") or "").strip()
+            if not linkedin_url or "/in/" not in linkedin_url:
+                continue
+            first = p.get("first_name") or ""
+            last = p.get("last_name") or ""
+            name = f"{first} {last}".strip()
+            if not name:
+                continue
+            org = p.get("organization") or {}
+            company = org.get("name", "") if isinstance(org, dict) else ""
+            people.append({
+                "name": name,
+                "headline": p.get("title") or "",
+                "company": company,
+                "profile_url": linkedin_url.rstrip("/") + "/",
+                "profile_image_url": p.get("photo_url"),
+            })
+        logger.info("Apollo search: %d leads from %d raw results", len(people), len(data.get("people", [])))
+        return people[:limit]
+    except Exception as e:
+        logger.error("Apollo search failed: %s", e)
+        return []
+
+
+# ── Lead search via LinkedIn Voyager (fallback) ────────────────────────────────
 
 def _search_linkedin_leads_sync(
     li_at: str,
@@ -285,7 +411,13 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Async wrapper around the sync search (runs in thread to avoid blocking)."""
+    """Search for leads. Tries Apollo.io first (no session needed), falls back to LinkedIn Voyager."""
+    # Apollo path — preferred, no JSESSIONID required
+    people = await search_linkedin_leads_apollo(target_role, locations, industries, keywords, limit)
+    if people:
+        return people
+
+    logger.warning("Apollo returned 0 leads; falling back to LinkedIn Voyager")
     try:
         from core.config import settings
         proxy_url = settings.LINKEDIN_PROXY_URL.strip() if settings.LINKEDIN_PROXY_URL else ""
@@ -295,7 +427,7 @@ async def search_linkedin_leads(
         )
         return people
     except Exception as e:
-        logger.error("search_linkedin_leads failed: %s", e)
+        logger.error("Voyager search failed: %s", e)
         return []
 
 
@@ -486,9 +618,17 @@ class LinkedInAutomationDaemon:
                         db.commit()
                         continue
 
-                ok = await send_connection_request(
-                    li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
-                )
+                try:
+                    ok = await send_connection_request(
+                        li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
+                    )
+                except LinkedInAuthError:
+                    # Session expired — pause campaign so user knows to reconnect
+                    logger.warning("Campaign %d: LinkedIn session expired, pausing", campaign.id)
+                    campaign.status = "auth_failed"
+                    campaign.updated_at = datetime.utcnow()
+                    db.commit()
+                    return
                 if ok:
                     req.status = "sent"
                     req.sent_at = datetime.utcnow()
