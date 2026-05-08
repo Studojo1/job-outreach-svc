@@ -18,7 +18,7 @@ from database.models import (
 from database.session import get_db
 from services.linkedin_outreach.automation_service import search_linkedin_leads
 from services.linkedin_outreach.crypto import decrypt, encrypt_pair
-from services.linkedin_outreach.login import linkedin_login
+from services.linkedin_outreach.login import linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
 
 logger = logging.getLogger(__name__)
@@ -32,29 +32,17 @@ class LinkedInLoginRequest(BaseModel):
     password: str
 
 
-@router.post("/login")
-async def login_with_credentials(
-    body: LinkedInLoginRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Log in to LinkedIn with email+password, store encrypted session tokens."""
-    if not body.email or not body.password:
-        raise HTTPException(status_code=400, detail="email and password are required")
+class LinkedInVerifyPinRequest(BaseModel):
+    session_key: str
+    pin: str
 
-    try:
-        li_at, jsessionid, display_name = linkedin_login(body.email, body.password)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-    li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
-
+def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: str | None):
     import secrets as _secrets
-    proxy_session_id = _secrets.token_hex(8)  # unique sticky session per account
+    li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
+    proxy_session_id = _secrets.token_hex(8)
 
-    existing = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    existing = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
     if existing:
         existing.li_at_enc = li_at_enc
         existing.jsessionid_enc = jsessionid_enc
@@ -64,15 +52,58 @@ async def login_with_credentials(
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
-            user_id=current_user.id,
+            user_id=user_id,
             li_at_enc=li_at_enc,
             jsessionid_enc=jsessionid_enc,
             nonce=nonce,
             linkedin_name=display_name,
             proxy_session_id=proxy_session_id,
         ))
-
     db.commit()
+    return display_name
+
+
+@router.post("/login")
+async def login_with_credentials(
+    body: LinkedInLoginRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Step 1 — attempt login. Returns ok=True on success, or challenge_required=True + session_key if PIN needed."""
+    if not body.email or not body.password:
+        raise HTTPException(status_code=400, detail="email and password are required")
+
+    try:
+        li_at, jsessionid, result = linkedin_login_start(body.email, body.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if li_at is None:
+        # result is the session_key — PIN required
+        return {"ok": False, "challenge_required": True, "session_key": result}
+
+    display_name = _store_token(db, current_user.id, li_at, jsessionid, result)
+    return {"ok": True, "linkedin_name": display_name}
+
+
+@router.post("/login/verify-pin")
+async def verify_pin(
+    body: LinkedInVerifyPinRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Step 2 — submit the PIN LinkedIn emailed. Completes login and stores the session."""
+    if not body.session_key or not body.pin:
+        raise HTTPException(status_code=400, detail="session_key and pin are required")
+
+    try:
+        li_at, jsessionid, display_name = linkedin_verify_pin(body.session_key, body.pin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _store_token(db, current_user.id, li_at, jsessionid, display_name)
     return {"ok": True, "linkedin_name": display_name}
 
 

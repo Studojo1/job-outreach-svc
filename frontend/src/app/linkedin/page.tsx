@@ -148,6 +148,10 @@ export default function LinkedInOnboardingPage() {
   const [showPass, setShowPass] = useState(false);
   const [connectLoading, setConnectLoading] = useState(false);
   const [connectError, setConnectError] = useState('');
+  const [challengeRequired, setChallengeRequired] = useState(false);
+  const [sessionKey, setSessionKey] = useState('');
+  const [pin, setPin] = useState('');
+  const [pinLoading, setPinLoading] = useState(false);
 
   // Messages state
   const [connectionNote, setConnectionNote] = useState('');
@@ -192,55 +196,63 @@ export default function LinkedInOnboardingPage() {
   const back = () => setStep(s => (s - 1) as Step);
 
   // Step 4 → connect + search leads
+  const proceedAfterLogin = async () => {
+    const res = await api.post('/linkedin/automation/campaigns', {
+      name: quiz.campaign_name || `${quiz.target_role} outreach`,
+      target_role: quiz.target_role,
+      target_industries: quiz.target_industries,
+      target_locations: quiz.target_locations,
+      target_company_sizes: quiz.target_company_sizes,
+      target_keywords: quiz.target_keywords || null,
+      daily_limit: dailyLimit,
+    });
+    const id = res.data.id;
+    setCampaignId(id);
+    setStep(5);
+    setSearchingLeads(true);
+    await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const r = await api.get(`/linkedin/automation/campaigns/${id}/requests?limit=50`);
+        if (r.data.length > 0) { setLeads(r.data); setSearchingLeads(false); return; }
+      } catch {}
+      attempts++;
+      if (attempts < 20) pollRef.current = setTimeout(poll, 3000);
+      else { setSearchingLeads(false); setLeadsError('No leads found. Try broadening your search criteria.'); }
+    };
+    poll();
+  };
+
   const handleConnect = async () => {
     setConnectLoading(true);
     setConnectError('');
     try {
-      await api.post('/linkedin/automation/login', { email: liEmail, password: liPassword });
-
-      // Create campaign
-      const res = await api.post('/linkedin/automation/campaigns', {
-        name: quiz.campaign_name || `${quiz.target_role} outreach`,
-        target_role: quiz.target_role,
-        target_industries: quiz.target_industries,
-        target_locations: quiz.target_locations,
-        target_company_sizes: quiz.target_company_sizes,
-        target_keywords: quiz.target_keywords || null,
-        daily_limit: dailyLimit,
-      });
-      const id = res.data.id;
-      setCampaignId(id);
-
-      setStep(5);
-      setSearchingLeads(true);
-
-      // Fire lead search in background
-      await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
-
-      // Poll for results
-      let attempts = 0;
-      const poll = async () => {
-        try {
-          const r = await api.get(`/linkedin/automation/campaigns/${id}/requests?limit=50`);
-          if (r.data.length > 0) {
-            setLeads(r.data);
-            setSearchingLeads(false);
-            return;
-          }
-        } catch {}
-        attempts++;
-        if (attempts < 20) {
-          pollRef.current = setTimeout(poll, 3000);
-        } else {
-          setSearchingLeads(false);
-          setLeadsError('No leads found. Try broadening your search criteria.');
-        }
-      };
-      poll();
+      const res = await api.post('/linkedin/automation/login', { email: liEmail, password: liPassword });
+      if (res.data.challenge_required) {
+        setSessionKey(res.data.session_key);
+        setChallengeRequired(true);
+        return;
+      }
+      await proceedAfterLogin();
     } catch (err: any) {
       setConnectError(err.response?.data?.detail || 'Connection failed. Check your credentials.');
     } finally {
       setConnectLoading(false);
+    }
+  };
+
+  const handleVerifyPin = async () => {
+    setPinLoading(true);
+    setConnectError('');
+    try {
+      await api.post('/linkedin/automation/login/verify-pin', { session_key: sessionKey, pin });
+      setChallengeRequired(false);
+      await proceedAfterLogin();
+    } catch (err: any) {
+      setConnectError(err.response?.data?.detail || 'Incorrect code. Please try again.');
+    } finally {
+      setPinLoading(false);
     }
   };
 
@@ -441,71 +453,119 @@ export default function LinkedInOnboardingPage() {
                 <Linkedin className="w-5 h-5 text-white" />
               </div>
               <div>
-                <h2 className="text-xl font-bold">Connect your LinkedIn</h2>
-                <p className="text-sm text-muted-foreground">We'll search for leads and send requests on your behalf.</p>
+                <h2 className="text-xl font-bold">
+                  {challengeRequired ? 'Check your email' : 'Connect your LinkedIn'}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {challengeRequired
+                    ? `LinkedIn sent a verification code to ${liEmail}`
+                    : "We'll search for leads and send requests on your behalf."}
+                </p>
               </div>
             </div>
 
-            <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
-              <div>
-                <label className="text-sm font-medium block mb-1.5">LinkedIn email</label>
-                <input
-                  type="email"
-                  value={liEmail}
-                  onChange={e => setLiEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                  autoComplete="email"
-                />
-              </div>
+            {!challengeRequired ? (
+              <>
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn email</label>
+                    <input
+                      type="email"
+                      value={liEmail}
+                      onChange={e => setLiEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoComplete="email"
+                    />
+                  </div>
 
-              <div>
-                <label className="text-sm font-medium block mb-1.5">LinkedIn password</label>
-                <div className="relative">
-                  <input
-                    type={showPass ? 'text' : 'password'}
-                    value={liPassword}
-                    onChange={e => setLiPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full border border-border rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                    onKeyDown={e => e.key === 'Enter' && canNext() && handleConnect()}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPass(v => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
-                  >
-                    {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn password</label>
+                    <div className="relative">
+                      <input
+                        type={showPass ? 'text' : 'password'}
+                        value={liPassword}
+                        onChange={e => setLiPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full border border-border rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        onKeyDown={e => e.key === 'Enter' && canNext() && handleConnect()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPass(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                      >
+                        {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>{connectError}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2 mb-6">
+                  {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
+                    <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                      <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" />
+                      <span>{item}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                    <ChevronLeft className="w-4 h-4" /> Back
                   </button>
+                  <Button onClick={handleConnect} disabled={!canNext() || connectLoading}>
+                    {connectLoading ? 'Connecting...' : 'Connect & find leads'}
+                    <ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
                 </div>
-              </div>
+              </>
+            ) : (
+              <>
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Verification code</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={pin}
+                      onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                      placeholder="Enter the code LinkedIn emailed you"
+                      className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 tracking-widest text-center text-lg font-mono"
+                      autoFocus
+                      onKeyDown={e => e.key === 'Enter' && pin.length >= 4 && handleVerifyPin()}
+                    />
+                  </div>
 
-              {connectError && (
-                <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                  <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                  <span>{connectError}</span>
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>{connectError}</span>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            <div className="space-y-2 mb-6">
-              {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
-                <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
-                  <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" />
-                  <span>{item}</span>
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => { setChallengeRequired(false); setPin(''); setConnectError(''); }}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                  <Button onClick={handleVerifyPin} disabled={pin.length < 4 || pinLoading}>
+                    {pinLoading ? 'Verifying...' : 'Verify & continue'}
+                    <ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
                 </div>
-              ))}
-            </div>
-
-            <div className="flex items-center justify-between">
-              <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-                <ChevronLeft className="w-4 h-4" /> Back
-              </button>
-              <Button onClick={handleConnect} disabled={!canNext() || connectLoading}>
-                {connectLoading ? 'Connecting...' : 'Connect & find leads'}
-                <ChevronRight className="w-4 h-4 ml-1" />
-              </Button>
-            </div>
+              </>
+            )}
           </div>
         )}
 
