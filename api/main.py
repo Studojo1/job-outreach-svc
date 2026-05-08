@@ -14,6 +14,7 @@ from api.routes_payment import router as payment_router
 from api.routes_admin import router as admin_router
 from api.routes_linkedin import router as linkedin_router
 from api.routes_leadstest import router as leadstest_router
+from api.routes_linkedin_automation import router as linkedin_automation_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -71,12 +72,15 @@ app.include_router(payment_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(linkedin_router, prefix="/api/v1")
 app.include_router(leadstest_router, prefix="/api/v1")
+app.include_router(linkedin_automation_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
 def on_startup():
-    """App startup hook. Email sending is now handled by job-outreach-worker."""
-    logger.info("Job outreach service started (email sender managed by external worker)")
+    """App startup hook."""
+    logger.info("Job outreach service started")
+    from services.linkedin_outreach.automation_service import start_automation_daemon
+    start_automation_daemon()
 
 
 @app.on_event("shutdown")
@@ -85,6 +89,8 @@ def on_shutdown():
     logger.info("Job outreach service shutting down")
     from core.analytics import shutdown as ph_shutdown
     ph_shutdown()
+    from services.linkedin_outreach.automation_service import stop_automation_daemon
+    stop_automation_daemon()
 
 
 @app.get("/health")

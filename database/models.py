@@ -369,3 +369,67 @@ class LinkedInOutreachLead(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     search_job = relationship("LinkedInSearchJob", back_populates="leads")
+
+
+class LinkedInCampaign(Base):
+    __tablename__ = "linkedin_campaigns"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    status = Column(String(20), default="draft", nullable=False)  # draft|running|paused|completed
+    # Quiz / ICP config
+    target_role = Column(Text, nullable=False)
+    target_industries = Column(JSONB, default=list)   # ["SaaS", "Fintech"]
+    target_locations = Column(JSONB, default=list)    # ["India", "US"]
+    target_company_sizes = Column(JSONB, default=list) # ["1-50", "51-200"]
+    target_keywords = Column(Text)                    # free-text extra filter
+    # Message templates
+    connection_note = Column(Text)     # ≤300 chars, personalised per lead by AI
+    followup_message = Column(Text)    # sent after connection accepted
+    # Automation settings
+    daily_limit = Column(Integer, default=20)
+    # Aggregate stats (denormalised for fast reads)
+    total_leads = Column(Integer, default=0)
+    total_sent = Column(Integer, default=0)
+    total_accepted = Column(Integer, default=0)
+    total_followups_sent = Column(Integer, default=0)
+    total_replied = Column(Integer, default=0)
+    launched_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+    requests = relationship("LinkedInConnectionRequest", back_populates="campaign", cascade="all, delete-orphan")
+
+
+class LinkedInConnectionRequest(Base):
+    __tablename__ = "linkedin_connection_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("linkedin_campaigns.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    # Lead info
+    name = Column(Text, nullable=False)
+    headline = Column(Text)
+    company = Column(Text)
+    location = Column(Text)
+    profile_url = Column(Text, nullable=False)
+    profile_urn = Column(Text)         # fsd_profile URN for Voyager API
+    profile_image_url = Column(Text)
+    # Outreach content
+    connection_note = Column(Text)     # personalised note sent with request
+    followup_message = Column(Text)    # personalised follow-up
+    # Status tracking
+    status = Column(String(30), default="pending", nullable=False)
+    # pending | sent | accepted | declined | ignored | followup_sent | replied
+    sent_at = Column(DateTime)
+    accepted_at = Column(DateTime)
+    followup_sent_at = Column(DateTime)
+    reply_text = Column(Text)
+    reply_received_at = Column(DateTime)
+    reply_sentiment = Column(String(10))  # positive|negative|neutral
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    campaign = relationship("LinkedInCampaign", back_populates="requests")
+    user = relationship("User")
