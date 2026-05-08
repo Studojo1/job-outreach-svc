@@ -13,13 +13,30 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def _proxy() -> dict | None:
-    """Return httpx proxy kwarg dict if LINKEDIN_PROXY_URL is set, else None."""
+def _proxy(session_id: str | None = None) -> dict:
+    """Build httpx proxy kwarg for Evomi residential proxy.
+
+    If session_id is provided, uses a sticky session so all requests for
+    a given LinkedIn account come from the same residential IP.
+    Format: http://user-session-ID:pass@core-residential.evomi.com:1000
+    """
     from core.config import settings
-    url = settings.LINKEDIN_PROXY_URL.strip()
-    if url:
-        return {"proxy": url}
-    return {}
+    base_url = settings.LINKEDIN_PROXY_URL.strip()
+    if not base_url:
+        return {}
+    if session_id:
+        # Insert -session-ID into the username part
+        # base_url format: http://user:pass@host:port
+        try:
+            from urllib.parse import urlparse, urlunparse
+            p = urlparse(base_url)
+            sticky_netloc = p.netloc.replace(
+                p.username, f"{p.username}-session-{session_id}", 1
+            )
+            base_url = urlunparse(p._replace(netloc=sticky_netloc))
+        except Exception:
+            pass
+    return {"proxy": base_url}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
 MAX_DAILY_REQUESTS = 25
@@ -46,12 +63,12 @@ def _headers(li_at: str, jsessionid: str) -> dict:
     }
 
 
-async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str) -> Optional[str]:
+async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, session_id: str | None = None) -> Optional[str]:
     """Extract fsd_profile URN from a LinkedIn profile URL."""
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0].split("/")[0]
     url = f"https://www.linkedin.com/in/{slug}/"
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy()) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy(session_id)) as client:
             res = await client.get(
                 url,
                 headers={**_headers(li_at, jsessionid), "Accept": "text/html"},
@@ -70,6 +87,7 @@ async def send_connection_request(
     jsessionid: str,
     profile_urn: str,
     note: str = "",
+    session_id: str | None = None,
 ) -> bool:
     """Send a LinkedIn connection request via Voyager. Returns True on success."""
     payload = {
@@ -86,7 +104,7 @@ async def send_connection_request(
         payload["message"] = note[:300]
 
     try:
-        async with httpx.AsyncClient(timeout=20, **_proxy()) as client:
+        async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/growth/normInvitations",
                 headers=_headers(li_at, jsessionid),
@@ -106,6 +124,7 @@ async def send_message(
     jsessionid: str,
     profile_urn: str,
     message: str,
+    session_id: str | None = None,
 ) -> bool:
     """Send a LinkedIn DM to a 1st-degree connection."""
     payload = {
@@ -127,7 +146,7 @@ async def send_message(
         },
     }
     try:
-        async with httpx.AsyncClient(timeout=20, **_proxy()) as client:
+        async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/messaging/conversations",
                 headers=_headers(li_at, jsessionid),
@@ -143,10 +162,11 @@ async def check_connection_accepted(
     li_at: str,
     jsessionid: str,
     profile_urn: str,
+    session_id: str | None = None,
 ) -> bool:
     """Check if a profile is now a 1st-degree connection."""
     try:
-        async with httpx.AsyncClient(timeout=15, **_proxy()) as client:
+        async with httpx.AsyncClient(timeout=15, **_proxy(session_id)) as client:
             res = await client.get(
                 f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}/networkinfo",
                 headers=_headers(li_at, jsessionid),
@@ -192,6 +212,7 @@ async def search_linkedin_leads(
     industries: list[str],
     keywords: Optional[str] = None,
     limit: int = 50,
+    session_id: str | None = None,
 ) -> list[dict]:
     """Search LinkedIn for people matching ICP via Voyager search API."""
     from urllib.parse import urlencode, quote
@@ -233,7 +254,7 @@ async def search_linkedin_leads(
 
     people = []
     try:
-        async with httpx.AsyncClient(timeout=25, **_proxy()) as client:
+        async with httpx.AsyncClient(timeout=25, **_proxy(session_id)) as client:
             res = await client.get(url, headers=_headers(li_at, jsessionid))
         if res.status_code != 200:
             logger.warning("Search returned %d", res.status_code)
@@ -340,8 +361,9 @@ class LinkedInAutomationDaemon:
 
                     li_at = decrypt(token_row.li_at_enc, token_row.nonce)
                     jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+                    session_id = token_row.proxy_session_id
 
-                    await self._process_campaign(db, campaign, li_at, jsessionid)
+                    await self._process_campaign(db, campaign, li_at, jsessionid, session_id)
 
                 except Exception as e:
                     logger.error("Campaign %d processing error: %s", campaign.id, e)
@@ -350,7 +372,7 @@ class LinkedInAutomationDaemon:
         finally:
             db.close()
 
-    async def _process_campaign(self, db, campaign, li_at: str, jsessionid: str):
+    async def _process_campaign(self, db, campaign, li_at: str, jsessionid: str, session_id: str | None = None):
         from database.models import LinkedInConnectionRequest
 
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -385,7 +407,7 @@ class LinkedInAutomationDaemon:
 
                 # Resolve URN if we don't have it
                 if not req.profile_urn:
-                    urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url)
+                    urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
                     if urn:
                         req.profile_urn = urn
                     else:
@@ -396,7 +418,7 @@ class LinkedInAutomationDaemon:
                         continue
 
                 ok = await send_connection_request(
-                    li_at, jsessionid, req.profile_urn, req.connection_note or ""
+                    li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
                 )
                 if ok:
                     req.status = "sent"
@@ -423,7 +445,7 @@ class LinkedInAutomationDaemon:
         for req in sent_requests:
             if not req.profile_urn:
                 continue
-            accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn)
+            accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
             if accepted:
                 req.status = "accepted"
                 req.accepted_at = datetime.utcnow()
@@ -434,7 +456,7 @@ class LinkedInAutomationDaemon:
                 if campaign.followup_message and req.followup_message:
                     await asyncio.sleep(random.uniform(30, 120))
                     ok = await send_message(
-                        li_at, jsessionid, req.profile_urn, req.followup_message
+                        li_at, jsessionid, req.profile_urn, req.followup_message, session_id
                     )
                     if ok:
                         req.status = "followup_sent"

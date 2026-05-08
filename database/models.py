@@ -326,6 +326,7 @@ class LinkedInToken(Base):
     jsessionid_enc = Column(Text, nullable=False)  # base64(AES-256-GCM ciphertext)
     nonce = Column(Text, nullable=False)           # base64 GCM nonce (12 bytes)
     linkedin_name = Column(Text)
+    proxy_session_id = Column(Text)               # sticky residential proxy session ID per account
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -51,12 +51,16 @@ async def login_with_credentials(
 
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
 
+    import secrets as _secrets
+    proxy_session_id = _secrets.token_hex(8)  # unique sticky session per account
+
     existing = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
     if existing:
         existing.li_at_enc = li_at_enc
         existing.jsessionid_enc = jsessionid_enc
         existing.nonce = nonce
         existing.linkedin_name = display_name
+        existing.proxy_session_id = proxy_session_id
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
@@ -65,6 +69,7 @@ async def login_with_credentials(
             jsessionid_enc=jsessionid_enc,
             nonce=nonce,
             linkedin_name=display_name,
+            proxy_session_id=proxy_session_id,
         ))
 
     db.commit()
