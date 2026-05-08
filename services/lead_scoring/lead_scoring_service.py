@@ -273,6 +273,15 @@ def score_and_select_leads(
             if len(word) > 3:  # skip short words like "of", "and"
                 role_keywords.add(word)
 
+    # ── Company stage preference for size-mismatch penalty ────────────────
+    stage_pref_raw = str(
+        (candidate_profile.get("company_preferences", {}).get("company_stage") or ["any"])[0]
+        if isinstance(candidate_profile.get("company_preferences", {}).get("company_stage"), list)
+        else (candidate_profile.get("company_preferences", {}).get("company_stage") or "any")
+    ).lower()
+    wants_early_stage = any(kw in stage_pref_raw for kw in ("early", "seed", "under 50"))
+    wants_enterprise = any(kw in stage_pref_raw for kw in ("large", "enterprise", "mnc", "2000+"))
+
     # ── Hard mismatch penalty data (added May 4 2026) ─────────────────────
     # Niches the candidate selected — penalize leads whose company shows zero overlap
     cand_niches = candidate_profile.get("company_preferences", {}).get("niche_keywords", []) or []
@@ -380,16 +389,29 @@ def score_and_select_leads(
             if niche_hits == 0:
                 niche_penalty = -15
 
-        # --- 8. Industry denylist penalty (NEW) ---
+        # --- 8. Industry denylist penalty ---
         # Hard mismatch: tech candidate landing on Real Estate / Interior Design / etc.
         # is almost certainly a noise lead — Apollo loosely matched on something.
         denylist_penalty = 0
         if is_tech_candidate and not is_dream and industry:
             if any(d in industry for d in INDUSTRY_DENYLIST_FOR_TECH):
-                denylist_penalty = -20
+                denylist_penalty = -30  # was -20; strengthened so denylist leads drop below page-1
+
+        # --- 9. Company size mismatch penalty ---
+        # Backstop: catches enterprise leads that slip through the probe-loop filter
+        # or come from cached/pre-existing lead pools.
+        size_penalty = 0
+        if not is_dream:
+            lead_size = (lead.get("company_size") or "").lower()
+            is_large = any(k in lead_size for k in ("1001", "5001", "10000"))
+            is_tiny = any(k in lead_size for k in ("1-10", "11-50"))
+            if wants_early_stage and is_large:
+                size_penalty = -25  # user wants seed-stage, lead is at enterprise
+            elif wants_enterprise and is_tiny:
+                size_penalty = -10  # user wants large company, lead is at tiny startup
 
         # Total Calculation
-        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score + niche_penalty + denylist_penalty
+        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score + niche_penalty + denylist_penalty + size_penalty
 
         # Tie-breaker (only when total_score is positive — don't randomly rescue penalized leads)
         if total_score > 0:

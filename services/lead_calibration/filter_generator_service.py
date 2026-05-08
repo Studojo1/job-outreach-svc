@@ -26,6 +26,16 @@ APPLY_INDUSTRY_FILTER_BY_DEFAULT = False
 # volume but 30d gives sharpest signal.
 JOB_POSTED_RECENCY_DAYS = 30
 
+# Maps the derived company_size preference (from payload_builder._map_company_size)
+# to the Apollo segment ranges that should be searched. Candidates who prefer
+# early-stage companies should never see results from 1000-person enterprises.
+_COMPANY_SIZE_TO_SEGMENTS: dict[str, list[str]] = {
+    "1-50":    ["1,50", "51,200"],              # early-stage: seed + small teams
+    "50-500":  ["1,50", "51,200", "201,1000"],  # growth: wide range
+    "500-2000": ["201,1000", "1001,10000"],     # mid-size
+    "2000+":   ["1001,10000"],                  # enterprise/MNC only
+}
+
 
 def _today_iso() -> str:
     return datetime.utcnow().date().isoformat()
@@ -151,6 +161,36 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
                         person_titles=merged_titles,
                     )
                 )
+
+    # ── Step 2b: Restrict segments to candidate's preferred company stage ────
+    # company_stage raw text handles multi-select ("early" + "growth" → union of ranges).
+    # Reads from company_prefs which is populated from quiz Q5 (company_stage answer).
+    stage_raw = str(
+        (company_prefs.get("company_stage") or ["any"])[0]
+        if isinstance(company_prefs.get("company_stage"), list)
+        else (company_prefs.get("company_stage") or "any")
+    ).lower()
+
+    wants_any = any(kw in stage_raw for kw in ("no strong", "any", "open to all", "other"))
+    if not wants_any and all_segments:
+        allowed: set[str] = set()
+        if any(kw in stage_raw for kw in ("early", "seed", "under 50")):
+            allowed.update(["1,50", "51,200"])
+        if any(kw in stage_raw for kw in ("growth", "50-500")):
+            allowed.update(["51,200", "201,1000"])
+        if any(kw in stage_raw for kw in ("mid-size", "500-2000")):
+            allowed.update(["201,1000", "1001,10000"])
+        if any(kw in stage_raw for kw in ("large", "enterprise", "mnc", "2000+")):
+            allowed.add("1001,10000")
+        if allowed:
+            restricted = [s for s in all_segments if s.company_size_range in allowed]
+            if restricted:
+                logger.info(
+                    "[LeadSearch] Segment restriction by company_stage=%r: %d → %d segments %s",
+                    stage_raw[:50], len(all_segments), len(restricted),
+                    [s.company_size_range for s in restricted],
+                )
+                all_segments = restricted
 
     if not all_segments:
         all_segments = [

@@ -398,6 +398,27 @@ async def search_leads(
         t_filter = time.perf_counter()
         logger.info(f"[LeadSearch] Filter generation: {(t_filter - t_start)*1000:.0f}ms")
 
+        # LLM quality probe — evaluate a small sample from Apollo and adjust
+        # filters before committing to the full 500-lead collection.
+        # Qualitative counterpart to the loosening loop: this fixes *wrong* leads,
+        # not just *too few* leads.
+        from services.lead_discovery.lead_collector_service import quality_probe_loop
+        candidate_prefs_for_probe = {
+            "company_stage": [prefs.get("company_stage", "any")],
+            "niche_keywords": prefs.get("niche_keywords", []),
+            "preferred_roles": preferred_roles,
+            "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
+            "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
+        }
+        filters = await asyncio.to_thread(
+            quality_probe_loop,
+            filters,
+            candidate_prefs_for_probe,
+            2,  # max_iterations
+        )
+        t_probe = time.perf_counter()
+        logger.info(f"[LeadSearch] Quality probe complete: {(t_probe - t_filter)*1000:.0f}ms")
+
         # Run blocking Apollo API calls in a thread to avoid blocking the event loop
         count = await asyncio.to_thread(
             collect_leads,

@@ -234,6 +234,91 @@ def _clone_filters(base: LeadFilter, **overrides) -> LeadFilter:
     return LeadFilter(**data)
 
 
+def _probe_batch(filters: LeadFilter) -> list[dict]:
+    """Fetch Apollo page 1 without storing anything. Returns parsed people dicts.
+
+    Used by quality_probe_loop to evaluate lead quality before the full
+    500-lead collection runs.
+    """
+    from services.lead_discovery.apollo_query_builder import build_apollo_query
+    payload = build_apollo_query(filters, page=1)
+    people = _try_collect_page(payload)
+    return [parse_apollo_person(p) for p in people if p.get("id")]
+
+
+def quality_probe_loop(
+    filters: LeadFilter,
+    candidate_prefs: dict,
+    max_iterations: int = 2,
+) -> LeadFilter:
+    """Probe Apollo, evaluate quality with LLM, adjust filters if needed. Max 2 rounds.
+
+    Runs before the full 500-lead collection. Each iteration:
+      1. Fetch page 1 (no DB writes)
+      2. Send sample to LLM with candidate profile → get quality score + suggested adjustments
+      3. Apply adjustments (restrict company sizes, add keyword tags)
+      4. Stop when quality_score >= 6 or max_iterations reached
+
+    This is the qualitative counterpart to the existing quantitative loosening loop.
+    Loosening fixes "not enough leads"; this loop fixes "wrong leads".
+
+    candidate_prefs keys: company_stage, niche_keywords, preferred_roles,
+                          archetype_label, company_type_avoid.
+    """
+    from services.lead_calibration.lead_quality_evaluator import evaluate_probe_with_llm
+
+    for iteration in range(max_iterations + 1):
+        probe = _probe_batch(filters)
+        logger.info("[QualityProbe] iter=%d probe_size=%d", iteration, len(probe))
+
+        if not probe:
+            logger.info("[QualityProbe] Empty probe — skipping quality check, proceeding")
+            break
+
+        result = evaluate_probe_with_llm(probe, candidate_prefs)
+        quality_score = int(result.get("quality_score") or 7)
+        main_issue = result.get("main_issue")
+        logger.info(
+            "[QualityProbe] iter=%d quality=%d/10 issue=%r",
+            iteration, quality_score, main_issue,
+        )
+
+        if quality_score >= 6 or iteration == max_iterations:
+            break
+
+        # Apply LLM-suggested filter adjustments
+        restrict_sizes = result.get("restrict_company_sizes")
+        add_kws = result.get("add_keyword_tags")
+        adjusted = False
+
+        if restrict_sizes and isinstance(restrict_sizes, list):
+            restricted_segs = [
+                s for s in filters.target_segments
+                if s.company_size_range in restrict_sizes
+            ]
+            if restricted_segs:
+                filters = _clone_filters(filters, target_segments=restricted_segs)
+                logger.info(
+                    "[QualityProbe] Restricted to %d segments: %s",
+                    len(restricted_segs), restrict_sizes,
+                )
+                adjusted = True
+
+        if add_kws and isinstance(add_kws, list):
+            existing = list(filters.q_organization_keyword_tags or [])
+            merged = list(dict.fromkeys(existing + [k.lower().strip() for k in add_kws if k]))[:3]
+            if merged != existing:
+                filters = _clone_filters(filters, q_organization_keyword_tags=merged or None)
+                logger.info("[QualityProbe] Updated keyword tags: %s", merged)
+                adjusted = True
+
+        if not adjusted:
+            logger.info("[QualityProbe] No actionable adjustments from LLM — stopping early")
+            break
+
+    return filters
+
+
 def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
     """Build a list of progressively looser filter variants.
 
