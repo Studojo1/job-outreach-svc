@@ -31,19 +31,24 @@ Required JSON schema:
   "target_industries": ["<industry1>", "<industry2>"]
 }
 
-Use these career clusters to pick likely_roles — choose specific role titles that match the candidate's actual skills:
+Use these career clusters to pick likely_roles — choose specific role titles that match the candidate's actual skills and career pattern:
 - Technology & Engineering: Software Engineer, Backend Developer, Frontend Developer, Full-Stack Developer, Mobile Developer, DevOps Engineer, Cloud Engineer, Security Analyst, QA Engineer
-- Data & Analytics: Data Analyst, Data Scientist, Machine Learning Engineer, AI Engineer, Applied AI Engineer, LLM Engineer, GenAI Engineer, Speech / ASR Engineer, NLP Engineer, Computer Vision Engineer, AI Agent Engineer, Analytics Engineer, BI Analyst, Product Analyst, Research Scientist, Prompt Engineer
-- Marketing & Growth: Growth Marketing Manager, Performance Marketer, Content Marketing Specialist, Product Marketing Manager, SEO Specialist, Marketing Analyst
-- Sales & Business Development: SDR, Account Executive, Business Development Representative, Enterprise Sales Associate, Partnerships Manager
-- Product: Product Manager, Associate PM, Product Analyst, Go-to-Market Analyst
+- AI & Applied AI: AI Engineer, Applied AI Engineer, LLM Engineer, GenAI Engineer, AI Agent Engineer, Speech / ASR Engineer, NLP Engineer, Computer Vision Engineer, Machine Learning Engineer, Research Scientist, AI Automation Engineer, AI Solutions Architect
+- Data & Analytics: Data Analyst, Data Scientist, Analytics Engineer, BI Analyst, Product Analyst
+- Marketing & Growth: Growth Marketing Manager, Performance Marketer, Content Marketing Specialist, Product Marketing Manager, SEO Specialist, GTM Systems Builder, Growth Hacker
+- Sales & Business Development: SDR, Account Executive, Business Development Representative, Enterprise Sales Associate, Partnerships Manager, AI Sales Engineer
+- Product: Product Manager, AI Product Manager, Associate PM, Founding PM, Product Analyst
 - Design & Creative: UX Designer, Product Designer, UI Designer, Visual Designer, UX Researcher
 - Finance & Accounting: Financial Analyst, IB Analyst, FP&A Analyst, Equity Research Analyst, VC Analyst
-- Operations & Supply Chain: Operations Analyst, Project Manager, Supply Chain Analyst, Business Operations Associate
-- Consulting & Strategy: Management Consultant (Analyst), Strategy Analyst, Associate Consultant
+- Operations & Founder's Office: Operations Analyst, Business Operations Associate, Founder's Office, Chief of Staff, Project Manager, Supply Chain Analyst
+- Strategy & Consulting: Management Consultant (Analyst), Strategy Analyst, Associate Consultant
+- Cross-functional / Compound (use when resume shows 2+ distinct skill areas working together): Founding Product Engineer, AI Product Strategist, Founder's Office (AI + Growth), GTM Automation Engineer, AI Automation Consultant, Product-Led Growth Operator, Zero-to-One Builder, Applied AI Generalist
 
 Rules:
-- likely_roles: 4-6 realistic roles for THIS candidate based on their actual experience and skills. Pick the MOST SPECIFIC titles from the cluster — e.g. for an ASR engineer prefer "Speech / ASR Engineer" over generic "ML Engineer". Always include the closest specialization.
+- likely_roles: 4-6 realistic roles for THIS candidate based on their actual experience and skills.
+- CRITICAL: If the resume shows cross-functional signals — e.g. someone who builds AI systems AND owns growth/GTM/distribution, OR an engineer who ships products AND talks to clients/users — ALWAYS include compound titles from the Cross-functional cluster. These describe who the person actually is better than single-function titles.
+- Pick the MOST SPECIFIC titles — e.g. for an ASR engineer prefer "Speech / ASR Engineer" over "ML Engineer". For an AI builder who also owns GTM, prefer "Founding Product Engineer" or "AI Product Strategist" over just "AI Engineer".
+- Prioritise titles the person could actually apply for and get, given their demonstrated experience level.
 - geography: only use the candidate's own location (from phone number, address, header) — ignore company office locations
 - top_skills: the 5 most marketable skills demonstrated in the resume
 - seniority: infer from years of experience and education stage
