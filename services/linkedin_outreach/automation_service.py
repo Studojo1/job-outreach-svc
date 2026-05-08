@@ -227,13 +227,14 @@ def _search_linkedin_leads_sync(
 
     keyword_str = f"{target_role} {keywords}".strip() if keywords else target_role
 
-    filter_parts = ["resultType->List(PEOPLE)"]
+    # Use (field:X,values:List(Y)) syntax — no -> characters that requests would encode as %3E
+    filter_parts = ["(field:resultType,values:List(PEOPLE))"]
     if locations:
-        locs = ",".join(f"(text~:{loc})" for loc in locations[:3])
-        filter_parts.append(f"geoUrn->List({locs})")
+        loc_vals = ",".join(loc for loc in locations[:3])
+        filter_parts.append(f"(field:geoUrn,values:List({loc_vals}))")
     if industries:
-        inds = ",".join(f"(text~:{i})" for i in industries[:3])
-        filter_parts.append(f"industry->List({inds})")
+        ind_vals = ",".join(i for i in industries[:3])
+        filter_parts.append(f"(field:industry,values:List({ind_vals}))")
 
     params = {
         "count": min(limit, 49),
@@ -245,8 +246,9 @@ def _search_linkedin_leads_sync(
         "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
     }
 
+    # JSESSIONID must match csrf-token exactly — no quotes around it in Cookie header
     headers = {
-        "Cookie": f'li_at={li_at}; JSESSIONID="{jsessionid}"',
+        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
         "csrf-token": jsessionid,
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
@@ -259,7 +261,7 @@ def _search_linkedin_leads_sync(
     }
 
     url = "https://www.linkedin.com/voyager/api/search/blended"
-    res = session.get(url, params=params, headers=headers, timeout=25, allow_redirects=False)
+    res = session.get(url, params=params, headers=headers, timeout=25, allow_redirects=True)
     logger.info("Lead search status=%d", res.status_code)
     if res.status_code != 200:
         logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
