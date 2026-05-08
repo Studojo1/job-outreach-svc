@@ -45,10 +45,30 @@ def linkedin_login_start(email: str, password: str) -> Union[
     try:
         client.authenticate(email, password)
     except ChallengeException:
-        # LinkedIn sent a PIN to the user's email — store client for step 2
+        # Inspect what kind of challenge LinkedIn is showing
+        try:
+            challenge_url = client.session.get(
+                "https://www.linkedin.com/checkpoint/challenge/verify",
+                allow_redirects=True, timeout=10
+            )
+            page = challenge_url.text[:2000]
+            logger.warning("CHALLENGE PAGE URL: %s", challenge_url.url)
+            logger.warning("CHALLENGE PAGE SNIPPET: %s", page[:500])
+            # Detect challenge type
+            if "captcha" in page.lower():
+                challenge_type = "captcha"
+            elif "pin" in page.lower() or "verification" in page.lower() or "code" in page.lower():
+                challenge_type = "pin"
+            else:
+                challenge_type = "unknown"
+            logger.warning("CHALLENGE TYPE DETECTED: %s", challenge_type)
+        except Exception as inspect_err:
+            logger.warning("Could not inspect challenge page: %s", inspect_err)
+            challenge_type = "unknown"
+
         key = str(uuid.uuid4())
-        _pending[key] = {"client": client, "email": email, "expires": time.time() + _CHALLENGE_TTL}
-        logger.info("LinkedIn challenge triggered for %s — PIN required (key=%s)", email, key)
+        _pending[key] = {"client": client, "email": email, "expires": time.time() + _CHALLENGE_TTL, "challenge_type": challenge_type}
+        logger.info("LinkedIn challenge triggered for %s — type=%s (key=%s)", email, challenge_type, key)
         return None, None, key
     except UnauthorizedException:
         raise ValueError("Invalid LinkedIn credentials. Check your email and password.")

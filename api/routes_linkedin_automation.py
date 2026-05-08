@@ -81,8 +81,10 @@ async def login_with_credentials(
         raise HTTPException(status_code=500, detail=str(e))
 
     if li_at is None:
-        # result is the session_key — PIN required
-        return {"ok": False, "challenge_required": True, "session_key": result}
+        # result is the session_key — challenge required
+        entry = __import__('services.linkedin_outreach.login', fromlist=['_pending'])._pending.get(result, {})
+        challenge_type = entry.get("challenge_type", "pin")
+        return {"ok": False, "challenge_required": True, "session_key": result, "challenge_type": challenge_type}
 
     display_name = _store_token(db, current_user.id, li_at, jsessionid, result)
     return {"ok": True, "linkedin_name": display_name}
