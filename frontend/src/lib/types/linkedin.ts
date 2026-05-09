@@ -1,7 +1,7 @@
 export interface LinkedInCampaign {
   id: number;
   name: string;
-  status: 'draft' | 'running' | 'paused' | 'completed';
+  status: 'draft' | 'running' | 'paused' | 'completed' | 'auth_failed' | 'search_failed';
   target_role: string;
   target_industries: string[];
   target_locations: string[];
