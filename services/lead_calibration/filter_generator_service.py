@@ -1,10 +1,17 @@
 """Service for generating segmented lead search filters (production grade).
 
-Includes Apollo-normalized industry names and location formats.
+Two code paths:
+  1. LLM path (preferred) — uses Career Strategist output (search_strategy) to build
+     Apollo filters directly from an AI-generated search strategy. No rules-based title
+     lookup. Fully Apollo-validated before use.
+  2. Rules-based fallback — the original 5-layer pipeline (role→classify→title_family→
+     seniority→expand). Used when Career Strategist is unavailable or fails.
+
+Apollo-normalized industry names and location formats are applied in both paths.
 """
 
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +20,10 @@ from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
 from services.shared.decision_maker_engine import generate_titles_by_company_size
 from services.shared.apollo_normalizer import normalize_industries, normalize_locations
+from services.candidate_intelligence.career_strategist import (
+    APOLLO_VALID_SENIORITY_CODES,
+    APOLLO_VALID_SIZE_RANGES,
+)
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,52 +33,21 @@ logger = get_logger(__name__)
 # (q_organization_keyword_tags) are the preferred vertical filter.
 APPLY_INDUSTRY_FILTER_BY_DEFAULT = False
 
-# Default job-posting recency window. Phase A confirmed 30d ≈ 60d ≈ 90d in
-# volume but 30d gives sharpest signal.
+# Default job-posting recency window.
 JOB_POSTED_RECENCY_DAYS = 30
 
-# Maps the derived company_size preference (from payload_builder._map_company_size)
-# to the Apollo segment ranges that should be searched. Candidates who prefer
-# early-stage companies should never see results from 1000-person enterprises.
-_COMPANY_SIZE_TO_SEGMENTS: dict[str, list[str]] = {
-    "1-50":    ["1,50", "51,200"],              # early-stage: seed + small teams
-    "50-500":  ["1,50", "51,200", "201,1000"],  # growth: wide range
-    "500-2000": ["201,1000", "1001,10000"],     # mid-size
-    "2000+":   ["1001,10000"],                  # enterprise/MNC only
-}
-
-
-def _today_iso() -> str:
-    return datetime.utcnow().date().isoformat()
-
-
-def _days_ago_iso(days: int) -> str:
-    return (datetime.utcnow().date() - timedelta(days=days)).isoformat()
-
-# Used only when generate_titles_by_company_size returns nothing AND the role
-# couldn't be classified. Kept generic-management; function-specific fallbacks
-# live in lead_collector_service._FUNCTION_FALLBACK_TITLES.
-FALLBACK_TITLES = [
-    "Operations Manager", "Head of Operations", "Director of Operations",
-    "Chief of Staff", "General Manager", "Business Operations Manager",
-]
-
 # Default exclusion titles — roles we should never target as hiring managers.
-# Apollo's `person_not_titles` does substring matching, so these block any
-# title containing these words. Expanded May 4 2026 after manual lead review
-# showed Operations Managers, Sales Managers, Customer Success Managers,
-# and Junior ICs were leaking through and crowding out actual hiring managers.
 DEFAULT_EXCLUSION_TITLES = [
-    # Recruitment / HR (was already there)
+    # Recruitment / HR
     "Recruiter",
     "Talent Acquisition",
     "People Operations",
-    # Sub-grad ranks — never hiring managers
+    # Sub-grad ranks
     "Intern",
     "Student",
     "Apprentice",
     "Trainee",
-    # Cross-functional managers that flood the data/eng title list with noise
+    # Cross-functional noise
     "Operations Manager",
     "Sales Manager",
     "Account Manager",
@@ -83,60 +63,187 @@ DEFAULT_EXCLUSION_TITLES = [
     "Executive Assistant",
     "Inside Sales",
     "Field Sales",
-    # HR Manager — kept as a keyword block (HR Business Partner etc. still excluded
-    # via the People Operations entry)
     "HR Manager",
 ]
 
+# Used only when rules-based fallback also produces nothing.
+FALLBACK_TITLES = [
+    "Operations Manager", "Head of Operations", "Director of Operations",
+    "Chief of Staff", "General Manager", "Business Operations Manager",
+]
+
+
+def _today_iso() -> str:
+    return datetime.utcnow().date().isoformat()
+
+
+def _days_ago_iso(days: int) -> str:
+    return (datetime.utcnow().date() - timedelta(days=days)).isoformat()
+
 
 def _seniorities_for_experience_level(exp_level: str) -> List[str]:
-    """Map our internal experience level to Apollo's `person_seniorities` codes.
-
-    Apollo seniority codes (per their /api/v1/mixed_people/api_search docs):
-      owner, founder, c_suite, partner, vp, head, director, manager, senior, entry, intern.
-
-    We never want intern/entry as hiring managers. Beyond that, we widen the
-    floor as the candidate gets more senior — a senior IC will reach out to
-    VPs/founders, an entry-level student should reach out to managers/directors
-    (peers and one-up).
-    """
+    """Map internal experience level to Apollo person_seniorities codes (rules-based fallback)."""
     if exp_level == "senior":
         return ["owner", "founder", "c_suite", "partner", "vp", "head", "director", "manager"]
     if exp_level == "mid":
         return ["vp", "head", "director", "manager"]
-    # entry / student / graduate
+    # entry / student / graduate — still include head/director who manage juniors
     return ["head", "director", "manager"]
 
 
-def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) -> LeadFilter:
-    """Convert a candidate profile into production-grade segmented Apollo filters.
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM path: build filters from Career Strategist search_strategy
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Uses Apollo-normalized industry names and location formats.
+def _build_segments_from_strategy(strategy: dict) -> List[TargetSegment]:
+    """Convert Career Strategist title_clusters into TargetSegment list.
+
+    Only includes size ranges listed in strategy.target_size_ranges.
+    Deduplicates titles across clusters for the same size range.
     """
-    logger.info(
-        "Generating production filters for user_id=%s name=%s",
-        candidate_profile.user_id,
-        candidate_profile.name,
+    target_sizes = set(strategy.get("target_size_ranges") or []) & APOLLO_VALID_SIZE_RANGES
+    if not target_sizes:
+        target_sizes = APOLLO_VALID_SIZE_RANGES  # fallback: all sizes
+
+    # Merge all clusters into per-size title lists (preserving priority order)
+    size_titles: dict[str, list[str]] = {s: [] for s in target_sizes}
+    seen: dict[str, set] = {s: set() for s in target_sizes}
+
+    clusters = sorted(
+        strategy.get("title_clusters") or [],
+        key=lambda c: int(c.get("priority") or 99),
+    )
+    for cluster in clusters:
+        for size, titles in (cluster.get("titles_by_size") or {}).items():
+            if size not in target_sizes:
+                continue
+            for title in titles:
+                t = title.strip()
+                if t and t not in seen[size]:
+                    seen[size].add(t)
+                    size_titles[size].append(t)
+
+    segments = [
+        TargetSegment(company_size_range=size, person_titles=titles)
+        for size, titles in size_titles.items()
+        if titles
+    ]
+    return segments
+
+
+def _generate_filters_from_strategy(
+    strategy: dict,
+    candidate_profile: CandidateProfile,
+) -> LeadFilter:
+    """Build a LeadFilter from the Career Strategist output.
+
+    All strategy values are pre-validated by career_strategist._validate_strategy().
+    This function only applies Apollo-safe transformations.
+    """
+    roles = candidate_profile.preferred_roles
+    company_prefs = candidate_profile.company_preferences or {}
+    work_prefs = candidate_profile.work_preferences or {}
+    work_mode = (work_prefs.get("work_mode") or "").lower()
+    clarity = candidate_profile.clarity_score or 0
+
+    # ── Segments from LLM clusters ────────────────────────────────────────
+    all_segments = _build_segments_from_strategy(strategy)
+    if not all_segments:
+        logger.warning("[FilterGen/LLM] No valid segments from strategy — using fallback segment")
+        all_segments = [TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_TITLES))]
+
+    logger.info("[FilterGen/LLM] Segments from strategy: %d", len(all_segments))
+    for seg in all_segments:
+        logger.info("  Segment '%s': %d titles — %s", seg.company_size_range, len(seg.person_titles), seg.person_titles[:5])
+
+    # ── Seniority from strategy (already validated against APOLLO_VALID_SENIORITY_CODES) ──
+    person_seniorities = [
+        s for s in (strategy.get("person_seniorities") or [])
+        if s in APOLLO_VALID_SENIORITY_CODES
+    ]
+    if not person_seniorities:
+        person_seniorities = ["vp", "head", "director", "manager"]
+    logger.info("[FilterGen/LLM] person_seniorities: %s", person_seniorities)
+
+    # ── Keywords: strategy keywords take priority, but respect clarity gate ──
+    niche_keywords = None
+    strategy_kws = [k for k in (strategy.get("keyword_strategy") or []) if k][:3]
+    if strategy_kws:
+        niche_keywords = strategy_kws
+    elif clarity >= 0:
+        # Fall back to quiz niche_keywords if strategy didn't produce any
+        raw_niches = company_prefs.get("niche_keywords") or []
+        if raw_niches:
+            niche_keywords = [k.strip().lower() for k in raw_niches if k and k.strip()][:3] or None
+    if niche_keywords:
+        logger.info("[FilterGen/LLM] q_organization_keyword_tags: %s", niche_keywords)
+
+    # ── Location ──────────────────────────────────────────────────────────
+    raw_locations = candidate_profile.location_preferences or []
+    normalized_locs = normalize_locations(raw_locations)
+    logger.info("[FilterGen/LLM] Locations: raw=%s normalized=%s", raw_locations, normalized_locs)
+
+    # ── Currently hiring for (paired with recency window) ─────────────────
+    q_org_job_titles = list(roles)[:8] if roles else None
+    org_job_posted_at_range = None
+    if q_org_job_titles:
+        org_job_posted_at_range = {
+            "min": _days_ago_iso(JOB_POSTED_RECENCY_DAYS),
+            "max": _today_iso(),
+        }
+
+    # ── Tech stack (clarity-gated) ────────────────────────────────────────
+    tech_stack = None
+    if clarity >= 3 and candidate_profile.tech_stack:
+        tech_stack = [t.strip().lower().replace(" ", "_") for t in candidate_profile.tech_stack if t.strip()][:3] or None
+
+    # ── Job posting location (in-office / hybrid only) ────────────────────
+    org_job_locations = None
+    if work_mode in ("onsite", "hybrid") and normalized_locs:
+        org_job_locations = normalized_locs
+
+    # ── Person past titles (roles the candidate has held) ─────────────────
+    person_past_titles = list(roles)[:5] if roles else None
+
+    return LeadFilter(
+        target_segments=all_segments,
+        person_titles_exclude=list(DEFAULT_EXCLUSION_TITLES),
+        person_locations=normalized_locs,
+        organization_locations=normalized_locs,
+        organization_industries=None,  # dropped per Phase A audit
+        email_status=["verified"],
+        q_organization_job_titles=q_org_job_titles,
+        organization_job_posted_at_range=org_job_posted_at_range,
+        q_organization_keyword_tags=niche_keywords,
+        currently_using_any_of_technology_uids=tech_stack,
+        organization_job_locations=org_job_locations,
+        person_past_titles=person_past_titles,
+        person_seniorities=person_seniorities,
     )
 
-    # ── Step 1: Detect candidate roles ───────────────────────────────────
-    roles = candidate_profile.preferred_roles
-    logger.info("Candidate preferred_roles: %s", roles)
 
-    # ── Step 2: Generate segments via Decision Maker Engine ──────────────
-    # Map experience level from candidate profile to the title generation system
+# ─────────────────────────────────────────────────────────────────────────────
+# Rules-based fallback path (original logic, preserved verbatim)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _generate_filters_rules_based(
+    candidate_profile: CandidateProfile,
+) -> LeadFilter:
+    """Original rules-based filter generation. Used when Career Strategist is unavailable."""
+    roles = candidate_profile.preferred_roles
+    company_prefs = candidate_profile.company_preferences or {}
+    work_prefs = candidate_profile.work_preferences or {}
+    work_mode = (work_prefs.get("work_mode") or "").lower()
+    clarity = candidate_profile.clarity_score or 0
+
     exp_level_map = {
-        "student": "entry",
-        "grad": "entry",
-        "graduate": "entry",
-        "entry": "entry",
-        "switching": "mid",
-        "career_switching": "mid",
-        "experienced": "senior",
+        "student": "entry", "grad": "entry", "graduate": "entry", "entry": "entry",
+        "switching": "mid", "career_switching": "mid", "experienced": "senior",
     }
     exp_level = exp_level_map.get((candidate_profile.experience_level or "entry").lower(), "entry")
-    logger.info("Candidate experience level: %s → targeting %s seniority titles", candidate_profile.experience_level, exp_level)
+    logger.info("[FilterGen/Rules] Experience level: %s → targeting %s seniority", candidate_profile.experience_level, exp_level)
 
+    # Build segments from decision maker engine
     all_segments: List[TargetSegment] = []
     seen_key = set()
     for role in roles:
@@ -155,17 +262,9 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
             if existing:
                 existing.person_titles.extend(merged_titles)
             elif merged_titles:
-                all_segments.append(
-                    TargetSegment(
-                        company_size_range=seg.company_size_range,
-                        person_titles=merged_titles,
-                    )
-                )
+                all_segments.append(TargetSegment(company_size_range=seg.company_size_range, person_titles=merged_titles))
 
-    # ── Step 2b: Restrict segments to candidate's preferred company stage ────
-    # company_stage raw text handles multi-select ("early" + "growth" → union of ranges).
-    # Reads from company_prefs which is populated from quiz Q5 (company_stage answer).
-    company_prefs = candidate_profile.company_preferences or {}
+    # Restrict segments by quiz company_stage
     stage_raw = str(
         (company_prefs.get("company_stage") or ["any"])[0]
         if isinstance(company_prefs.get("company_stage"), list)
@@ -187,107 +286,64 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
             restricted = [s for s in all_segments if s.company_size_range in allowed]
             if restricted:
                 logger.info(
-                    "[LeadSearch] Segment restriction by company_stage=%r: %d → %d segments %s",
+                    "[FilterGen/Rules] Segment restriction by company_stage=%r: %d → %d segments",
                     stage_raw[:50], len(all_segments), len(restricted),
-                    [s.company_size_range for s in restricted],
                 )
                 all_segments = restricted
 
     if not all_segments:
-        all_segments = [
-            TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_TITLES))
-        ]
-        logger.info("No segments generated, using fallback")
+        all_segments = [TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_TITLES))]
+        logger.info("[FilterGen/Rules] No segments generated, using fallback")
 
-    logger.info("Total segments: %d", len(all_segments))
-    for seg in all_segments:
-        logger.info("  Segment '%s': %d titles — %s", seg.company_size_range, len(seg.person_titles), seg.person_titles[:5])
-
-    # ── Step 3: Exclusion titles ─────────────────────────────────────────
-    person_titles_exclude = list(DEFAULT_EXCLUSION_TITLES)
-    logger.info("Exclusion titles: %s", person_titles_exclude)
-
-    # ── Step 4: Location (NORMALIZED) ────────────────────────────────────
+    # Location
     raw_locations = candidate_profile.location_preferences or []
     normalized_locs = normalize_locations(raw_locations)
-    logger.info("[LeadSearch] Location filter: raw=%s, normalized=%s", raw_locations, normalized_locs)
 
-    # ── Step 5: Industries — DROPPED as default per Phase A audit ────────
-    # Niche keywords (q_organization_keyword_tags) deliver the same intent
-    # with better quality lift on Indian companies. Kept opt-in if caller
-    # explicitly enables APPLY_INDUSTRY_FILTER_BY_DEFAULT.
+    # Industries
     normalized_industries = None
     if APPLY_INDUSTRY_FILTER_BY_DEFAULT:
         raw_industries = company_prefs.get("industries") or []
         normalized_industries = normalize_industries(raw_industries) or None
-        logger.info("[LeadSearch] Industry filter: raw=%s, normalized=%s", raw_industries, normalized_industries)
-    else:
-        logger.info("[LeadSearch] Industry filter: skipped (per Phase A audit — niche keywords used instead)")
 
-    # ── Step 6: New Phase A audit-passed filters ─────────────────────────
-    clarity = candidate_profile.clarity_score or 0
-    work_prefs = candidate_profile.work_preferences or {}
-    work_mode = (work_prefs.get("work_mode") or "").lower()
-
-    # 6a. Currently-hiring-for: feed candidate's preferred roles as posting titles
+    # Currently hiring for + recency
     q_org_job_titles = list(roles)[:8] if roles else None
-    if q_org_job_titles:
-        logger.info("[LeadSearch] q_organization_job_titles: %s", q_org_job_titles)
-
-    # 6b. Posting recency — pair with currently-hiring
     org_job_posted_at_range = None
     if q_org_job_titles:
         org_job_posted_at_range = {
             "min": _days_ago_iso(JOB_POSTED_RECENCY_DAYS),
             "max": _today_iso(),
         }
-        logger.info("[LeadSearch] organization_job_posted_at_range: %s", org_job_posted_at_range)
 
-    # 6c. Niche keywords — gated on clarity ≥ 0 (medium + high). OR'd up to 3.
+    # Niche keywords
     niche_keywords = None
     if clarity >= 0:
         raw_niches = company_prefs.get("niche_keywords") or []
         if raw_niches:
-            # Normalize: lowercase, strip whitespace, take first 3
-            niche_keywords = [k.strip().lower() for k in raw_niches if k and k.strip()][:3]
-            if not niche_keywords:
-                niche_keywords = None
-        if niche_keywords:
-            logger.info("[LeadSearch] q_organization_keyword_tags (OR): %s", niche_keywords)
+            niche_keywords = [k.strip().lower() for k in raw_niches if k and k.strip()][:3] or None
 
-    # 6d. Tech stack — gated on clarity ≥ 3 (high) AND populated
+    # Tech stack
     tech_stack = None
     if clarity >= 3 and candidate_profile.tech_stack:
-        tech_stack = [t.strip().lower().replace(" ", "_") for t in candidate_profile.tech_stack if t.strip()][:3]
-        if not tech_stack:
-            tech_stack = None
-        if tech_stack:
-            logger.info("[LeadSearch] currently_using_any_of_technology_uids: %s", tech_stack)
+        tech_stack = [t.strip().lower().replace(" ", "_") for t in candidate_profile.tech_stack if t.strip()][:3] or None
 
-    # 6e. Job-posting location — only for in-office / hybrid candidates
+    # Job posting location
     org_job_locations = None
     if work_mode in ("onsite", "hybrid") and normalized_locs:
         org_job_locations = normalized_locs
-        logger.info("[LeadSearch] organization_job_locations (work_mode=%s): %s", work_mode, org_job_locations)
 
-    # 6f. Past titles — free win, derived from preferred_roles
+    # Past titles
     person_past_titles = list(roles)[:5] if roles else None
-    if person_past_titles:
-        logger.info("[LeadSearch] person_past_titles (managers who came up through role): %s", person_past_titles)
 
-    # 6g. Apollo seniority filter — never sent before; observed Operations Managers
-    # and Junior Data Scientists slipping through because of this gap.
+    # Seniority
     person_seniorities = _seniorities_for_experience_level(exp_level)
-    logger.info("[LeadSearch] person_seniorities: %s (exp_level=%s)", person_seniorities, exp_level)
 
-    # ── Build filter ─────────────────────────────────────────────────────
-    filters = LeadFilter(
+    return LeadFilter(
         target_segments=all_segments,
-        person_titles_exclude=person_titles_exclude,
+        person_titles_exclude=list(DEFAULT_EXCLUSION_TITLES),
         person_locations=normalized_locs,
         organization_locations=normalized_locs,
         organization_industries=normalized_industries,
-        email_status=["verified"],  # Always require verified emails
+        email_status=["verified"],
         q_organization_job_titles=q_org_job_titles,
         organization_job_posted_at_range=org_job_posted_at_range,
         q_organization_keyword_tags=niche_keywords,
@@ -296,5 +352,38 @@ def generate_apollo_filters(candidate_profile: CandidateProfile, db: Session) ->
         person_past_titles=person_past_titles,
         person_seniorities=person_seniorities,
     )
-    logger.info("Production filters generated successfully (clarity=%s)", clarity)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_apollo_filters(
+    candidate_profile: CandidateProfile,
+    db: Session,
+    search_strategy: dict | None = None,
+) -> LeadFilter:
+    """Convert a candidate profile into production-grade segmented Apollo filters.
+
+    If search_strategy (from Career Strategist) is provided, uses the LLM path.
+    Otherwise falls back to the rules-based 5-layer pipeline.
+    """
+    logger.info(
+        "Generating Apollo filters for user_id=%s name=%s path=%s",
+        candidate_profile.user_id,
+        candidate_profile.name,
+        "llm" if search_strategy else "rules",
+    )
+
+    if search_strategy:
+        try:
+            filters = _generate_filters_from_strategy(search_strategy, candidate_profile)
+            logger.info("[FilterGen] LLM path complete")
+            return filters
+        except Exception as exc:
+            logger.warning("[FilterGen] LLM path failed (%s) — falling back to rules-based", exc)
+
+    logger.info("[FilterGen] Using rules-based path")
+    filters = _generate_filters_rules_based(candidate_profile)
+    logger.info("[FilterGen] Rules-based path complete")
     return filters

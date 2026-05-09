@@ -140,18 +140,18 @@ def _score_location(lead_location: str, pref_locations: List[str]) -> int:
     return 0
 
 
-def _score_seniority_fit(title: str, candidate_seniority: str) -> int:
+def _score_seniority_fit(title: str, candidate_seniority: str, company_size: str = "") -> int:
     """Score how well the lead's seniority fits the candidate's level.
 
-    For junior candidates: managers/leads score high, VPs/Directors score low.
-    For mid-level: managers/directors score high.
-    For senior: VPs/Directors/C-level score high.
+    Key fix (May 2026): for seed/tiny companies (1-50 employees), founder/CEO/CTO IS
+    the hiring manager regardless of candidate seniority. Penalising c-level contacts
+    at 10-person startups was wrong — those are the best possible leads.
 
     Returns 0-10.
     """
     title_lower = title.lower()
 
-    is_c_level = any(kw in title_lower for kw in ["ceo", "cto", "cfo", "coo", "chief", "founder"])
+    is_c_level = any(kw in title_lower for kw in ["ceo", "cto", "cfo", "coo", "chief", "founder", "co-founder"])
     is_vp = any(kw in title_lower for kw in ["vp", "vice president"])
     is_director = "director" in title_lower
     is_head = "head" in title_lower
@@ -159,8 +159,14 @@ def _score_seniority_fit(title: str, candidate_seniority: str) -> int:
     is_lead = any(kw in title_lower for kw in ["lead", "principal", "staff"])
     is_recruiter = any(kw in title_lower for kw in ["recruiter", "talent"])
 
+    # For seed/tiny companies, founders and C-suite ARE the hiring managers.
+    # Apply this override before any candidate-seniority logic.
+    is_seed_company = any(k in (company_size or "") for k in ("1-10", "11-50"))
+    if is_seed_company and (is_c_level or is_vp):
+        return 10
+
     if candidate_seniority in ["entry", "junior", "intern", "student", "graduate", "grad"]:
-        # Junior candidates: managers and leads are ideal, VPs are too senior
+        # Entry candidates: managers/leads are ideal; VPs/C-level too senior for mid/large cos
         if is_manager:
             return 10
         if is_lead:
@@ -168,17 +174,16 @@ def _score_seniority_fit(title: str, candidate_seniority: str) -> int:
         if is_recruiter:
             return 7
         if is_head:
-            return 5
+            return 6
         if is_director:
-            return 3
+            return 4
         if is_vp:
-            return 1
+            return 2
         if is_c_level:
-            return 0
-        return 4  # Unknown seniority
+            return 1
+        return 4
 
     elif candidate_seniority in ["mid", "career_switching", "switching"]:
-        # Mid candidates: directors and managers are ideal
         if is_director:
             return 10
         if is_manager:
@@ -192,7 +197,7 @@ def _score_seniority_fit(title: str, candidate_seniority: str) -> int:
         if is_recruiter:
             return 6
         if is_c_level:
-            return 2
+            return 3
         return 4
 
     else:
@@ -219,14 +224,19 @@ def score_and_select_leads(
     target_count: int = 200,
     campaign_id: str = "unknown",
     dream_companies: List[str] | None = None,
+    company_fit_scores: Dict[str, int] | None = None,
 ) -> List[Dict[str, Any]]:
-    """Score leads using weighted heuristics and return top N.
+    """Score leads using weighted heuristics + LLM company intelligence and return top N.
 
     Each lead dict is augmented with:
-      - score: normalized overall score (70-90 range)
+      - score: normalized overall score
       - _title_score, _dept_score, _industry_score, _seniority_score, _location_score:
         raw component scores for DB storage
       - _dream_company_score: bonus points if lead's company matches a dream company
+      - _company_fit_score: LLM-evaluated company fit (0-15 pts from 1-10 LLM rating)
+
+    company_fit_scores: dict mapping company_name_lower → 1-10 LLM fit score.
+    Missing entries default to 5 (neutral = 7.5 pts).
     """
     if not leads:
         return []
@@ -355,7 +365,8 @@ def score_and_select_leads(
             i_score = 12
 
         # --- 4. Seniority Fit (0-10) ---
-        sen_score = _score_seniority_fit(title, candidate_seniority)
+        lead_company_size = lead.get("company_size") or ""
+        sen_score = _score_seniority_fit(title, candidate_seniority, company_size=lead_company_size)
 
         # --- 5. Location Relevance (0-10) ---
         l_score = _score_location(location, pref_locations)
@@ -375,7 +386,7 @@ def score_and_select_leads(
                     is_dream = True
                     break
 
-        # --- 7. Niche-keyword penalty (NEW) ---
+        # --- 7. Niche-keyword penalty ---
         # Penalize when the candidate selected niches (AI, SaaS, Devtools)
         # but ZERO of them appear anywhere in the company text.
         niche_penalty = 0
@@ -387,7 +398,7 @@ def score_and_select_leads(
             ]).lower()
             niche_hits = sum(1 for n in cand_niches_lower if n in company_blob)
             if niche_hits == 0:
-                niche_penalty = -15
+                niche_penalty = -20  # raised from -15: must overcome d_score baseline of +5
 
         # --- 8. Industry denylist penalty ---
         # Hard mismatch: tech candidate landing on Real Estate / Interior Design / etc.
@@ -402,7 +413,7 @@ def score_and_select_leads(
         # or come from cached/pre-existing lead pools.
         size_penalty = 0
         if not is_dream:
-            lead_size = (lead.get("company_size") or "").lower()
+            lead_size = lead_company_size.lower()
             is_large = any(k in lead_size for k in ("1001", "5001", "10000"))
             is_tiny = any(k in lead_size for k in ("1-10", "11-50"))
             if wants_early_stage and is_large:
@@ -410,8 +421,23 @@ def score_and_select_leads(
             elif wants_enterprise and is_tiny:
                 size_penalty = -10  # user wants large company, lead is at tiny startup
 
+        # --- 10. Company Intelligence score (0-15 pts from LLM 1-10 rating) ---
+        # LLM evaluated each unique company against the candidate profile post-collection.
+        # 10/10 → +15, 5/10 → +7.5, 1/10 → +1.5. Default 5 (neutral) if not evaluated.
+        ci_score = 0
+        if not is_dream:
+            lead_company_lower = (lead.get("company") or "").lower().strip()
+            llm_rating = (company_fit_scores or {}).get(lead_company_lower, 5)
+            ci_score = round((llm_rating / 10) * 15)
+            # Low-rated companies (1-3/10) get an extra penalty so they fall below scoring floor
+            if llm_rating <= 3:
+                ci_score -= 10
+
         # Total Calculation
-        total_score = t_score + d_score + i_score + sen_score + l_score + dc_score + niche_penalty + denylist_penalty + size_penalty
+        total_score = (
+            t_score + d_score + i_score + sen_score + l_score
+            + dc_score + niche_penalty + denylist_penalty + size_penalty + ci_score
+        )
 
         # Tie-breaker (only when total_score is positive — don't randomly rescue penalized leads)
         if total_score > 0:
@@ -438,6 +464,7 @@ def score_and_select_leads(
         lead["_seniority_score"] = sen_score
         lead["_location_score"] = l_score
         lead["_dream_company_score"] = dc_score
+        lead["_company_fit_score"] = ci_score
         scored_leads.append(lead)
 
         log_traces.append({

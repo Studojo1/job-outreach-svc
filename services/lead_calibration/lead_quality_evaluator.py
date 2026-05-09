@@ -6,6 +6,15 @@ to assess quality and return specific filter adjustments in JSON.
 Used by quality_probe_loop() in lead_collector_service.py before the full 500-lead
 collection runs. Allows the system to self-correct filters based on qualitative lead
 assessment rather than just a count-based loosening strategy.
+
+Schema (v2 — May 2026):
+  quality_score            — 1-10 overall batch quality
+  main_issue               — top problem in one sentence (or null)
+  company_evaluations      — per-company scores and reasons (up to 20)
+  explicit_exclusions      — company names to block from full collection
+  restrict_company_sizes   — Apollo size ranges to restrict to
+  add_keyword_tags         — up to 3 niche keywords to add
+  suggest_titles           — specific titles to add to the search
 """
 
 import json
@@ -19,16 +28,25 @@ _EVAL_SYSTEM_PROMPT = """You are a recruiting quality analyst for a job outreach
 Given a candidate profile and a sample of leads returned by Apollo (the hiring-manager search tool),
 assess whether these leads actually match what the candidate is looking for.
 
-Focus on: company stage fit (startup vs enterprise), industry fit, role title relevance.
+Focus on: company stage fit (startup vs enterprise), industry/sector fit, role title relevance.
 
 Apollo size ranges for reference: "1,50" = seed/tiny, "51,200" = small, "201,1000" = mid, "1001,10000" = large enterprise.
+
+IMPORTANT: For early-stage startup candidates, seeing a Founder/CEO/CTO at a 10-person AI company
+is a GOOD lead. Seeing an Operations Manager at a 5000-person FMCG company is a BAD lead.
 
 Respond ONLY with valid JSON — no markdown, no prose, no code fences:
 {
   "quality_score": <integer 1-10, where 10 = perfect match, 1 = completely wrong>,
   "main_issue": "<1 sentence describing the biggest problem, or null if quality is good>",
-  "restrict_company_sizes": <list of Apollo size ranges to use, e.g. ["1,50","51,200"], or null if no change needed>,
-  "add_keyword_tags": <list of up to 3 lowercase keyword tags to add to the Apollo search, e.g. ["ai","saas","startup"], or null if no change needed>
+  "company_evaluations": [
+    {"company": "<company name>", "fit_score": <1-10>, "reason": "<one phrase>"},
+    ...
+  ],
+  "explicit_exclusions": <list of company names to hard-block from full collection, or null>,
+  "restrict_company_sizes": <list of Apollo size ranges to use, e.g. ["1,50","51,200"], or null if no change>,
+  "add_keyword_tags": <list of up to 3 lowercase keyword tags to add, e.g. ["ai","saas"], or null>,
+  "suggest_titles": <list of up to 5 specific hiring-manager titles to add to the search, or null>
 }"""
 
 
@@ -44,9 +62,9 @@ def evaluate_probe_with_llm(
                          archetype_label, company_type_avoid.
 
     Returns:
-        Dict with keys: quality_score, main_issue, restrict_company_sizes, add_keyword_tags.
-        Returns a safe default (quality_score=7, no adjustments) on any LLM failure so the
-        collection proceeds normally — never blocks on evaluator errors.
+        Dict with keys: quality_score, main_issue, company_evaluations,
+        explicit_exclusions, restrict_company_sizes, add_keyword_tags, suggest_titles.
+        Returns a safe default (quality_score=7, no adjustments) on any LLM failure.
     """
     from openai import AzureOpenAI
     from core.config import settings
@@ -83,7 +101,7 @@ def evaluate_probe_with_llm(
         f"CANDIDATE PROFILE:\n{candidate_text}\n\n"
         f"PROBE LEADS ({len(rows)} results from Apollo page 1):\n{leads_text}\n\n"
         "Are these leads a good match for this candidate? "
-        "If not, suggest specific filter adjustments."
+        "Rate each company individually and suggest specific filter adjustments if needed."
     )
 
     try:
@@ -99,21 +117,23 @@ def evaluate_probe_with_llm(
                 {"role": "user", "content": user_content},
             ],
             temperature=0,
-            max_tokens=200,
+            max_tokens=600,
         )
         raw = (response.choices[0].message.content or "").strip()
         # Strip markdown fences if the model included them anyway
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
-                raw = raw[4:]
+                raw = raw[4:].strip()
         result = json.loads(raw)
         logger.info(
-            "[QualityProbe] LLM eval: score=%s issue=%r restrict=%s kws=%s",
+            "[QualityProbe] LLM eval: score=%s issue=%r restrict=%s kws=%s titles=%s exclusions=%s",
             result.get("quality_score"),
             result.get("main_issue"),
             result.get("restrict_company_sizes"),
             result.get("add_keyword_tags"),
+            result.get("suggest_titles"),
+            result.get("explicit_exclusions"),
         )
         return result
     except Exception as exc:
@@ -121,6 +141,9 @@ def evaluate_probe_with_llm(
         return {
             "quality_score": 7,
             "main_issue": None,
+            "company_evaluations": [],
+            "explicit_exclusions": None,
             "restrict_company_sizes": None,
             "add_keyword_tags": None,
+            "suggest_titles": None,
         }

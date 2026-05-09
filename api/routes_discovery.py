@@ -56,7 +56,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         "company_preferences": {
             "industries": prefs.get("industry_interests", []),
             "company_size": [prefs.get("company_size", "any")],
-            # Pipe niches through so the scorer can apply the niche-mismatch penalty.
+            "company_stage": [prefs.get("company_stage", "any")],
             "niche_keywords": prefs.get("niche_keywords", []),
         },
     }
@@ -110,6 +110,23 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
 
+    # Company Intelligence — LLM evaluates each unique company against the candidate profile.
+    # Batched (15 per call), cached by company domain. Produces company_fit_scores dict.
+    from services.lead_scoring.company_intelligence_service import evaluate_company_fit
+    candidate_prefs_for_intel = {
+        "company_stage": [prefs.get("company_stage", "any")],
+        "niche_keywords": prefs.get("niche_keywords", []),
+        "preferred_roles": preferred_roles,
+        "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
+        "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
+    }
+    try:
+        company_fit_scores = evaluate_company_fit(lead_dicts, candidate_prefs_for_intel, db)
+        logger.info("[SCORE_BG] Company intelligence: %d companies evaluated", len(company_fit_scores))
+    except Exception as ci_err:
+        logger.warning("[SCORE_BG] Company intelligence failed (%s) — scoring without it", ci_err)
+        company_fit_scores = {}
+
     from services.lead_scoring.lead_scoring_service import score_and_select_leads as score_leads_svc
     scored = score_leads_svc(
         leads=lead_dicts,
@@ -117,6 +134,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         role_intelligence=role_intelligence,
         target_count=len(lead_dicts),
         dream_companies=candidate.dream_companies or [],
+        company_fit_scores=company_fit_scores,
     )
 
     # Build LeadScore rows in memory first so we can attach justification_json
@@ -332,6 +350,8 @@ async def search_leads(
             "idempotent": True,
         }
 
+    probe_exclusions: list[str] = []  # populated inside else block; empty for pre-built filters path
+
     try:
         if request.filters:
             filters = request.filters
@@ -385,12 +405,27 @@ async def search_leads(
 
             logger.info(f"[LeadSearch] Built CandidateProfile: roles={profile.preferred_roles}, locations={profile.location_preferences}")
 
-            from services.lead_calibration.filter_generator_service import generate_apollo_filters
-            filters = generate_apollo_filters(profile, db)
+            # Career Strategist — LLM generates title clusters + Apollo strategy
+            from services.candidate_intelligence.career_strategist import run_career_strategist
+            t_pre_strategist = time.perf_counter()
+            search_strategy = await asyncio.to_thread(
+                run_career_strategist,
+                candidate.resume_profile or {},
+                prefs,
+                preferred_roles,
+                candidate.flex_notes,
+            )
+            logger.info(
+                f"[LeadSearch] Career Strategist: {'strategy generated' if search_strategy else 'fallback to rules'} "
+                f"in {(time.perf_counter() - t_pre_strategist)*1000:.0f}ms"
+            )
 
-            logger.info(f"[LeadSearch] Filters generated — segments={len(filters.target_segments)}, "
+            from services.lead_calibration.filter_generator_service import generate_apollo_filters
+            filters = generate_apollo_filters(profile, db, search_strategy=search_strategy)
+
+            logger.info(f"[LeadSearch] Filters generated (path={'llm' if search_strategy else 'rules'}) — "
+                        f"segments={len(filters.target_segments)}, "
                         f"locations={filters.person_locations}, "
-                        f"industries={filters.organization_industries}, "
                         f"exclude_titles={len(filters.person_titles_exclude or [])}")
             for seg in filters.target_segments:
                 logger.info(f"[LeadSearch]   Segment: size={seg.company_size_range}, titles={seg.person_titles[:5]}{'...' if len(seg.person_titles) > 5 else ''}")
@@ -406,13 +441,16 @@ async def search_leads(
                 "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
             }
             t_pre_probe = time.perf_counter()
-            filters = await asyncio.to_thread(
+            filters, probe_exclusions = await asyncio.to_thread(
                 quality_probe_loop,
                 filters,
                 candidate_prefs_for_probe,
-                2,  # max_iterations
+                3,  # max_iterations
             )
-            logger.info(f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms")
+            logger.info(
+                f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms "
+                f"exclusions={probe_exclusions}"
+            )
 
         t_filter = time.perf_counter()
         logger.info(f"[LeadSearch] Filter generation + probe: {(t_filter - t_start)*1000:.0f}ms")
@@ -424,6 +462,7 @@ async def search_leads(
             candidate_id=candidate.id,
             target_leads=request.target_leads,
             db=db,
+            excluded_companies=probe_exclusions or None,
         )
 
         t_collect = time.perf_counter()

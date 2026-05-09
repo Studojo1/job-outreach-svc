@@ -249,23 +249,29 @@ def _probe_batch(filters: LeadFilter) -> list[dict]:
 def quality_probe_loop(
     filters: LeadFilter,
     candidate_prefs: dict,
-    max_iterations: int = 2,
-) -> LeadFilter:
-    """Probe Apollo, evaluate quality with LLM, adjust filters if needed. Max 2 rounds.
+    max_iterations: int = 3,
+) -> tuple[LeadFilter, list[str]]:
+    """Probe Apollo, evaluate quality with LLM, adjust filters if needed. Max 3 rounds.
 
     Runs before the full 500-lead collection. Each iteration:
       1. Fetch page 1 (no DB writes)
-      2. Send sample to LLM with candidate profile → get quality score + suggested adjustments
-      3. Apply adjustments (restrict company sizes, add keyword tags)
-      4. Stop when quality_score >= 6 or max_iterations reached
+      2. Send sample to LLM with candidate profile → get quality score + adjustments
+      3. Apply: restrict company sizes, add keywords, inject suggested titles,
+         accumulate explicit company exclusions
+      4. Stop when quality_score >= 7 or max_iterations reached
 
-    This is the qualitative counterpart to the existing quantitative loosening loop.
-    Loosening fixes "not enough leads"; this loop fixes "wrong leads".
+    Returns:
+        (finalised_filters, explicit_exclusions) where explicit_exclusions is a list
+        of company names the LLM flagged as hard mismatches — passed to collect_leads
+        to skip them even if Apollo returns them.
 
     candidate_prefs keys: company_stage, niche_keywords, preferred_roles,
                           archetype_label, company_type_avoid.
     """
     from services.lead_calibration.lead_quality_evaluator import evaluate_probe_with_llm
+    from services.candidate_intelligence.career_strategist import APOLLO_VALID_SIZE_RANGES
+
+    all_exclusions: list[str] = []
 
     for iteration in range(max_iterations + 1):
         probe = _probe_batch(filters)
@@ -278,32 +284,40 @@ def quality_probe_loop(
         result = evaluate_probe_with_llm(probe, candidate_prefs)
         quality_score = int(result.get("quality_score") or 7)
         main_issue = result.get("main_issue")
+
+        # Accumulate company exclusions regardless of whether we iterate
+        new_exclusions = result.get("explicit_exclusions") or []
+        if isinstance(new_exclusions, list):
+            for exc_name in new_exclusions:
+                if exc_name and exc_name not in all_exclusions:
+                    all_exclusions.append(str(exc_name).strip())
+
         logger.info(
-            "[QualityProbe] iter=%d quality=%d/10 issue=%r",
-            iteration, quality_score, main_issue,
+            "[QualityProbe] iter=%d quality=%d/10 issue=%r exclusions=%s",
+            iteration, quality_score, main_issue, all_exclusions,
         )
 
-        if quality_score >= 6 or iteration == max_iterations:
+        if quality_score >= 7 or iteration == max_iterations:
             break
 
-        # Apply LLM-suggested filter adjustments
-        restrict_sizes = result.get("restrict_company_sizes")
-        add_kws = result.get("add_keyword_tags")
+        # ── Apply LLM-suggested filter adjustments ───────────────────────
         adjusted = False
 
+        # 1. Restrict company size ranges
+        restrict_sizes = result.get("restrict_company_sizes")
         if restrict_sizes and isinstance(restrict_sizes, list):
+            valid_sizes = [s for s in restrict_sizes if s in APOLLO_VALID_SIZE_RANGES]
             restricted_segs = [
                 s for s in filters.target_segments
-                if s.company_size_range in restrict_sizes
+                if s.company_size_range in valid_sizes
             ]
             if restricted_segs:
                 filters = _clone_filters(filters, target_segments=restricted_segs)
-                logger.info(
-                    "[QualityProbe] Restricted to %d segments: %s",
-                    len(restricted_segs), restrict_sizes,
-                )
+                logger.info("[QualityProbe] Restricted to %d segments: %s", len(restricted_segs), valid_sizes)
                 adjusted = True
 
+        # 2. Add keyword tags (cap at 3 total)
+        add_kws = result.get("add_keyword_tags")
         if add_kws and isinstance(add_kws, list):
             existing = list(filters.q_organization_keyword_tags or [])
             merged = list(dict.fromkeys(existing + [k.lower().strip() for k in add_kws if k]))[:3]
@@ -312,9 +326,30 @@ def quality_probe_loop(
                 logger.info("[QualityProbe] Updated keyword tags: %s", merged)
                 adjusted = True
 
+        # 3. Inject suggested titles into ALL segments (not size-gated — probe knows best)
+        suggest_titles = result.get("suggest_titles")
+        if suggest_titles and isinstance(suggest_titles, list):
+            clean_titles = [str(t).strip() for t in suggest_titles if t and str(t).strip()][:5]
+            if clean_titles:
+                updated_segs = []
+                for seg in filters.target_segments:
+                    existing_titles = list(seg.person_titles)
+                    for t in clean_titles:
+                        if t not in existing_titles:
+                            existing_titles.append(t)
+                    updated_segs.append(TargetSegment(
+                        company_size_range=seg.company_size_range,
+                        person_titles=existing_titles,
+                    ))
+                filters = _clone_filters(filters, target_segments=updated_segs)
+                logger.info("[QualityProbe] Injected suggested titles: %s", clean_titles)
+                adjusted = True
+
         if not adjusted:
             logger.info("[QualityProbe] No actionable adjustments from LLM — stopping early")
             break
+
+    return filters, all_exclusions
 
     return filters
 
@@ -501,12 +536,16 @@ def _store_people(
     target_leads: int,
     db: Session,
     leads_collected: int,
+    excluded_companies: list[str] | None = None,
 ) -> int:
     """Parse, deduplicate, and store a batch of Apollo people. Returns updated count.
 
     Enforces a per-company cap of MAX_LEADS_PER_COMPANY to ensure diversity.
+    excluded_companies: company names flagged by the probe loop LLM as hard mismatches.
     """
     from sqlalchemy import func
+
+    excluded_lower = {c.lower() for c in (excluded_companies or [])}
 
     # Build company count map from already-stored leads
     company_counts: Dict[str, int] = {}
@@ -537,6 +576,11 @@ def _store_people(
         company = parsed_data.get("company") or "Unknown Company"
         company_key = company.lower()
         if company_counts.get(company_key, 0) >= MAX_LEADS_PER_COMPANY:
+            continue
+
+        # Probe-loop exclusion — hard-block companies the LLM flagged as mismatches
+        if excluded_lower and any(exc in company_key for exc in excluded_lower):
+            logger.info("[STORE] Skipping excluded company: %s", company)
             continue
 
         conditions = [Lead.apollo_id == apollo_id]
@@ -581,6 +625,7 @@ def _paginate_filters(
     target_leads: int,
     db: Session,
     leads_collected: int,
+    excluded_companies: list[str] | None = None,
 ) -> int:
     """Paginate through all Apollo pages for a given filter set.
 
@@ -596,7 +641,10 @@ def _paginate_filters(
             logger.info("Apollo exhausted on page %d.", page)
             break
 
-        leads_collected = _store_people(people, candidate_id, target_leads, db, leads_collected)
+        leads_collected = _store_people(
+            people, candidate_id, target_leads, db, leads_collected,
+            excluded_companies=excluded_companies,
+        )
 
         try:
             db.commit()
@@ -610,7 +658,13 @@ def _paginate_filters(
     return leads_collected
 
 
-def collect_leads(filters: LeadFilter, candidate_id: int, target_leads: int, db: Session) -> int:
+def collect_leads(
+    filters: LeadFilter,
+    candidate_id: int,
+    target_leads: int,
+    db: Session,
+    excluded_companies: list[str] | None = None,
+) -> int:
     """Execute iterative Apollo search logic until target_leads are secured.
 
     Strategy:
@@ -620,12 +674,16 @@ def collect_leads(filters: LeadFilter, candidate_id: int, target_leads: int, db:
       3. Continue paginating with each loosened filter set until the
          target is met or all stages are exhausted.
 
-    This ensures the 500-lead minimum is enforced as long as Apollo
-    has enough data across any combination of filters.
+    excluded_companies: company names flagged by probe-loop LLM as hard mismatches —
+    skipped even when Apollo returns them during full collection.
     """
     # Phase 1: Original filters — paginate fully
-    logger.info("Collecting leads — Phase 1: original filters (target=%d)", target_leads)
-    leads_collected = _paginate_filters(filters, candidate_id, target_leads, db, 0)
+    logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
+                target_leads, len(excluded_companies or []))
+    leads_collected = _paginate_filters(
+        filters, candidate_id, target_leads, db, 0,
+        excluded_companies=excluded_companies,
+    )
 
     logger.info("[PHASE1] Original filters collected %d/%d leads", leads_collected, target_leads)
 
@@ -648,6 +706,7 @@ def collect_leads(filters: LeadFilter, candidate_id: int, target_leads: int, db:
 
             leads_collected = _paginate_filters(
                 loose_filters, candidate_id, target_leads, db, leads_collected,
+                excluded_companies=excluded_companies,
             )
 
             logger.info(
