@@ -297,7 +297,10 @@ async def search_linkedin_leads_apollo(
     mapped_locations = [_LOCATION_MAP.get(loc, loc) for loc in locations]
     mapped_locations = [l for l in mapped_locations if l]  # drop blanks (Global)
 
-    mapped_industries = [_INDUSTRY_MAP.get(ind, ind) for ind in industries]
+    # Apollo's organization_industries field requires internal tag IDs, not strings —
+    # string values always return 0 results. Filter by role + location only; the
+    # enrichment step (people/match) returns enough signal for targeting.
+    _ = industries  # kept in signature for API compatibility
 
     # Fetch more candidates than needed since some won't have LinkedIn URLs
     fetch_count = min(limit * 3, 100)
@@ -308,8 +311,6 @@ async def search_linkedin_leads_apollo(
     }
     if mapped_locations:
         payload["person_locations"] = mapped_locations
-    if mapped_industries:
-        payload["organization_industries"] = mapped_industries
 
     try:
         r = await asyncio.to_thread(
