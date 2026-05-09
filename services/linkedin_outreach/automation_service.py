@@ -250,6 +250,29 @@ _ROLE_EXPANSION: dict[str, list[str]] = {
 }
 
 
+def _apollo_match_by_id(api_key: str, person_id: str) -> Optional[str]:
+    """Fetch LinkedIn URL for a single Apollo person ID. Free — no credits consumed."""
+    import requests as _req
+    try:
+        r = _req.post(
+            "https://api.apollo.io/api/v1/people/match",
+            json={"id": person_id},
+            headers={
+                "Content-Type": "application/json",
+                "Cache-Control": "no-cache",
+                "X-Api-Key": api_key,
+            },
+            timeout=15,
+        )
+        if not r.ok:
+            return None
+        p = r.json().get("person") or {}
+        url = (p.get("linkedin_url") or "").strip()
+        return url if "/in/" in url else None
+    except Exception:
+        return None
+
+
 async def search_linkedin_leads_apollo(
     target_role: str,
     locations: list[str],
@@ -276,9 +299,11 @@ async def search_linkedin_leads_apollo(
 
     mapped_industries = [_INDUSTRY_MAP.get(ind, ind) for ind in industries]
 
+    # Fetch more candidates than needed since some won't have LinkedIn URLs
+    fetch_count = min(limit * 3, 100)
     payload: dict = {
         "person_titles": person_titles,
-        "per_page": min(limit, 100),
+        "per_page": fetch_count,
         "page": 1,
     }
     if mapped_locations:
@@ -302,27 +327,40 @@ async def search_linkedin_leads_apollo(
             logger.warning("Apollo API returned %d: %s", r.status_code, r.text[:200])
             return []
         data = r.json()
+        raw_people = data.get("people", [])
+        logger.info("Apollo search: %d raw candidates for role=%r", len(raw_people), target_role)
+
+        # Step 2: enrich each person by ID to get their LinkedIn URL (free, no credits)
         people = []
-        for p in data.get("people", []):
-            linkedin_url = (p.get("linkedin_url") or "").strip()
-            if not linkedin_url or "/in/" not in linkedin_url:
-                continue
+        sem = asyncio.Semaphore(5)  # max 5 concurrent match calls
+
+        async def enrich(p: dict) -> Optional[dict]:
+            person_id = p.get("id")
+            if not person_id:
+                return None
             first = p.get("first_name") or ""
-            last = p.get("last_name") or ""
-            name = f"{first} {last}".strip()
-            if not name:
-                continue
             org = p.get("organization") or {}
             company = org.get("name", "") if isinstance(org, dict) else ""
-            people.append({
+            async with sem:
+                linkedin_url = await asyncio.to_thread(_apollo_match_by_id, api_key, person_id)
+            if not linkedin_url:
+                return None
+            # Use matched data: might have full last name in match response
+            name = first.strip()
+            if not name:
+                return None
+            return {
                 "name": name,
                 "headline": p.get("title") or "",
                 "company": company,
                 "profile_url": linkedin_url.rstrip("/") + "/",
                 "profile_image_url": p.get("photo_url"),
-            })
-        logger.info("Apollo search: %d leads from %d raw results", len(people), len(data.get("people", [])))
-        return people[:limit]
+            }
+
+        results = await asyncio.gather(*[enrich(p) for p in raw_people])
+        people = [r for r in results if r is not None][:limit]
+        logger.info("Apollo search: %d leads with LinkedIn URLs from %d candidates", len(people), len(raw_people))
+        return people
     except Exception as e:
         logger.error("Apollo search failed: %s", e)
         return []
