@@ -346,7 +346,7 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
             locations=c.target_locations or [],
             industries=c.target_industries or [],
             keywords=c.target_keywords,
-            limit=60,
+            limit=30,
         )
 
         logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
@@ -358,11 +358,13 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
             db.commit()
             return
 
-        # Generate personalised connection notes for each lead
-        notes = await _generate_notes_batch(people, c.target_role, user_name, c.connection_note)
-        followups = await _generate_followups_batch(people, c.target_role, user_name, c.followup_message)
+        # Save leads immediately so frontend sees them fast — use template notes for now.
+        # AI personalisation runs in a background task after the DB commit.
+        template_note = c.connection_note or ""
+        template_followup = c.followup_message or ""
 
-        for i, person in enumerate(people):
+        req_ids = []
+        for person in people:
             req = LinkedInConnectionRequest(
                 campaign_id=campaign_id,
                 user_id=user_id,
@@ -371,8 +373,8 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
                 company=person.get("company"),
                 profile_url=person.get("profile_url", ""),
                 profile_image_url=person.get("profile_image_url"),
-                connection_note=notes[i] if i < len(notes) else c.connection_note,
-                followup_message=followups[i] if i < len(followups) else c.followup_message,
+                connection_note=template_note,
+                followup_message=template_followup,
                 status="pending",
             )
             db.add(req)
@@ -380,10 +382,52 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         c.total_leads = len(people)
         c.updated_at = datetime.utcnow()
         db.commit()
-        logger.info("Campaign %d: saved %d leads", campaign_id, len(people))
+        logger.info("Campaign %d: saved %d leads (template notes)", campaign_id, len(people))
+
+        # Refresh req IDs then personalise in background
+        reqs = db.query(LinkedInConnectionRequest).filter(
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+            LinkedInConnectionRequest.status == "pending",
+        ).all()
+        req_ids = [r.id for r in reqs]
+
+        # Fire-and-forget AI personalisation — does not block lead availability
+        import asyncio as _asyncio
+        _asyncio.create_task(_personalise_leads(req_ids, people, c.target_role, user_name, c.connection_note))
 
     except Exception as e:
         logger.error("Lead search failed for campaign %d: %s", campaign_id, e, exc_info=True)
+    finally:
+        db.close()
+
+
+async def _personalise_leads(
+    req_ids: list[int], people: list[dict], target_role: str, user_name: str, template: str | None
+) -> None:
+    """Background task: update saved leads with AI-personalised connection notes."""
+    from database.session import SessionLocal
+    from services.linkedin_outreach.message_gen import generate_connection_message
+
+    db = SessionLocal()
+    try:
+        for req_id, person in zip(req_ids, people):
+            try:
+                note = await generate_connection_message(
+                    person_name=person.get("name", ""),
+                    person_headline=person.get("headline", ""),
+                    person_company=person.get("company", ""),
+                    target_role=target_role,
+                    student_name=user_name,
+                )
+                req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
+                if req and req.status == "pending":
+                    req.connection_note = note
+            except Exception:
+                pass
+        db.commit()
+        logger.info("Personalised %d connection notes in background", len(req_ids))
+    except Exception as e:
+        logger.error("Background personalisation failed: %s", e)
     finally:
         db.close()
 

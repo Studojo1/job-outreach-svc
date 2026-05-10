@@ -302,8 +302,8 @@ async def search_linkedin_leads_apollo(
     # enrichment step (people/match) returns enough signal for targeting.
     _ = industries  # kept in signature for API compatibility
 
-    # Fetch more candidates than needed since some won't have LinkedIn URLs
-    fetch_count = min(limit * 3, 100)
+    # Fetch 2× the needed count — match calls filter out those without LinkedIn URLs
+    fetch_count = min(limit * 2, 60)
     payload: dict = {
         "person_titles": person_titles,
         "per_page": fetch_count,
@@ -333,7 +333,7 @@ async def search_linkedin_leads_apollo(
 
         # Step 2: enrich each person by ID to get their LinkedIn URL (free, no credits)
         people = []
-        sem = asyncio.Semaphore(5)  # max 5 concurrent match calls
+        sem = asyncio.Semaphore(10)  # max 10 concurrent match calls
 
         async def enrich(p: dict) -> Optional[dict]:
             person_id = p.get("id")
