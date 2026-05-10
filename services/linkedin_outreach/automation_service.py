@@ -599,8 +599,20 @@ class LinkedInAutomationDaemon:
                     if not token_row:
                         continue
 
-                    li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-                    jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+                    try:
+                        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+                        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+                    except Exception:
+                        # Decryption failed — key rotated or token corrupted; tell user to reconnect
+                        logger.warning(
+                            "Campaign %d: credential decryption failed, marking auth_failed",
+                            campaign.id,
+                        )
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        continue
+
                     session_id = token_row.proxy_session_id
 
                     await self._process_campaign(db, campaign, li_at, jsessionid, session_id)
