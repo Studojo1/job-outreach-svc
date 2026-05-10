@@ -102,7 +102,7 @@ async def send_connection_request(
         "invitations": [],
         "excludeInvitations": [],
         "invitee": {
-            "com.linkedin.voyager.growth.invitation.InviteeProfile": {
+            "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
                 "profileId": profile_urn,
             }
         },
@@ -113,7 +113,7 @@ async def send_connection_request(
     try:
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
-                "https://www.linkedin.com/voyager/api/growth/normInvitations",
+                "https://www.linkedin.com/voyager/api/relationships/invitations",
                 headers=_headers(li_at, jsessionid),
                 json=payload,
             )
