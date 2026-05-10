@@ -502,6 +502,91 @@ async def launch_campaign(
     return {"ok": True, "status": "running"}
 
 
+@router.post("/campaigns/{campaign_id}/send-one")
+async def send_one_now(
+    campaign_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Immediately attempt to send one pending connection request, bypassing the daemon sleep."""
+    from services.linkedin_outreach.automation_service import (
+        resolve_profile_urn, send_connection_request, LinkedInAuthError,
+    )
+
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    if c.status != "running":
+        raise HTTPException(status_code=400, detail="Campaign is not running")
+
+    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token_row:
+        raise HTTPException(status_code=400, detail="No LinkedIn token found — reconnect first")
+
+    try:
+        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+    except Exception:
+        c.status = "auth_failed"
+        c.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
+
+    req = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+            LinkedInConnectionRequest.status == "pending",
+        )
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="No pending leads to send")
+
+    # Resolve URN
+    if not req.profile_urn:
+        try:
+            urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id)
+        except LinkedInAuthError:
+            c.status = "auth_failed"
+            c.updated_at = datetime.utcnow()
+            db.commit()
+            raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+        if not urn:
+            req.status = "error"
+            req.error = "Could not resolve profile URN"
+            req.updated_at = datetime.utcnow()
+            db.commit()
+            raise HTTPException(status_code=422, detail=f"Could not resolve URN for {req.profile_url}")
+        req.profile_urn = urn
+
+    # Send
+    try:
+        ok = await send_connection_request(
+            li_at, jsessionid, req.profile_urn, req.connection_note or "", token_row.proxy_session_id
+        )
+    except LinkedInAuthError:
+        c.status = "auth_failed"
+        c.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+
+    if ok:
+        req.status = "sent"
+        req.sent_at = datetime.utcnow()
+        c.total_sent += 1
+        result = "sent"
+    else:
+        req.status = "error"
+        req.error = "Send failed"
+        result = "error"
+
+    req.updated_at = datetime.utcnow()
+    c.updated_at = datetime.utcnow()
+    db.commit()
+
+    return {"ok": ok, "result": result, "lead_name": req.name, "profile_url": req.profile_url}
+
+
 @router.post("/campaigns/{campaign_id}/pause")
 async def pause_campaign(
     campaign_id: int,
