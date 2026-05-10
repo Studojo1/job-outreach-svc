@@ -64,7 +64,10 @@ def _headers(li_at: str, jsessionid: str) -> dict:
 
 
 async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, session_id: str | None = None) -> Optional[str]:
-    """Extract fsd_profile URN from a LinkedIn profile URL."""
+    """Extract fsd_profile URN from a LinkedIn profile URL.
+
+    Raises LinkedInAuthError if the session is expired (401/403 or redirect to login page).
+    """
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0].split("/")[0]
     url = f"https://www.linkedin.com/in/{slug}/"
     try:
@@ -73,10 +76,17 @@ async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, ses
                 url,
                 headers={**_headers(li_at, jsessionid), "Accept": "text/html"},
             )
+        if res.status_code in (401, 403):
+            raise LinkedInAuthError(f"Session expired (status {res.status_code}) resolving {profile_url}")
+        # Redirect to login page indicates expired session even with follow_redirects=True
+        if "/login" in str(res.url) or "/uas/login" in str(res.url):
+            raise LinkedInAuthError("Session expired (redirected to login page)")
         matches = re.findall(r"fsd_profile:([A-Za-z0-9_-]{30,})", res.text)
         for m in matches:
             if m != "urn":
                 return m
+    except LinkedInAuthError:
+        raise
     except Exception as e:
         logger.warning("URN resolve failed for %s: %s", profile_url, e)
     return None
@@ -659,7 +669,14 @@ class LinkedInAutomationDaemon:
 
                 # Resolve URN if we don't have it
                 if not req.profile_urn:
-                    urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
+                    try:
+                        urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
+                    except LinkedInAuthError:
+                        logger.warning("Campaign %d: auth failed during URN resolve, marking auth_failed", campaign.id)
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        return
                     if urn:
                         req.profile_urn = urn
                     else:
