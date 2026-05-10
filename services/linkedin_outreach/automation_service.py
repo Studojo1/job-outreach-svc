@@ -86,6 +86,29 @@ class LinkedInAuthError(Exception):
     """Raised when LinkedIn returns 401/403 indicating an expired or invalid session."""
 
 
+async def _fresh_jsessionid(li_at: str, session_id: str | None = None) -> str | None:
+    """Seed a LinkedIn homepage request to get a JSESSIONID valid for this proxy IP.
+
+    LinkedIn's JSESSIONID is IP-bound for CSRF. The stored JSESSIONID was captured
+    from the user's browser IP. Using it from a proxy IP fails CSRF on Voyager POSTs.
+    A seed GET through the same proxy gives a fresh JSESSIONID tied to the proxy IP.
+    """
+    ua = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy(session_id)) as client:
+            await client.get(
+                "https://www.linkedin.com/",
+                headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html"},
+            )
+            return client.cookies.get("JSESSIONID")
+    except Exception as e:
+        logger.warning("fresh_jsessionid seed failed: %s", e)
+        return None
+
+
 async def send_connection_request(
     li_at: str,
     jsessionid: str,
@@ -97,18 +120,32 @@ async def send_connection_request(
 
     Raises LinkedInAuthError when the session is expired (401/403).
     """
+    # Seed a fresh JSESSIONID from the proxy IP to pass LinkedIn's CSRF check.
+    # The stored jsessionid was captured from the user's browser IP; using it
+    # from a different IP causes CSRF failure on Voyager write endpoints.
+    fresh_jsid = await _fresh_jsessionid(li_at, session_id)
+    csrf = fresh_jsid or jsessionid
+    logger.info("send_connection_request profileId=%s csrf_source=%s", profile_urn, "fresh" if fresh_jsid else "stored")
+
     payload = {
         "trackingId": _tracking_id(),
-        "inviteeProfileUrn": f"urn:li:fsd_profile:{profile_urn}",
-        "customMessage": note[:300] if note else "",
+        "invitations": [],
+        "excludeInvitations": [],
+        "invitee": {
+            "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
+                "profileId": profile_urn,
+            }
+        },
+        "message": note[:300] if note else "",
     }
 
-    # Minimal headers for the new relationships/invitations endpoint — no RestLI Accept or version header
     post_headers = {
-        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
-        "csrf-token": jsessionid,
+        "Cookie": f"li_at={li_at}; JSESSIONID={csrf}",
+        "csrf-token": csrf,
         "Content-Type": "application/json",
-        "Accept": "application/json",
+        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "x-restli-protocol-version": "2.0.0",
+        "x-li-lang": "en_US",
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -116,7 +153,7 @@ async def send_connection_request(
         "Referer": "https://www.linkedin.com/mynetwork/",
         "Origin": "https://www.linkedin.com",
     }
-    logger.info("send_connection_request profileId=%s payload=%s", profile_urn, payload)
+
     try:
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
