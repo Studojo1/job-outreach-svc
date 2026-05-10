@@ -664,8 +664,13 @@ class LinkedInAutomationDaemon:
                 .all()
             )
 
+            first_in_batch = True
             for req in pending:
-                await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
+                # Sleep between sends but NOT before the very first attempt —
+                # this way auth failures surface immediately on the first tick.
+                if not first_in_batch:
+                    await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
+                first_in_batch = False
 
                 # Resolve URN if we don't have it
                 if not req.profile_urn:
