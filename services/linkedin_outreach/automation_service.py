@@ -106,43 +106,45 @@ async def send_connection_request(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     )
-    payload = {
-        "trackingId": _tracking_id(),
-        "invitations": [],
-        "excludeInvitations": [],
-        "invitee": {
-            "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
-                "profileId": profile_urn,
-            }
-        },
-        "message": note[:300] if note else "",
-    }
+    msg = note[:300] if note else ""
+    # Try payload variants in order. relationships/invitations is strict about schema;
+    # we probe each format until one returns non-400.
+    payload_variants = [
+        # v1: current format
+        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
+         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
+         "message": msg},
+        # v2: customMessage instead of message
+        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
+         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
+         "customMessage": msg},
+        # v3: full URN as profileId
+        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
+         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": f"urn:li:fsd_profile:{profile_urn}"}},
+         "message": msg},
+        # v4: bare minimum — no arrays, no trackingId
+        {"invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
+         "message": msg},
+        # v5: flat inviteeProfileUrn (full URN)
+        {"trackingId": _tracking_id(), "inviteeProfileUrn": f"urn:li:fsd_profile:{profile_urn}", "message": msg},
+    ]
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed: prime the cookie jar with li_at so httpx sends it automatically.
-            # LinkedIn's POST endpoints expect bcookie, lidc, sdui_ver etc. that the
-            # seed GET sets — sending only li_at+JSESSIONID (as we did before) causes
-            # schema rejection. Let httpx handle the full cookie jar.
             client.cookies.set("li_at", li_at, domain=".linkedin.com")
-
             seed = await client.get(
                 "https://www.linkedin.com/",
                 headers={"User-Agent": ua, "Accept": "text/html"},
                 follow_redirects=True,
             )
-            # JSESSIONID is now in the jar from the seed response (IP-specific).
             raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
             csrf = raw_csrf.strip('"')
             csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
             logger.info(
-                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d jar=%s",
+                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d",
                 profile_urn, csrf_source, csrf[:15], seed.status_code,
-                list(client.cookies.keys()),
             )
 
-            # Do NOT set Cookie header manually — let httpx send the full jar
-            # (li_at + JSESSIONID + bcookie + lidc + sdui_ver + ...).
             post_headers = {
                 "csrf-token": csrf,
                 "Content-Type": "application/json",
@@ -155,22 +157,22 @@ async def send_connection_request(
                 "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
 
-            res = await client.post(
-                "https://www.linkedin.com/voyager/api/relationships/invitations",
-                headers=post_headers,
-                json=payload,
-                follow_redirects=True,
-            )
+            res = None
+            for i, pv in enumerate(payload_variants):
+                r = await client.post(
+                    "https://www.linkedin.com/voyager/api/relationships/invitations",
+                    headers=post_headers,
+                    json=pv,
+                    follow_redirects=True,
+                )
+                logger.info("variant=%d status=%d body=%s", i + 1, r.status_code, r.text[:200])
+                if r.status_code in (200, 201):
+                    return True
+                if r.status_code in (401, 403):
+                    raise LinkedInAuthError(f"Session expired (status {r.status_code})")
+                res = r
 
-        logger.info(
-            "invitations final: status=%d body=%s",
-            res.status_code, res.text[:300],
-        )
-        if res.status_code in (200, 201):
-            return True
-        if res.status_code in (401, 403):
-            raise LinkedInAuthError(f"Session expired (status {res.status_code})")
-        logger.warning("Connection request failed status=%d body=%s", res.status_code, res.text[:300])
+        logger.warning("All payload variants failed, last status=%d", res.status_code if res else -1)
         return False
     except LinkedInAuthError:
         raise
