@@ -99,16 +99,13 @@ async def send_connection_request(
     """
     payload = {
         "trackingId": _tracking_id(),
-        "invitations": [],
-        "excludeInvitations": [],
         "invitee": {
             "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
                 "profileId": profile_urn,
             }
         },
+        "customMessage": note[:300] if note else "",
     }
-    if note:
-        payload["message"] = note[:300]
 
     try:
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
@@ -121,7 +118,7 @@ async def send_connection_request(
             return True
         if res.status_code in (401, 403):
             raise LinkedInAuthError(f"Session expired (status {res.status_code})")
-        logger.warning("Connection request got status %d: %s", res.status_code, res.text[:200])
+        logger.warning("Connection request got status %d: %s", res.status_code, res.text[:500])
         return False
     except LinkedInAuthError:
         raise
