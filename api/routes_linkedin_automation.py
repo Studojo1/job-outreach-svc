@@ -587,6 +587,26 @@ async def send_one_now(
     return {"ok": ok, "result": result, "lead_name": req.name, "profile_url": req.profile_url}
 
 
+@router.post("/campaigns/{campaign_id}/retry-errors")
+async def retry_errors(
+    campaign_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Reset all errored leads back to pending so the daemon retries them."""
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    updated = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+            LinkedInConnectionRequest.status == "error",
+        )
+        .update({"status": "pending", "error": None, "updated_at": datetime.utcnow()})
+    )
+    db.commit()
+    return {"ok": True, "reset": updated}
+
+
 @router.post("/campaigns/{campaign_id}/pause")
 async def pause_campaign(
     campaign_id: int,
