@@ -119,19 +119,28 @@ async def send_connection_request(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, **_proxy(session_id)) as client:
-            # Seed: GET homepage with li_at only — LinkedIn returns a fresh JSESSIONID
-            # valid for this proxy IP via Set-Cookie. Both requests share this client
-            # instance so they use the same underlying proxy connection/IP.
-            await client.get(
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
+            # Seed: GET homepage with li_at only — LinkedIn sets a fresh JSESSIONID
+            # valid for this proxy IP. Both requests share this client so they use
+            # the same underlying proxy connection/IP.
+            seed = await client.get(
                 "https://www.linkedin.com/",
                 headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html"},
+                follow_redirects=True,
             )
-            csrf = client.cookies.get("JSESSIONID") or jsessionid
-            logger.info("send_connection_request profileId=%s csrf_source=%s", profile_urn, "fresh" if client.cookies.get("JSESSIONID") else "stored")
+            raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
+            # LinkedIn's JSESSIONID is stored/transmitted with surrounding quotes
+            # (e.g. "ajax:1234"). Strip them so csrf-token header is bare value.
+            csrf = raw_csrf.strip('"')
+            csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
+            logger.info(
+                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d seed_cookies=%s",
+                profile_urn, csrf_source, csrf[:15], seed.status_code,
+                list(client.cookies.keys()),
+            )
 
             post_headers = {
-                "Cookie": f"li_at={li_at}; JSESSIONID={csrf}",
+                "Cookie": f'li_at={li_at}; JSESSIONID="{csrf}"',
                 "csrf-token": csrf,
                 "Content-Type": "application/json",
                 "Accept": "application/vnd.linkedin.normalized+json+2.1",
@@ -140,18 +149,22 @@ async def send_connection_request(
                 "User-Agent": ua,
                 "Referer": "https://www.linkedin.com/mynetwork/",
                 "Origin": "https://www.linkedin.com",
+                "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/relationships/invitations",
                 headers=post_headers,
                 json=payload,
             )
-        logger.info("invitations response %d: %s", res.status_code, res.text[:500])
+        logger.info(
+            "invitations response %d body=%s headers=%s",
+            res.status_code, res.text[:500], dict(res.headers),
+        )
         if res.status_code in (200, 201):
             return True
         if res.status_code in (401, 403):
             raise LinkedInAuthError(f"Session expired (status {res.status_code})")
-        logger.warning("Connection request got status %d: %s", res.status_code, res.text[:500])
+        logger.warning("Connection request got status %d: %s", res.status_code, res.text[:200])
         return False
     except LinkedInAuthError:
         raise
