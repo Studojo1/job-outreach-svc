@@ -103,12 +103,25 @@ async def send_connection_request(
         "customMessage": note[:300] if note else "",
     }
 
+    # Minimal headers for the new relationships/invitations endpoint — no RestLI Accept or version header
+    post_headers = {
+        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
+        "csrf-token": jsessionid,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.linkedin.com/mynetwork/",
+        "Origin": "https://www.linkedin.com",
+    }
     logger.info("send_connection_request profileId=%s payload=%s", profile_urn, payload)
     try:
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/relationships/invitations",
-                headers=_headers(li_at, jsessionid),
+                headers=post_headers,
                 json=payload,
             )
         logger.info("invitations response %d: %s", res.status_code, res.text[:500])
