@@ -630,47 +630,33 @@ async def check_campaign_auth(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Verify the stored LinkedIn session is still valid. Sets auth_failed if not."""
-    import httpx
+    """Check whether a LinkedIn token exists and can be decrypted.
+
+    Does NOT make a live Voyager call — LinkedIn blocks datacenter IPs so any
+    such call would return a false failure. Auth failure is detected by the
+    daemon when it actually tries to send. This endpoint only gates the
+    no-token / decrypt-error cases.
+    """
     c = _get_campaign_or_404(campaign_id, current_user.id, db)
     token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
     if not token_row:
+        if c.status == "running":
+            c.status = "auth_failed"
+            c.updated_at = datetime.utcnow()
+            db.commit()
         return {"auth_ok": False, "reason": "no_token"}
 
     try:
-        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+        decrypt(token_row.li_at_enc, token_row.nonce)
+        decrypt(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
-        c.status = "auth_failed"
-        c.updated_at = datetime.utcnow()
-        db.commit()
+        if c.status == "running":
+            c.status = "auth_failed"
+            c.updated_at = datetime.utcnow()
+            db.commit()
         return {"auth_ok": False, "reason": "decrypt_failed"}
 
-    # Lightweight Voyager call — fetch own profile
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            res = await client.get(
-                "https://www.linkedin.com/voyager/api/identity/profiles/me",
-                headers={
-                    "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
-                    "csrf-token": jsessionid,
-                    "x-restli-protocol-version": "2.0.0",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-                    ),
-                },
-            )
-        auth_ok = res.status_code == 200 and "/login" not in str(res.url) and "/authwall" not in str(res.url)
-    except Exception:
-        auth_ok = False
-
-    if not auth_ok and c.status == "running":
-        c.status = "auth_failed"
-        c.updated_at = datetime.utcnow()
-        db.commit()
-
-    return {"auth_ok": auth_ok}
+    return {"auth_ok": True}
 
 
 def _get_campaign_or_404(campaign_id: int, user_id: str, db: Session) -> LinkedInCampaign:
