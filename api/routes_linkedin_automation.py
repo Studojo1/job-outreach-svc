@@ -593,13 +593,19 @@ async def retry_errors(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Reset all errored leads back to pending so the daemon retries them."""
+    """Reset errored leads back to pending so the daemon retries them.
+
+    Only resets leads that already have a resolved profile_urn — i.e. those
+    that failed at the connection POST step, not at profile URL resolution.
+    Leads with no profile_urn have a 404/private profile and won't resolve.
+    """
     c = _get_campaign_or_404(campaign_id, current_user.id, db)
     updated = (
         db.query(LinkedInConnectionRequest)
         .filter(
             LinkedInConnectionRequest.campaign_id == campaign_id,
             LinkedInConnectionRequest.status == "error",
+            LinkedInConnectionRequest.profile_urn.isnot(None),
         )
         .update({"status": "pending", "error": None, "updated_at": datetime.utcnow()})
     )
