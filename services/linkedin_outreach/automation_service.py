@@ -99,11 +99,7 @@ async def send_connection_request(
     """
     payload = {
         "trackingId": _tracking_id(),
-        "invitee": {
-            "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
-                "profileId": profile_urn,
-            }
-        },
+        "inviteeProfileUrn": f"urn:li:fsd_profile:{profile_urn}",
         "customMessage": note[:300] if note else "",
     }
 
