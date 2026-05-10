@@ -106,49 +106,53 @@ async def send_connection_request(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     )
-    msg = note[:300] if note else ""
-    # Try payload variants in order. relationships/invitations is strict about schema;
-    # we probe each format until one returns non-400.
-    payload_variants = [
-        # v1: current format
-        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
-         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
-         "message": msg},
-        # v2: customMessage instead of message
-        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
-         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
-         "customMessage": msg},
-        # v3: full URN as profileId
-        {"trackingId": _tracking_id(), "invitations": [], "excludeInvitations": [],
-         "invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": f"urn:li:fsd_profile:{profile_urn}"}},
-         "message": msg},
-        # v4: bare minimum — no arrays, no trackingId
-        {"invitee": {"com.linkedin.voyager.relationships.invitation.InviteeProfile": {"profileId": profile_urn}},
-         "message": msg},
-        # v5: flat inviteeProfileUrn (full URN)
-        {"trackingId": _tracking_id(), "inviteeProfileUrn": f"urn:li:fsd_profile:{profile_urn}", "message": msg},
-    ]
+    payload = {
+        "trackingId": _tracking_id(),
+        "invitations": [],
+        "excludeInvitations": [],
+        "invitee": {
+            "com.linkedin.voyager.relationships.invitation.InviteeProfile": {
+                "profileId": profile_urn,
+            }
+        },
+        "message": note[:300] if note else "",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            client.cookies.set("li_at", li_at, domain=".linkedin.com")
+            # Seed GET: pass li_at manually so httpx jar picks up all session cookies
+            # (JSESSIONID, bcookie, lidc, etc.) that LinkedIn sets for this proxy IP.
             seed = await client.get(
                 "https://www.linkedin.com/",
-                headers={"User-Agent": ua, "Accept": "text/html"},
+                headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
                 follow_redirects=True,
             )
             raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
+            # LinkedIn stores JSESSIONID as "ajax:XXXX" (with surrounding quotes).
+            # The csrf-token header must be the bare value; Cookie header must keep quotes.
             csrf = raw_csrf.strip('"')
             csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
+
+            # Build Cookie header manually so we know exactly what's sent.
+            # JSESSIONID uses raw value (preserves LinkedIn's original quoting).
+            cookie_parts = [f"li_at={li_at}"]
+            for name in ("JSESSIONID", "bcookie", "bscookie", "lidc", "li_mc", "sdui_ver", "lang"):
+                v = client.cookies.get(name)
+                if v:
+                    cookie_parts.append(f"{name}={v}")
+            cookie_str = "; ".join(cookie_parts)
+
             logger.info(
-                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d",
-                profile_urn, csrf_source, csrf[:15], seed.status_code,
+                "send_connection_request profileId=%s csrf_source=%s csrf=%s cookie=%s",
+                profile_urn, csrf_source, csrf[:20], cookie_str[:150],
             )
 
             post_headers = {
+                "Cookie": cookie_str,
                 "csrf-token": csrf,
                 "Content-Type": "application/json",
-                "Accept": "application/vnd.linkedin.normalized+json+2.1",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
                 "x-restli-protocol-version": "2.0.0",
                 "x-li-lang": "en_US",
                 "User-Agent": ua,
@@ -157,22 +161,22 @@ async def send_connection_request(
                 "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
 
+            # Try relationships/invitations first, then growth/normInvitations as fallback.
+            endpoints = [
+                "https://www.linkedin.com/voyager/api/relationships/invitations",
+                "https://www.linkedin.com/voyager/api/growth/normInvitations",
+            ]
             res = None
-            for i, pv in enumerate(payload_variants):
-                r = await client.post(
-                    "https://www.linkedin.com/voyager/api/relationships/invitations",
-                    headers=post_headers,
-                    json=pv,
-                    follow_redirects=True,
-                )
-                logger.info("variant=%d status=%d body=%s", i + 1, r.status_code, r.text[:200])
+            for ep in endpoints:
+                r = await client.post(ep, headers=post_headers, json=payload)
+                logger.info("endpoint=%s status=%d body=%s", ep.split("/")[-1], r.status_code, r.text[:200])
                 if r.status_code in (200, 201):
                     return True
                 if r.status_code in (401, 403):
                     raise LinkedInAuthError(f"Session expired (status {r.status_code})")
                 res = r
 
-        logger.warning("All payload variants failed, last status=%d", res.status_code if res else -1)
+        logger.warning("All endpoints failed, last status=%d", res.status_code if res else -1)
         return False
     except LinkedInAuthError:
         raise
