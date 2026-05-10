@@ -16,26 +16,14 @@ logger = logging.getLogger(__name__)
 def _proxy(session_id: str | None = None) -> dict:
     """Build httpx proxy kwarg for Evomi residential proxy.
 
-    If session_id is provided, uses a sticky session so all requests for
-    a given LinkedIn account come from the same residential IP.
-    Format: http://user-session-ID:pass@core-residential.evomi.com:1000
+    Sticky-session URL variants (user-session-ID) are rejected by Evomi with
+    407 — only the plain credential URL works. session_id is accepted for
+    API compatibility but ignored.
     """
     from core.config import settings
     base_url = settings.LINKEDIN_PROXY_URL.strip()
     if not base_url:
         return {}
-    if session_id:
-        # Insert -session-ID into the username part
-        # base_url format: http://user:pass@host:port
-        try:
-            from urllib.parse import urlparse, urlunparse
-            p = urlparse(base_url)
-            sticky_netloc = p.netloc.replace(
-                p.username, f"{p.username}-session-{session_id}", 1
-            )
-            base_url = urlunparse(p._replace(netloc=sticky_netloc))
-        except Exception:
-            pass
     return {"proxy": base_url}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
