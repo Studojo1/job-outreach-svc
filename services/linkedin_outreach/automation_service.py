@@ -106,7 +106,20 @@ async def send_connection_request(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     )
-    payload = {
+    # normInvitations (primary, still supported) uses growth.invitation namespace.
+    # relationships/invitations (fallback) uses relationships.invitation namespace.
+    norm_payload = {
+        "trackingId": _tracking_id(),
+        "message": note[:300] if note else "",
+        "invitations": [],
+        "excludeInvitations": [{}],
+        "invitee": {
+            "com.linkedin.voyager.growth.invitation.InviteeProfile": {
+                "profileId": profile_urn,
+            }
+        },
+    }
+    rel_payload = {
         "trackingId": _tracking_id(),
         "invitations": [],
         "excludeInvitations": [],
@@ -161,22 +174,28 @@ async def send_connection_request(
                 "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
 
-            # Try relationships/invitations first, then growth/normInvitations as fallback.
-            endpoints = [
-                "https://www.linkedin.com/voyager/api/relationships/invitations",
-                "https://www.linkedin.com/voyager/api/growth/normInvitations",
+            # normInvitations (growth.invitation namespace) is the current supported endpoint.
+            # relationships/invitations (relationships.invitation namespace) is the fallback.
+            attempts = [
+                ("https://www.linkedin.com/voyager/api/growth/normInvitations", norm_payload),
+                ("https://www.linkedin.com/voyager/api/relationships/invitations", rel_payload),
             ]
             res = None
-            for ep in endpoints:
-                r = await client.post(ep, headers=post_headers, json=payload)
-                logger.info("endpoint=%s status=%d body=%s", ep.split("/")[-1], r.status_code, r.text[:200])
+            for ep, ep_payload in attempts:
+                r = await client.post(ep, headers=post_headers, json=ep_payload)
+                logger.info(
+                    "endpoint=%s status=%d headers=%s body=%s",
+                    ep.split("/")[-1], r.status_code,
+                    dict(r.headers),
+                    r.text[:300],
+                )
                 if r.status_code in (200, 201):
                     return True
                 if r.status_code in (401, 403):
                     raise LinkedInAuthError(f"Session expired (status {r.status_code})")
                 res = r
 
-        logger.warning("All endpoints failed, last status=%d", res.status_code if res else -1)
+        logger.warning("All endpoints failed, last status=%d body=%s", res.status_code if res else -1, res.text[:200] if res else "")
         return False
     except LinkedInAuthError:
         raise
