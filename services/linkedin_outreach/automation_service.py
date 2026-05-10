@@ -120,23 +120,18 @@ async def send_connection_request(
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed: GET homepage with li_at only — LinkedIn sets a fresh JSESSIONID
-            # valid for this proxy IP. Both requests share this client so they use
-            # the same underlying proxy connection/IP.
+            # Seed: GET homepage to obtain a fresh JSESSIONID for this proxy IP.
             seed = await client.get(
                 "https://www.linkedin.com/",
                 headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html"},
                 follow_redirects=True,
             )
             raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
-            # LinkedIn's JSESSIONID is stored/transmitted with surrounding quotes
-            # (e.g. "ajax:1234"). Strip them so csrf-token header is bare value.
             csrf = raw_csrf.strip('"')
             csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
             logger.info(
-                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d seed_cookies=%s",
+                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d",
                 profile_urn, csrf_source, csrf[:15], seed.status_code,
-                list(client.cookies.keys()),
             )
 
             post_headers = {
@@ -151,20 +146,45 @@ async def send_connection_request(
                 "Origin": "https://www.linkedin.com",
                 "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
-            res = await client.post(
-                "https://www.linkedin.com/voyager/api/relationships/invitations",
+
+            # Probe normInvitations to discover the current canonical endpoint.
+            # LinkedIn returns 301 pointing to the new URL; we follow it manually
+            # so the POST stays a POST (httpx/browsers convert 301 POST → GET).
+            probe = await client.post(
+                "https://www.linkedin.com/voyager/api/growth/normInvitations",
                 headers=post_headers,
                 json=payload,
             )
+            logger.info(
+                "normInvitations probe: status=%d location=%s body=%s",
+                probe.status_code,
+                probe.headers.get("location", "none"),
+                probe.text[:200],
+            )
+
+            if probe.status_code in (200, 201):
+                res = probe
+            elif probe.status_code == 301:
+                redirect_url = probe.headers.get("location")
+                logger.info("Following 301 POST redirect to %s", redirect_url)
+                res = await client.post(redirect_url, headers=post_headers, json=payload)
+            else:
+                # normInvitations not usable — fall back to relationships/invitations
+                res = await client.post(
+                    "https://www.linkedin.com/voyager/api/relationships/invitations",
+                    headers=post_headers,
+                    json=payload,
+                )
+
         logger.info(
-            "invitations response %d body=%s headers=%s",
-            res.status_code, res.text[:500], dict(res.headers),
+            "invitations final: status=%d body=%s",
+            res.status_code, res.text[:300],
         )
         if res.status_code in (200, 201):
             return True
         if res.status_code in (401, 403):
             raise LinkedInAuthError(f"Session expired (status {res.status_code})")
-        logger.warning("Connection request got status %d: %s", res.status_code, res.text[:200])
+        logger.warning("Connection request failed status=%d body=%s", res.status_code, res.text[:300])
         return False
     except LinkedInAuthError:
         raise
