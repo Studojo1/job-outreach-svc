@@ -120,22 +120,30 @@ async def send_connection_request(
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed: GET homepage to obtain a fresh JSESSIONID for this proxy IP.
+            # Seed: prime the cookie jar with li_at so httpx sends it automatically.
+            # LinkedIn's POST endpoints expect bcookie, lidc, sdui_ver etc. that the
+            # seed GET sets — sending only li_at+JSESSIONID (as we did before) causes
+            # schema rejection. Let httpx handle the full cookie jar.
+            client.cookies.set("li_at", li_at, domain=".linkedin.com")
+
             seed = await client.get(
                 "https://www.linkedin.com/",
-                headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html"},
+                headers={"User-Agent": ua, "Accept": "text/html"},
                 follow_redirects=True,
             )
+            # JSESSIONID is now in the jar from the seed response (IP-specific).
             raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
             csrf = raw_csrf.strip('"')
             csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
             logger.info(
-                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d",
+                "send_connection_request profileId=%s csrf_source=%s csrf_prefix=%s seed_status=%d jar=%s",
                 profile_urn, csrf_source, csrf[:15], seed.status_code,
+                list(client.cookies.keys()),
             )
 
+            # Do NOT set Cookie header manually — let httpx send the full jar
+            # (li_at + JSESSIONID + bcookie + lidc + sdui_ver + ...).
             post_headers = {
-                "Cookie": f'li_at={li_at}; JSESSIONID="{csrf}"',
                 "csrf-token": csrf,
                 "Content-Type": "application/json",
                 "Accept": "application/vnd.linkedin.normalized+json+2.1",
@@ -147,34 +155,12 @@ async def send_connection_request(
                 "x-li-track": '{"clientVersion":"1.13.14866","mpVersion":"1.13.14866","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Calcutta","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":2,"displayWidth":2560,"displayHeight":1600}',
             }
 
-            # Probe normInvitations to discover the current canonical endpoint.
-            # LinkedIn returns 301 pointing to the new URL; we follow it manually
-            # so the POST stays a POST (httpx/browsers convert 301 POST → GET).
-            probe = await client.post(
-                "https://www.linkedin.com/voyager/api/growth/normInvitations",
+            res = await client.post(
+                "https://www.linkedin.com/voyager/api/relationships/invitations",
                 headers=post_headers,
                 json=payload,
+                follow_redirects=True,
             )
-            logger.info(
-                "normInvitations probe: status=%d location=%s body=%s",
-                probe.status_code,
-                probe.headers.get("location", "none"),
-                probe.text[:200],
-            )
-
-            if probe.status_code in (200, 201):
-                res = probe
-            elif probe.status_code == 301:
-                redirect_url = probe.headers.get("location")
-                logger.info("Following 301 POST redirect to %s", redirect_url)
-                res = await client.post(redirect_url, headers=post_headers, json=payload)
-            else:
-                # normInvitations not usable — fall back to relationships/invitations
-                res = await client.post(
-                    "https://www.linkedin.com/voyager/api/relationships/invitations",
-                    headers=post_headers,
-                    json=payload,
-                )
 
         logger.info(
             "invitations final: status=%d body=%s",
