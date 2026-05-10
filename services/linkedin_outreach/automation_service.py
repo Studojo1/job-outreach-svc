@@ -107,6 +107,7 @@ async def send_connection_request(
         "customMessage": note[:300] if note else "",
     }
 
+    logger.info("send_connection_request profileId=%s payload=%s", profile_urn, payload)
     try:
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
@@ -114,6 +115,7 @@ async def send_connection_request(
                 headers=_headers(li_at, jsessionid),
                 json=payload,
             )
+        logger.info("invitations response %d: %s", res.status_code, res.text[:500])
         if res.status_code in (200, 201):
             return True
         if res.status_code in (401, 403):
