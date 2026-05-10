@@ -14,17 +14,33 @@ logger = logging.getLogger(__name__)
 
 
 def _proxy(session_id: str | None = None) -> dict:
-    """Build httpx proxy kwarg for Evomi residential proxy.
+    """Build httpx proxy kwargs for BrightData residential proxy.
 
-    Sticky-session URL variants (user-session-ID) are rejected by Evomi with
-    407 — only the plain credential URL works. session_id is accepted for
-    API compatibility but ignored.
+    BrightData sticky sessions use the format:
+      brd-customer-{id}-zone-{zone}-session-{session_id}
+    so all requests for a given LinkedIn account use the same residential IP.
+
+    BrightData requires verify=False (self-signed cert for HTTPS interception).
+    LINKEDIN_PROXY_URL must be in the format:
+      http://brd-customer-CUSTOMERID-zone-ZONE:PASSWORD@brd.superproxy.io:22225
     """
     from core.config import settings
-    base_url = settings.LINKEDIN_PROXY_URL.strip()
+    base_url = (settings.LINKEDIN_PROXY_URL or "").strip()
     if not base_url:
         return {}
-    return {"proxy": base_url}
+
+    if session_id:
+        try:
+            from urllib.parse import urlparse, urlunparse
+            p = urlparse(base_url)
+            # BrightData sticky: append -session-{id} to the username
+            sticky_user = f"{p.username}-session-{session_id}"
+            sticky_netloc = p.netloc.replace(p.username, sticky_user, 1)
+            base_url = urlunparse(p._replace(netloc=sticky_netloc))
+        except Exception:
+            pass
+
+    return {"proxy": base_url, "verify": False}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
 MAX_DAILY_REQUESTS = 25
