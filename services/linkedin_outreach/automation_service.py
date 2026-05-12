@@ -677,14 +677,14 @@ class LinkedInAutomationDaemon:
                         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
                         jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
                     except Exception:
-                        # Decryption failed — key rotated or token corrupted; tell user to reconnect
+                        # Decryption failed — key mismatch (e.g. staging vs prod pod) or
+                        # token corrupted. Skip silently; the pod that encrypted the token
+                        # will process it. Don't mark auth_failed — that status means
+                        # LinkedIn session expired, not a local key issue.
                         logger.warning(
-                            "Campaign %d: credential decryption failed, marking auth_failed",
+                            "Campaign %d: credential decryption failed — skipping this pod's tick",
                             campaign.id,
                         )
-                        campaign.status = "auth_failed"
-                        campaign.updated_at = datetime.utcnow()
-                        db.commit()
                         continue
 
                     session_id = token_row.proxy_session_id
