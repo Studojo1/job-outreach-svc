@@ -527,7 +527,9 @@ def _process_followups(db) -> tuple:
 
     pending = (
         db.query(EmailSent)
+        .join(Campaign, EmailSent.campaign_id == Campaign.id)
         .filter(
+            Campaign.status == "running",
             EmailSent.status == "followup_pending",
             EmailSent.scheduled_at.isnot(None),
             EmailSent.scheduled_at <= now,
