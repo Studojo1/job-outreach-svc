@@ -258,13 +258,25 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 "career_stage": prefs.get("career_stage"),
                 "locations": prefs.get("locations") or [],
                 "flex_notes": candidate.flex_notes or {},
-                # Round-2: forward LLM-extracted resume_profile fields so the
-                # justifier knows the candidate is specifically (e.g.) ASR/LLM,
-                # not just generic ML.
                 "subdomain": resume_prof.get("subdomain"),
                 "top_skills": resume_prof.get("top_skills") or [],
                 "target_industries": resume_prof.get("target_industries") or [],
             }
+
+            # Commit score adjustments (affinity + domain backfills) NOW, before
+            # the LLM justification calls. Holding the session open for 1-2 minutes
+            # causes Postgres to drop the idle connection and silently discard all work.
+            score_id_map = {lid: row.id for lid, row in score_rows.items()}
+            try:
+                db.commit()
+                logger.info("[SCORE_BG] Pre-justification commit done (affinity + backfills)")
+            except Exception as pre_commit_err:
+                logger.warning("[SCORE_BG] Pre-justification commit failed: %s", pre_commit_err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            db.close()
 
             justifications = justify_leads(
                 leads_with_scores=top_leads,
@@ -272,15 +284,30 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 company_profiles=company_payloads,
             )
 
-            for lid, payload in justifications.items():
-                row = score_rows.get(lid)
-                if row is not None:
-                    row.justification_json = payload
-            logger.info("[JUSTIFY] attached %d/%d justifications to top-K LeadScores",
-                        len(justifications), len(top_leads))
+            # Save in a fresh short-lived session — original session was closed above.
+            from database.session import SessionLocal as _FreshSession
+            db_save = _FreshSession()
+            try:
+                saved = 0
+                for lid, payload in justifications.items():
+                    score_id = score_id_map.get(lid)
+                    if score_id:
+                        ls_row = db_save.get(LeadScore, score_id)
+                        if ls_row:
+                            ls_row.justification_json = payload
+                            saved += 1
+                db_save.commit()
+                logger.info("[JUSTIFY] saved %d/%d justifications to DB", saved, len(justifications))
+            except Exception as save_err:
+                logger.error("[JUSTIFY] save failed: %s", save_err)
+                try:
+                    db_save.rollback()
+                except Exception:
+                    pass
+            finally:
+                db_save.close()
 
             # Kick off LLM web research for uncached companies in a daemon thread.
-            # This populates the cache so subsequent runs get company-specific bullets.
             _launch_web_research_bg(top_companies)
 
         except Exception as e:
@@ -290,14 +317,6 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             except Exception:
                 pass
 
-    try:
-        db.commit()
-    except Exception as commit_err:
-        logger.warning("[SCORE_BG] Final commit failed (%s) — scores may be partial", commit_err)
-        try:
-            db.rollback()
-        except Exception:
-            pass
     return count
 
 
@@ -308,6 +327,7 @@ def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
     before the HTTP response is returned — leads arrive with bullets already attached.
     Phase 2 (company intel) runs separately in background afterward.
     """
+    scored_count = 0
     db = SessionLocal()
     try:
         candidate = db.query(Candidate).filter_by(id=candidate_id).first()
@@ -316,21 +336,27 @@ def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
             return 0
         scored_count = _score_candidate_leads(db, candidate)
         logger.info("[SCORE_SYNC] candidate %d: scored+justified %d leads", candidate_id, scored_count)
+    except Exception as e:
+        logger.error("[SCORE_SYNC] failed for candidate %d: %s", candidate_id, e, exc_info=True)
+        return 0
+    finally:
+        db.close()  # safe even if _score_candidate_leads already closed it
 
+    # Post-scoring housekeeping in a fresh session (_score_candidate_leads closed the original).
+    db2 = SessionLocal()
+    try:
         from services.stage_tracking import safe_mark_stage
-        safe_mark_stage(db, user_id, "leads_generated", candidate_id=candidate_id)
-
+        safe_mark_stage(db2, user_id, "leads_generated", candidate_id=candidate_id)
         from core.analytics import capture as _capture
         _capture("lead_scoring_completed", user_id, {
             "candidate_id": candidate_id,
             "leads_scored": scored_count,
         })
-        return scored_count
     except Exception as e:
-        logger.error("[SCORE_SYNC] failed for candidate %d: %s", candidate_id, e, exc_info=True)
-        return 0
+        logger.warning("[SCORE_SYNC] post-scoring housekeeping failed: %s", e)
     finally:
-        db.close()
+        db2.close()
+    return scored_count
 
 
 def _run_company_intel_bg(candidate_id: int) -> None:
