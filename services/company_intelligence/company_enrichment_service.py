@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from database.models import CompanyProfile
 
 from .llm_company_research import research_companies_bulk
-from .apollo_job_postings import fetch_job_postings
+
 from .web_scraper import scrape_many
 
 logger = logging.getLogger(__name__)
@@ -240,22 +240,8 @@ def bulk_enrich_top_companies(
 
     unique_domains = sorted(profiles.keys())
 
-    # ── Phase 3: Apollo job postings (still useful if apollo_org_id exists)
-    jobs_to_run = [
-        d for d in unique_domains
-        if profiles[d].apollo_org_id and (
-            profiles[d].recent_job_postings is None or _apollo_stale(profiles[d])
-        )
-    ]
-    if jobs_to_run:
-        logger.info("[ENRICH] jobs: %d companies need posting refresh", len(jobs_to_run))
-        jobs_ok = 0
-        for d in jobs_to_run:
-            postings = fetch_job_postings(profiles[d].apollo_org_id)
-            profiles[d].recent_job_postings = postings
-            if postings:
-                jobs_ok += 1
-        logger.info("[ENRICH] jobs: %d/%d had postings", jobs_ok, len(jobs_to_run))
+    # ── Phase 3: Apollo job postings — DISABLED (Apollo org calls cost credits)
+    # LLM web search already extracts hiring_signal from live web pages.
 
     # ── Phase 4: Website scrape (async, parallel) ────────────────────────────
     if enable_scrape:
