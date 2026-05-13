@@ -247,21 +247,22 @@ async def _find_connect_button(page):
         # events which LinkedIn requires to open the invite modal.
         vanity = page.url.rstrip('/').split('/')[-1]
 
-        # Confirm the link exists in the DOM first
-        connect_exists = await page.evaluate(f"""
-            () => !!document.querySelector('a[href*="custom-invite"][href*="{vanity}"]')
+        # Get the full href of the Connect link so we can navigate to it directly.
+        # Clicking the <a> (JS or CDP) opens a dropdown but LinkedIn's SPA click
+        # handler doesn't reliably open the modal in headless contexts. Direct
+        # page.goto(href) forces the SPA router to handle the invite route.
+        connect_href = await page.evaluate(f"""
+            () => {{
+                const link = document.querySelector('a[href*="custom-invite"][href*="{vanity}"]');
+                return link ? link.href : null;
+            }}
         """)
-        logger.info("Playwright: Connect link exists for %s: %s", vanity, connect_exists)
+        logger.info("Playwright: Connect href for %s: %s", vanity, connect_href)
 
-        if connect_exists:
-            connect_loc = page.locator(f'a[href*="custom-invite"][href*="{vanity}"]').first
-            try:
-                await connect_loc.scroll_into_view_if_needed(timeout=3000)
-            except Exception:
-                pass
-            logger.info("Playwright: clicking Connect via CDP (force=True)")
-            await connect_loc.click(force=True, timeout=5000)
-            logger.info("Playwright: Connect CDP click fired")
+        if connect_href:
+            logger.info("Playwright: navigating to Connect href directly")
+            await page.goto(connect_href, wait_until="domcontentloaded", timeout=20000)
+            logger.info("Playwright: after goto Connect href, url=%s", page.url)
             await page.wait_for_timeout(3000)
 
             # Use Playwright's bounding_box() (CDP-based) — works even when body has
