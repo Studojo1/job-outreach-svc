@@ -347,6 +347,10 @@ async def playwright_send_invitation(
                     "--disable-infobars",
                     "--window-size=1280,800",
                 ],
+                # Remove --enable-automation so navigator.webdriver stays undefined.
+                # Without this, LinkedIn detects the headless browser and blocks
+                # the Connect invite modal from opening.
+                ignore_default_args=["--enable-automation"],
             )
             context = await browser.new_context(
                 user_agent=(
