@@ -623,27 +623,55 @@ async def search_leads(
             "collection_duration_seconds": duration,
         })
 
-        # Close the request DB session before synchronous scoring — it would time
-        # out if held open for the 2-3 min scoring duration. Scoring opens its own
-        # session. candidate.id and current_user.id are already captured above.
-        _candidate_id = candidate.id
-        _user_id = str(current_user.id)
-        db.close()
-
-        # Phase 1 (heuristic) + Phase 3 (justification) run synchronously here
-        # so leads arrive with bullets already attached.
-        # Phase 2 (company intel score adjustments) runs in background afterward.
-        scored_count = 0
+        # Scoring runs in background — synchronous scoring times out (4+ min
+        # exceeds ingress/browser limits). Frontend loading screen polls
+        # /discovery/scoring-ready/{candidate_id} until bullets are ready.
         if count > 0:
-            scored_count = await asyncio.to_thread(
-                _score_candidate_leads_sync, _candidate_id, _user_id
+            background_tasks.add_task(
+                _score_candidate_leads_sync, candidate.id, str(current_user.id)
             )
-            background_tasks.add_task(_run_company_intel_bg, _candidate_id)
+            background_tasks.add_task(_run_company_intel_bg, candidate.id)
 
-        return {"status": "success", "leads_collected": count, "leads_scored": scored_count, "scoring_async": False}
+        return {"status": "success", "leads_collected": count, "leads_scored": 0, "scoring_async": True}
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/scoring-ready/{candidate_id}")
+async def scoring_ready(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll this until bullets are ready. Frontend keeps loading screen up until then."""
+    candidate = db.query(Candidate).filter_by(
+        id=candidate_id, user_id=current_user.id
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    total = db.query(Lead).filter_by(candidate_id=candidate_id).count()
+    scored = (
+        db.query(LeadScore)
+        .join(Lead, LeadScore.lead_id == Lead.id)
+        .filter(Lead.candidate_id == candidate_id)
+        .count()
+    )
+    with_bullets = (
+        db.query(LeadScore)
+        .join(Lead, LeadScore.lead_id == Lead.id)
+        .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
+        .count()
+    )
+    # Ready when at least 90% of leads are scored and we have bullets for most
+    ready = scored >= max(1, total * 0.9) and with_bullets >= max(1, min(total, 450))
+    return {
+        "ready": ready,
+        "total": total,
+        "scored": scored,
+        "with_bullets": with_bullets,
+    }
 
 
 # NOTE: GET /candidate/{id}/leads endpoint moved to routes_candidate.py
