@@ -60,6 +60,51 @@ def debug_cookies(request: Request):
     }
 
 
+@router.get("/debug-voyager")
+async def debug_voyager(slug: str = "williamhgates", current_user: User = Depends(get_current_user)):
+    """Debug: attempt Voyager identity lookup for a slug and return raw response.
+
+    Reveals whether the LinkedIn session / proxy / Voyager API is working.
+    """
+    import httpx
+    from database.session import SessionLocal
+    from database.models import LinkedInToken
+    from services.linkedin_outreach.crypto import decrypt, decrypt_second
+    from services.linkedin_outreach.automation_service import _headers, _proxy
+
+    db = SessionLocal()
+    try:
+        token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+        if not token_row:
+            return {"error": "No LinkedIn token found — connect LinkedIn first"}
+
+        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+
+        proxy_cfg = _proxy(token_row.proxy_session_id)
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False, **proxy_cfg) as client:
+            r = await client.get(
+                f"https://www.linkedin.com/voyager/api/identity/profiles/{slug}",
+                headers=_headers(li_at, jsessionid),
+            )
+
+        body_preview = r.text[:500]
+        import re as _re
+        urns = _re.findall(r"fsd_profile:([A-Za-z0-9_-]{20,})", r.text)
+
+        return {
+            "slug": slug,
+            "status": r.status_code,
+            "proxy_configured": bool(proxy_cfg),
+            "proxy_url_preview": str(list(proxy_cfg.values())[0])[:30] + "..." if proxy_cfg else None,
+            "urns_found": urns[:3],
+            "li_at_prefix": li_at[:10] + "...",
+            "response_preview": body_preview,
+        }
+    finally:
+        db.close()
+
+
 @router.get("/me")
 def auth_me(current_user: User = Depends(get_current_user)):
     """Return current authenticated user info."""
