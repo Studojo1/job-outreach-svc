@@ -469,14 +469,17 @@ async def playwright_send_invitation(
                     logger.info("Playwright: %s — Connect menuitem clicked, waiting for modal", slug)
 
                 # Wait up to 20s for the Send button — covers both in-page modal (fast)
-                # and navigation-then-modal cases (slower).
+                # and navigation-then-modal cases (slower). After the button appears,
+                # wait another 2s for LinkedIn to enable it (custom-invite page loads
+                # invite context async and the button starts disabled).
                 try:
                     await page.wait_for_selector(
                         'button[aria-label="Send without a note"], button:has-text("Send without a note"), '
                         'button[aria-label="Add a note"], button[aria-label="Send now"]',
                         timeout=20000,
                     )
-                    logger.info("Playwright: %s — invite modal is open", slug)
+                    logger.info("Playwright: %s — invite modal is open, waiting for button to enable", slug)
+                    await page.wait_for_timeout(2500)
                 except Exception:
                     logger.info("Playwright: %s — modal not detected after 20s (url=%s)", slug, page.url)
 
@@ -544,7 +547,7 @@ async def playwright_send_invitation(
                             btn = page.locator(sel).first
                             if await btn.is_visible(timeout=1500):
                                 logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
-                                await btn.click(timeout=5000)
+                                await btn.click(timeout=10000)
                                 send_clicked = True
                                 break
                         except Exception as send_err:
