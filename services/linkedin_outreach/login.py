@@ -101,10 +101,10 @@ async def _linkedin_login_attempt(
 
             if "captcha" in challenge_lower:
                 challenge_type = "captcha"
-            elif any(x in challenge_lower for x in ["another device", "sign in to", "approve", "notification"]):
-                challenge_type = "phone_tap"
-            else:
+            elif any(x in challenge_lower for x in ["pin", "email", "verification code", "enter the code"]):
                 challenge_type = "pin"
+            else:
+                challenge_type = "phone_tap"
 
             key = str(uuid.uuid4())
             logger.info("LinkedIn challenge for %s — type=%s key=%s", email, challenge_type, key)
