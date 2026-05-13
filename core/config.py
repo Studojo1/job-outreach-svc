@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     # APOLLO
     APOLLO_API_KEY: str
+    APOLLO_API_KEY_2: str = ""  # fallback key when primary is exhausted
+    APOLLO_API_KEY_3: str = ""  # third key slot (optional)
 
     # GMAIL OAUTH
     GMAIL_CLIENT_ID: str

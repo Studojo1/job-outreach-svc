@@ -8,12 +8,11 @@ limit to manage API costs.
 import time
 from typing import Dict, Any, List, Optional
 
-import requests
 from sqlalchemy.orm import Session
 
-from core.config import settings
 from database.models import Lead
 from core.logger import get_logger
+from services.shared.apollo_key_manager import apollo_post, apollo_keys
 
 logger = get_logger(__name__)
 
@@ -112,14 +111,9 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
     Returns:
         Dict with 'email' key if found, None otherwise.
     """
-    if not settings.APOLLO_API_KEY or settings.APOLLO_API_KEY == "your_apollo_key_here":
-        logger.error("[ENRICHMENT] APOLLO_API_KEY not configured")
+    if not apollo_keys.has_valid_key():
+        logger.error("[ENRICHMENT] No valid Apollo API key available")
         return None
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Key": settings.APOLLO_API_KEY,
-    }
 
     payload: Dict[str, Any] = {}
 
@@ -141,7 +135,7 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
     if lead.apollo_id:
         payload["id"] = lead.apollo_id
 
-    resp = requests.post(APOLLO_MATCH_URL, json=payload, headers=headers, timeout=15)
+    resp = apollo_post(APOLLO_MATCH_URL, json=payload, timeout=15)
 
     if not resp.ok:
         logger.warning("[ENRICHMENT] Apollo match failed for %s: %d", lead.name, resp.status_code)

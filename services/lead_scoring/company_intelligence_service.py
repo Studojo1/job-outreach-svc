@@ -45,14 +45,37 @@ Respond ONLY with valid JSON — no markdown, no prose:
 
 
 def _build_company_blurb(lead: dict) -> str:
-    parts = [
-        f"Company: {lead.get('company') or 'Unknown'}",
-        f"Industry: {lead.get('industry') or '?'}",
-        f"Size: {lead.get('company_size') or '?'}",
-    ]
-    desc = (lead.get("company_description") or "").strip()
-    if desc:
-        parts.append(f"About: {desc[:200]}")
+    """Build a company description for LLM fit evaluation.
+
+    Prefers structured extracted_facts (from LLM web search) — they're more
+    specific and produce tighter fit scores than raw description strings.
+    """
+    facts = lead.get("extracted_facts") or {}
+    name = lead.get("company") or "Unknown"
+
+    if facts.get("what_they_build"):
+        parts = [f"Company: {name}"]
+        parts.append(f"What they build: {facts['what_they_build']}")
+        if facts.get("primary_market"):
+            parts.append(f"Market: {facts['primary_market']}")
+        if facts.get("core_tech"):
+            parts.append(f"Tech: {', '.join(facts['core_tech'][:5])}")
+        if facts.get("stage_signal"):
+            parts.append(f"Stage: {facts['stage_signal']}")
+        if facts.get("recent_momentum"):
+            parts.append(f"Momentum: {facts['recent_momentum']}")
+        if facts.get("hiring_signal"):
+            parts.append(f"Hiring: {facts['hiring_signal']}")
+    else:
+        parts = [
+            f"Company: {name}",
+            f"Industry: {lead.get('industry') or '?'}",
+            f"Size: {lead.get('company_size') or '?'}",
+        ]
+        desc = (lead.get("company_description") or "").strip()
+        if desc:
+            parts.append(f"About: {desc[:200]}")
+
     return " | ".join(parts)
 
 
@@ -158,14 +181,25 @@ def evaluate_company_fit(
     company_fit_scores: dict[str, int] = {}
     to_evaluate: list[dict] = []
 
-    # Check cache: CompanyProfile.company_fit_score column (added by migration)
+    # Check cache: CompanyProfile by domain first, then by name.
+    # Also inject extracted_facts into the lead dict so _build_company_blurb
+    # produces richer blurbs when LLM web search data is available.
     for name_lower, lead in unique.items():
         domain = lead.get("company_domain") or ""
         cached_score = None
+        cp = None
+
         if domain:
             cp = db.query(CompanyProfile).filter(CompanyProfile.domain == domain).first()
-            if cp and getattr(cp, "company_fit_score", None) is not None:
+        if cp is None:
+            cp = db.query(CompanyProfile).filter(CompanyProfile.name.ilike(name_lower)).first()
+
+        if cp:
+            if getattr(cp, "company_fit_score", None) is not None:
                 cached_score = cp.company_fit_score
+            # Inject extracted_facts so blurb is richer even on a score cache miss
+            if cp.extracted_facts and not lead.get("extracted_facts"):
+                lead["extracted_facts"] = cp.extracted_facts
 
         if cached_score is not None:
             company_fit_scores[name_lower] = int(cached_score)

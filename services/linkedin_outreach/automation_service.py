@@ -324,18 +324,13 @@ _ROLE_EXPANSION: dict[str, list[str]] = {
 }
 
 
-def _apollo_match_by_id(api_key: str, person_id: str) -> Optional[str]:
+def _apollo_match_by_id(person_id: str) -> Optional[str]:
     """Fetch LinkedIn URL for a single Apollo person ID. Free — no credits consumed."""
-    import requests as _req
+    from services.shared.apollo_key_manager import apollo_post as _ap
     try:
-        r = _req.post(
+        r = _ap(
             "https://api.apollo.io/api/v1/people/match",
             json={"id": person_id},
-            headers={
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache",
-                "X-Api-Key": api_key,
-            },
             timeout=15,
         )
         if not r.ok:
@@ -355,15 +350,9 @@ async def search_linkedin_leads_apollo(
     limit: int = 50,
 ) -> list[dict]:
     """Find leads via Apollo.io people search. Does not require LinkedIn session."""
-    import requests as _req
-    try:
-        from core.config import settings
-        api_key = (settings.APOLLO_API_KEY or "").strip()
-    except Exception:
-        api_key = ""
-
-    if not api_key or api_key == "your_apollo_key_here":
-        logger.warning("APOLLO_API_KEY not configured — skipping Apollo lead search")
+    from services.shared.apollo_key_manager import apollo_keys, apollo_post as _apollo_post
+    if not apollo_keys.has_valid_key():
+        logger.warning("No valid Apollo API key — skipping Apollo lead search")
         return []
 
     person_titles = _ROLE_EXPANSION.get(target_role, [target_role])
@@ -388,14 +377,9 @@ async def search_linkedin_leads_apollo(
 
     try:
         r = await asyncio.to_thread(
-            _req.post,
+            _apollo_post,
             "https://api.apollo.io/api/v1/mixed_people/api_search",
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache",
-                "X-Api-Key": api_key,
-            },
             timeout=30,
         )
         if not r.ok:
@@ -417,7 +401,7 @@ async def search_linkedin_leads_apollo(
             org = p.get("organization") or {}
             company = org.get("name", "") if isinstance(org, dict) else ""
             async with sem:
-                linkedin_url = await asyncio.to_thread(_apollo_match_by_id, api_key, person_id)
+                linkedin_url = await asyncio.to_thread(_apollo_match_by_id, person_id)
             if not linkedin_url:
                 return None
             # Use matched data: might have full last name in match response

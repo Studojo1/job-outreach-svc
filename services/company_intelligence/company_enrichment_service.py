@@ -1,14 +1,16 @@
 """Company enrichment orchestrator.
 
-Coordinates Apollo /organizations/enrich + light website scrape, persists into
-the global `company_profiles` cache, and serves enriched payloads to the
+Coordinates LLM web-search company research + light website scrape, persists
+into the global `company_profiles` cache, and serves enriched payloads to the
 lead-justifier downstream.
 
 Cache rules:
-- Apollo enrich: refreshed if `last_apollo_enriched_at` is older than 30 days.
+- LLM research: refreshed if `last_apollo_enriched_at` is older than 30 days.
+  (Column reused — no migration needed.)
+- Name-based lookup: when a lead has no company_domain, we look up by
+  normalised company name first so the 30-day cache actually hits.
 - Site scrape: refreshed if `last_scraped_at` is older than 30 days AND
   `scrape_failed` is False (we never retry permanently broken sites).
-- Domains we've already scraped failures for stay marked failed forever.
 """
 
 import asyncio
@@ -20,9 +22,8 @@ from sqlalchemy.orm import Session
 
 from database.models import CompanyProfile
 
-from .apollo_org_enrich import enrich_organization
+from .llm_company_research import research_companies_bulk
 from .apollo_job_postings import fetch_job_postings
-from .company_fact_extractor import extract_company_facts
 from .web_scraper import scrape_many
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,35 @@ def _apply_apollo_payload(profile: CompanyProfile, payload: dict) -> None:
     profile.last_apollo_enriched_at = datetime.utcnow()
 
 
+def _apply_llm_research(profile: CompanyProfile, facts: dict) -> None:
+    """Persist LLM web-search facts onto a CompanyProfile row.
+
+    `facts` is the dict returned by llm_company_research.research_company().
+    It contains both extracted_facts fields AND company-level fields.
+    We write both so the justifier and lead scorer get fresh data.
+    """
+    profile.name = facts.get("name") or profile.name
+    if facts.get("industries"):
+        profile.industries = facts["industries"]
+    if facts.get("keywords"):
+        profile.keywords = facts["keywords"]
+    if facts.get("employee_count") is not None:
+        profile.employee_count = facts["employee_count"]
+
+    # Store the structured facts blob (what_they_build, core_tech, etc.)
+    # directly — no separate extractor step needed.
+    structured = {
+        k: facts[k]
+        for k in ("what_they_build", "core_tech", "primary_market",
+                  "stage_signal", "recent_momentum", "hiring_signal")
+        if k in facts
+    }
+    if any(v for v in structured.values()):
+        profile.extracted_facts = structured
+
+    profile.last_apollo_enriched_at = datetime.utcnow()
+
+
 def _apply_scrape_payload(profile: CompanyProfile, payload: Optional[dict]) -> None:
     profile.last_scraped_at = datetime.utcnow()
     if payload is None:
@@ -113,22 +143,20 @@ def bulk_enrich_top_companies(
     companies: Iterable[Any],
     enable_scrape: bool = True,
 ) -> Dict[str, CompanyProfile]:
-    """Enrich every company in the input.
+    """Enrich every company in the input via LLM web search.
 
     Accepts two input shapes (back-compatible):
       - List of domain strings (legacy)
       - List of {"domain": str|None, "name": str|None} dicts (new)
 
-    On most Apollo plans the people-search response doesn't include a usable
-    `organization.domain`, so for many leads we only know the company NAME.
-    For those companies we call Apollo's name-based search to discover the
-    canonical domain BEFORE proceeding with the rest of the enrichment.
+    Cache strategy (fixes the previous null-domain cache-miss bug):
+      1. If domain is known → check CompanyProfile by domain (30-day TTL)
+      2. If only name is known → check CompanyProfile by normalised name field
+      3. Cache miss → call LLM web search, which also discovers the domain
+      4. Persist by resolved domain; register name alias for caller lookup
 
-    Returns a {key: CompanyProfile} dict where `key` is the resolved
-    canonical domain (or the input name when no domain could be resolved).
-    Caller maps lead.company → key via the same name to find its profile.
+    Returns {key: CompanyProfile} where key is domain OR original name.
     """
-    # ── Normalize input shape to a list of {domain, name}
     norm_companies: List[Dict[str, Optional[str]]] = []
     for entry in companies:
         if isinstance(entry, str):
@@ -142,8 +170,6 @@ def bulk_enrich_top_companies(
     if not norm_companies:
         return {}
 
-    # Dedupe — companies with the same domain (or, lacking that, the same name)
-    # collapse into one entry.
     seen: set[str] = set()
     deduped: List[Dict[str, Optional[str]]] = []
     for c in norm_companies:
@@ -155,21 +181,16 @@ def bulk_enrich_top_companies(
 
     logger.info("[ENRICH] starting bulk enrich for %d unique companies", len(deduped))
 
-    # ── Phase 1: Apollo enrich. Resolves company name → canonical domain,
-    # then enriches by domain. Companies we can't resolve are tracked in
-    # `name_alias` so the caller can still look up the (mostly-empty) profile
-    # by the original name string, but they don't enter the downstream
-    # domain-keyed pipeline (jobs / scrape / facts).
-    profiles: Dict[str, CompanyProfile] = {}        # keyed by canonical domain
-    name_alias: Dict[str, CompanyProfile] = {}      # original name → profile
-    apollo_ok = 0
-    apollo_attempted = 0
+    profiles: Dict[str, CompanyProfile] = {}   # keyed by canonical domain
+    name_alias: Dict[str, CompanyProfile] = {} # original name → profile
+    to_research: Dict[str, Optional[str]] = {} # name → domain for LLM calls
 
+    # ── Phase 1: cache check (domain-first, then name-based fallback) ────────
     for c in deduped:
         domain = c["domain"]
         name = c["name"]
 
-        # Cache hit on a known domain → reuse, skip Apollo call.
+        # Try domain-based cache hit first
         if domain:
             existing = db.query(CompanyProfile).filter_by(domain=domain).first()
             if existing and not _apollo_stale(existing):
@@ -178,96 +199,85 @@ def bulk_enrich_top_companies(
                     name_alias[name] = existing
                 continue
 
-        apollo_attempted += 1
-        payload = enrich_organization(domain=domain, name=name)
-        resolved_domain: Optional[str] = None
-        if payload:
-            resolved_domain = payload.get("discovered_domain") or domain
-            apollo_ok += 1
-
-        if not resolved_domain:
-            # Nothing we can do — log and skip. The lead will still appear
-            # in results (it just won't get enriched bullets).
-            continue
-
-        p = get_or_create_profile(db, resolved_domain)
-        if payload:
-            _apply_apollo_payload(p, payload)
-        else:
-            p.last_apollo_enriched_at = datetime.utcnow()
-        profiles[resolved_domain] = p
+        # Try name-based cache hit (fixes the null-domain miss bug)
         if name:
-            name_alias[name] = p
+            existing = (
+                db.query(CompanyProfile)
+                .filter(CompanyProfile.name.ilike(name))
+                .first()
+            )
+            if existing and not _apollo_stale(existing):
+                key = existing.domain or name.lower()
+                profiles[key] = existing
+                name_alias[name] = existing
+                continue
+
+        # Cache miss — queue for LLM research
+        to_research[name or domain] = domain
 
     logger.info(
-        "[ENRICH] apollo: %d/%d enriched, %d companies entered domain pipeline",
-        apollo_ok, apollo_attempted, len(profiles),
+        "[ENRICH] cache: %d hits, %d need LLM research",
+        len(profiles), len(to_research),
     )
 
-    # Domain-keyed canonical list for downstream stages.
+    # ── Phase 2: LLM web search for cache misses (parallel) ─────────────────
+    if to_research:
+        research_results = research_companies_bulk(to_research)
+        llm_ok = 0
+        for input_key, facts in research_results.items():
+            if not facts:
+                continue
+            llm_ok += 1
+            resolved_domain = facts.get("discovered_domain") or input_key.lower()
+            p = get_or_create_profile(db, resolved_domain)
+            _apply_llm_research(p, facts)
+            profiles[resolved_domain] = p
+            # Register name alias so callers can find by original company name
+            name = facts.get("name") or input_key
+            if name and name.lower() != resolved_domain:
+                name_alias[name] = p
+        logger.info("[ENRICH] llm_research: %d/%d succeeded", llm_ok, len(to_research))
+
     unique_domains = sorted(profiles.keys())
 
-    # ── Apollo job postings (per company that has an apollo_org_id).
-    # Run sequentially since they're already cheap (single HTTP call) and
-    # share the 0.2s throttle inside fetch_job_postings.
-    jobs_to_run = [d for d in unique_domains if profiles[d].apollo_org_id and (
-        profiles[d].recent_job_postings is None or _apollo_stale(profiles[d])
-    )]
+    # ── Phase 3: Apollo job postings (still useful if apollo_org_id exists)
+    jobs_to_run = [
+        d for d in unique_domains
+        if profiles[d].apollo_org_id and (
+            profiles[d].recent_job_postings is None or _apollo_stale(profiles[d])
+        )
+    ]
     if jobs_to_run:
         logger.info("[ENRICH] jobs: %d companies need posting refresh", len(jobs_to_run))
         jobs_ok = 0
         for d in jobs_to_run:
             postings = fetch_job_postings(profiles[d].apollo_org_id)
-            # Always store (even empty list) so we don't keep retrying companies
-            # that genuinely have no public listings.
             profiles[d].recent_job_postings = postings
             if postings:
                 jobs_ok += 1
         logger.info("[ENRICH] jobs: %d/%d had postings", jobs_ok, len(jobs_to_run))
 
-    # ── Website scrape (async, parallel)
+    # ── Phase 4: Website scrape (async, parallel) ────────────────────────────
     if enable_scrape:
         scrape_to_run = [d for d in unique_domains if _scrape_stale(profiles[d])]
         logger.info("[ENRICH] scrape: %d need refresh out of %d", len(scrape_to_run), len(unique_domains))
         if scrape_to_run:
             try:
-                results = asyncio.run(scrape_many(scrape_to_run, concurrency=10))
+                scrape_results = asyncio.run(scrape_many(scrape_to_run, concurrency=10))
             except RuntimeError:
-                # asyncio.run inside an existing loop — should not happen since
-                # the caller invokes this via asyncio.to_thread, but guard anyway.
                 loop = asyncio.new_event_loop()
                 try:
-                    results = loop.run_until_complete(scrape_many(scrape_to_run, concurrency=10))
+                    scrape_results = loop.run_until_complete(scrape_many(scrape_to_run, concurrency=10))
                 finally:
                     loop.close()
             scrape_ok = 0
-            for d, payload in results.items():
+            for d, payload in scrape_results.items():
                 _apply_scrape_payload(profiles[d], payload)
                 if payload is not None:
                     scrape_ok += 1
             logger.info("[ENRICH] scrape: %d/%d succeeded", scrape_ok, len(scrape_to_run))
 
-    # ── Per-company fact extraction (LLM). Runs LAST so it can reason over
-    # the freshly-populated Apollo + scrape + jobs data. We refresh whenever
-    # extracted_facts is missing OR when Apollo data was just refreshed.
-    facts_to_run = [
-        d for d in unique_domains
-        if profiles[d].extracted_facts is None or _apollo_stale(profiles[d])
-    ]
-    if facts_to_run:
-        logger.info("[ENRICH] facts: extracting for %d companies", len(facts_to_run))
-        extractor_input = {
-            d: profile_to_extractor_dict(profiles[d]) for d in facts_to_run
-        }
-        facts_by_domain = extract_company_facts(extractor_input)
-        for d, facts in facts_by_domain.items():
-            if facts:
-                profiles[d].extracted_facts = facts
-
     db.commit()
-    # Merge name aliases into the returned dict so callers can look up by
-    # either domain OR original company name. This is what the earlier
-    # backfill code in routes_discovery.py expects.
     out: Dict[str, CompanyProfile] = dict(profiles)
     for nm, p in name_alias.items():
         if nm not in out:

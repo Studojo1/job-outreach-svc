@@ -7,11 +7,10 @@ APOLLO_API_KEY as the people search; org enrichment is free under the current pl
 
 import re
 import time
-import requests
 from typing import Dict, Any, List, Optional
 
-from core.config import settings
 from core.logger import get_logger
+from services.shared.apollo_key_manager import apollo_get, apollo_keys
 
 logger = get_logger(__name__)
 
@@ -39,15 +38,10 @@ def enrich_organization(
     """
     if not domain and not name:
         return None
-    if not settings.APOLLO_API_KEY or settings.APOLLO_API_KEY == "your_apollo_key_here":
-        logger.warning("[APOLLO_ENRICH] APOLLO_API_KEY missing, skipping enrich")
+    if not apollo_keys.has_valid_key():
+        logger.warning("[APOLLO_ENRICH] No valid Apollo API key, skipping enrich")
         return None
 
-    headers = {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": settings.APOLLO_API_KEY,
-    }
     label = domain or name
 
     # Build the list of candidate domains to try, in priority order.
@@ -67,8 +61,8 @@ def enrich_organization(
         time.sleep(0.2)
         try:
             url = f"{APOLLO_BASE_URL}/organizations/enrich"
-            resp = requests.get(url, params={"domain": candidate}, headers=headers, timeout=ENRICH_TIMEOUT_SEC)
-        except requests.RequestException as e:
+            resp = apollo_get(url, params={"domain": candidate}, timeout=ENRICH_TIMEOUT_SEC)
+        except Exception as e:
             logger.warning("[APOLLO_ENRICH] network error for %s (try %s): %s", label, candidate, e)
             continue
         if not resp.ok:
