@@ -18,7 +18,7 @@ from database.models import (
 from database.session import get_db
 from services.linkedin_outreach.automation_service import search_linkedin_leads
 from services.linkedin_outreach.crypto import decrypt, encrypt_pair
-from services.linkedin_outreach.login import linkedin_login_start, linkedin_verify_pin
+from services.linkedin_outreach.login import linkedin_check_phone_tap, linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,10 @@ class LinkedInLoginRequest(BaseModel):
 class LinkedInVerifyPinRequest(BaseModel):
     session_key: str
     pin: str
+
+
+class LinkedInCheckPhoneTapRequest(BaseModel):
+    session_key: str
 
 
 def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: str | None):
@@ -74,19 +78,20 @@ async def login_with_credentials(
         raise HTTPException(status_code=400, detail="email and password are required")
 
     try:
-        li_at, jsessionid, result = linkedin_login_start(body.email, body.password)
+        from core.config import settings as _s
+        proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
+        li_at, jsessionid, display_name, session_key = await linkedin_login_start(
+            body.email, body.password, proxy_url=proxy_url
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
     if li_at is None:
-        # result is the session_key — challenge required
-        entry = __import__('services.linkedin_outreach.login', fromlist=['_pending'])._pending.get(result, {})
-        challenge_type = entry.get("challenge_type", "pin")
-        return {"ok": False, "challenge_required": True, "session_key": result, "challenge_type": challenge_type}
+        from services.linkedin_outreach.login import _pending
+        challenge_type = _pending.get(session_key, {}).get("challenge_type", "pin")
+        return {"ok": False, "challenge_required": True, "session_key": session_key, "challenge_type": challenge_type}
 
-    display_name = _store_token(db, current_user.id, li_at, jsessionid, result)
+    _store_token(db, current_user.id, li_at, jsessionid, display_name)
     return {"ok": True, "linkedin_name": display_name}
 
 
@@ -101,10 +106,30 @@ async def verify_pin(
         raise HTTPException(status_code=400, detail="session_key and pin are required")
 
     try:
-        li_at, jsessionid, display_name = linkedin_verify_pin(body.session_key, body.pin)
+        li_at, jsessionid, display_name = await linkedin_verify_pin(body.session_key, body.pin)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    _store_token(db, current_user.id, li_at, jsessionid, display_name)
+    return {"ok": True, "linkedin_name": display_name}
+
+
+@router.post("/login/check-phone-tap")
+async def check_phone_tap(
+    body: LinkedInCheckPhoneTapRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll whether the user approved the phone notification. Returns ok=True when approved."""
+    if not body.session_key:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    try:
+        result = await linkedin_check_phone_tap(body.session_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result is None:
+        return {"ok": False, "still_waiting": True}
+    li_at, jsessionid, display_name = result
     _store_token(db, current_user.id, li_at, jsessionid, display_name)
     return {"ok": True, "linkedin_name": display_name}
 

@@ -18,7 +18,7 @@ from services.shared.ai.azure_openai_client import generate_json
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 4
-PARALLEL_BATCHES = 10
+PARALLEL_BATCHES = 20
 TEMPERATURE = 0.4
 
 # Phrases the LLM is forbidden from using — these are the markers of
@@ -80,6 +80,7 @@ Rules:
    "amazing", "exciting", "company focus on AI aligns with your AI expertise"
    (or any generic "X aligns with your Y" without naming X and Y specifically),
    "shared Python expertise" (without naming what for).
+   Also NEVER use em dashes (—) anywhere. Use a plain hyphen (-) or restructure the sentence.
 
 6. DEGRADE GRACEFULLY. If structured facts are missing AND raw text is thin,
    anchor on title, seniority, location overlap. Mark signal_strength: "low".
@@ -262,8 +263,14 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
         if _has_banned_phrase(item):
             logger.info("[JUSTIFY] dropped lead %s — banned phrase in output", lid)
             continue
-        out[lead["id"]] = item
+        out[lead["id"]] = _strip_em_dashes(item)
     return out
+
+
+def _strip_em_dashes(item: dict) -> dict:
+    item["headline"] = item["headline"].replace("—", "-")
+    item["bullets"] = [b.replace("—", "-") for b in item["bullets"]]
+    return item
 
 
 def _has_banned_phrase(item: dict) -> bool:

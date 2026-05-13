@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
-  basePath: '/outreach',
+  basePath: '/lkot',
 }
 
 module.exports = nextConfig

@@ -243,49 +243,31 @@ async def _find_connect_button(page):
         # Find Connect link by vanityName from the current URL.
         # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
         # Scoping by vanityName avoids PYMK "Connect" links on the same page.
-        # Use JS .click() — getBoundingClientRect() returns (0,0) for dropdown items
-        # in headless mode (dropdown renders off-screen), so mouse coordinates fail.
+        # Use Playwright locator.click(force=True) — CDP-level click generates isTrusted=true
+        # events which LinkedIn requires to open the invite modal.
         vanity = page.url.rstrip('/').split('/')[-1]
-        connect_clicked = await page.evaluate(f"""
+
+        # Get the full href of the Connect link so we can navigate to it directly.
+        # Clicking the <a> (JS or CDP) opens a dropdown but LinkedIn's SPA click
+        # handler doesn't reliably open the modal in headless contexts. Direct
+        # page.goto(href) forces the SPA router to handle the invite route.
+        connect_href = await page.evaluate(f"""
             () => {{
-                const vanity = '{vanity}';
-                const link = document.querySelector('a[href*="custom-invite"][href*="' + vanity + '"]');
-                if (!link) return false;
-                link.click();
-                return true;
+                const link = document.querySelector('a[href*="custom-invite"][href*="{vanity}"]');
+                return link ? link.href : null;
             }}
         """)
-        logger.info("Playwright: Connect JS click for %s: %s", vanity, connect_clicked)
+        logger.info("Playwright: Connect href for %s: %s", vanity, connect_href)
 
-        if connect_clicked:
-            await page.wait_for_timeout(3000)
-
-            # Use Playwright's bounding_box() (CDP-based) — works even when body has
-            # overflow:hidden set by the modal, which breaks offsetParent and
-            # getBoundingClientRect() for elements inside the React portal.
-            send_locator = page.locator(
-                'button:has-text("Send without"), '
-                'button:has-text("Send now"), '
-                'button:has-text("Send invite")'
-            ).first
-            try:
-                bbox = await send_locator.bounding_box(timeout=6000)
-                logger.info("Playwright: Send button bbox: %s", bbox)
-                if bbox:
-                    sx = bbox['x'] + bbox['width'] / 2
-                    sy = bbox['y'] + bbox['height'] / 2
-                    await page.mouse.move(sx, sy)
-                    await page.wait_for_timeout(150)
-                    await page.mouse.click(sx, sy)
-                    await page.wait_for_timeout(1000)
-                    logger.info("Playwright: Send without a note clicked — invite sent")
-                    return "DROPDOWN_CONNECT_CLICKED"
-                else:
-                    logger.info("Playwright: Send button bbox None — modal may not have opened")
-                    return "DROPDOWN_CONNECT_CLICKED"
-            except Exception as e:
-                logger.info("Playwright: Send button error: %s", e)
-                return "DROPDOWN_CONNECT_CLICKED"
+        if connect_href:
+            # Navigate directly to the invite URL — the SPA router opens the modal.
+            # Do NOT click Send here; let the outer playwright_send_invitation handle it
+            # so ok=True is only set after confirmed Send click + API interception.
+            logger.info("Playwright: navigating to Connect href directly")
+            await page.goto(connect_href, wait_until="domcontentloaded", timeout=20000)
+            logger.info("Playwright: after goto Connect href, url=%s", page.url)
+            await page.wait_for_timeout(1500)
+            return "DROPDOWN_CONNECT_CLICKED"
 
         logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
         await page.keyboard.press("Escape")
@@ -343,6 +325,10 @@ async def playwright_send_invitation(
                     "--disable-infobars",
                     "--window-size=1280,800",
                 ],
+                # Remove --enable-automation so navigator.webdriver stays undefined.
+                # Without this, LinkedIn detects the headless browser and blocks
+                # the Connect invite modal from opening.
+                ignore_default_args=["--enable-automation"],
             )
             context = await browser.new_context(
                 user_agent=(
@@ -412,6 +398,16 @@ async def playwright_send_invitation(
             page.on("response", capture_response)
 
             try:
+                # Visit /feed first so LinkedIn's JS bootstraps the session (populates
+                # localStorage / Redux store). Without this, cookie-injected contexts
+                # silently skip modal rendering on the profile page.
+                logger.info("Playwright: bootstrapping session via /feed")
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                feed_url = page.url
+                if "/login" in feed_url or "/uas/login" in feed_url:
+                    raise LinkedInAuthError("Session expired — browser redirected to login on /feed")
+                await page.wait_for_timeout(2000)
+
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
                             slug, bool(proxy), "fresh" if fresh_jsessionid else "stored")
                 await page.goto(
@@ -473,14 +469,17 @@ async def playwright_send_invitation(
                     logger.info("Playwright: %s — Connect menuitem clicked, waiting for modal", slug)
 
                 # Wait up to 20s for the Send button — covers both in-page modal (fast)
-                # and navigation-then-modal cases (slower).
+                # and navigation-then-modal cases (slower). After the button appears,
+                # wait another 2s for LinkedIn to enable it (custom-invite page loads
+                # invite context async and the button starts disabled).
                 try:
                     await page.wait_for_selector(
                         'button[aria-label="Send without a note"], button:has-text("Send without a note"), '
                         'button[aria-label="Add a note"], button[aria-label="Send now"]',
                         timeout=20000,
                     )
-                    logger.info("Playwright: %s — invite modal is open", slug)
+                    logger.info("Playwright: %s — invite modal is open, waiting for button to enable", slug)
+                    await page.wait_for_timeout(2500)
                 except Exception:
                     logger.info("Playwright: %s — modal not detected after 20s (url=%s)", slug, page.url)
 
@@ -548,7 +547,7 @@ async def playwright_send_invitation(
                             btn = page.locator(sel).first
                             if await btn.is_visible(timeout=1500):
                                 logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
-                                await btn.click(timeout=5000)
+                                await btn.click(timeout=10000)
                                 send_clicked = True
                                 break
                         except Exception as send_err:

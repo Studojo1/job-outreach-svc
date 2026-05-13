@@ -508,24 +508,123 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search for leads. Tries Apollo.io first (no session needed), falls back to LinkedIn Voyager."""
-    # Apollo path — preferred, no JSESSIONID required
-    people = await search_linkedin_leads_apollo(target_role, locations, industries, keywords, limit)
-    if people:
-        return people
-
-    logger.warning("Apollo returned 0 leads; falling back to LinkedIn Voyager")
+    """Search for leads using Playwright browser (LinkedIn People search page)."""
+    from core.config import settings
+    proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
     try:
-        from core.config import settings
-        proxy_url = settings.LINKEDIN_PROXY_URL.strip() if settings.LINKEDIN_PROXY_URL else ""
-        people = await asyncio.to_thread(
-            _search_linkedin_leads_sync,
-            li_at, jsessionid, target_role, locations, industries, keywords, limit, proxy_url,
+        people = await _search_linkedin_leads_playwright(
+            li_at=li_at,
+            jsessionid=jsessionid,
+            target_role=target_role,
+            locations=locations,
+            industries=industries,
+            keywords=keywords,
+            limit=limit,
+            proxy_url=proxy_url,
         )
-        return people
+        if people:
+            return people
     except Exception as e:
-        logger.error("Voyager search failed: %s", e)
-        return []
+        logger.error("Playwright lead search failed: %s", e)
+    return []
+
+
+async def _search_linkedin_leads_playwright(
+    li_at: str,
+    jsessionid: str,
+    target_role: str,
+    locations: list[str],
+    industries: list[str],
+    keywords: Optional[str] = None,
+    limit: int = 30,
+    proxy_url: str | None = None,
+) -> list[dict]:
+    """Browse LinkedIn People search results via headless Chromium to collect profile URLs."""
+    from playwright.async_api import async_playwright
+    from services.linkedin_outreach.playwright_service import _parse_proxy, _get_fresh_jsessionid
+    from urllib.parse import quote
+
+    proxy = _parse_proxy(proxy_url) if proxy_url else None
+    fresh = await _get_fresh_jsessionid(li_at, proxy_url)
+    if fresh:
+        jsessionid = fresh
+
+    keyword_str = " ".join(filter(None, [target_role] + (locations[:1] if locations else []) + ([keywords] if keywords else [])))
+    search_url = f"https://www.linkedin.com/search/results/people/?keywords={quote(keyword_str)}&origin=GLOBAL_SEARCH_HEADER"
+
+    profile_urls: list[str] = []
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            proxy=proxy,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled", "--window-size=1280,900"],
+            ignore_default_args=["--enable-automation"],
+        )
+        ctx = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 900},
+            locale="en-US",
+        )
+        await ctx.add_cookies([
+            {"name": "li_at",      "value": li_at,             "domain": ".linkedin.com", "path": "/"},
+            {"name": "JSESSIONID", "value": f'"{jsessionid}"', "domain": ".linkedin.com", "path": "/"},
+        ])
+        page = await ctx.new_page()
+
+        # Bootstrap session
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)
+        if "/login" in page.url:
+            logger.warning("Playwright lead search: session expired")
+            await browser.close()
+            return []
+
+        await page.goto(search_url, wait_until="networkidle", timeout=40000)
+        await page.wait_for_timeout(3000)
+
+        for scroll in range(6):
+            links = await page.evaluate("""
+                () => {
+                    const seen = new Set();
+                    return [...document.querySelectorAll('a[href*="/in/"]')]
+                        .map(a => {
+                            const m = a.href.match(/linkedin\\.com(\\/in\\/[^\\/?#]+)/);
+                            return m ? 'https://www.linkedin.com' + m[1] + '/' : null;
+                        })
+                        .filter(u => {
+                            if (!u || seen.has(u)) return false;
+                            seen.add(u);
+                            return true;
+                        });
+                }
+            """)
+            for u in links:
+                if u not in profile_urls:
+                    profile_urls.append(u)
+            logger.info("Lead search scroll %d: %d profiles", scroll + 1, len(profile_urls))
+            if len(profile_urls) >= limit * 2:
+                break
+            await page.evaluate("window.scrollBy(0, 1200)")
+            await page.wait_for_timeout(2000)
+
+        await browser.close()
+
+    logger.info("Playwright lead search found %d profiles for %r", len(profile_urls), target_role)
+
+    # Build minimal person dicts — name/headline scraped at send time
+    people = []
+    for url in profile_urls[:limit]:
+        slug = url.rstrip("/").split("/")[-1]
+        people.append({
+            "profile_url": url,
+            "name": slug.replace("-", " ").title(),
+            "headline": None,
+            "company": None,
+            "profile_image_url": None,
+        })
+    return people
 
 
 def _parse_search_results(data: dict) -> list[dict]:

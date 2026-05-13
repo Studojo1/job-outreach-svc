@@ -19,7 +19,7 @@ spec:
     - host: studojo.com
       http:
         paths:
-          - path: /outreach(/|$)(.*)
+          - path: /lkot(/|$)(.*)
             pathType: ImplementationSpecific
             backend:
               service:
