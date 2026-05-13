@@ -147,12 +147,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
 
-    # ── Phase 2: Company intelligence on top-200 only ────────────────────────
-    # Running on all 500 leads produces ~400 unique companies → 30 LLM batches
-    # and causes DB connection timeouts. Top-200 covers the visible results with
-    # ~120 unique companies → ~8 batches, completes in ~20s.
-    COMPANY_INTEL_TOP_K = 200
-    top_for_intel = sorted(scored, key=lambda ld: ld.get("score", 0), reverse=True)[:COMPANY_INTEL_TOP_K]
+    # ── Phase 2: Company intelligence on all 500 leads ───────────────────────
+    # Safe to run on full set now that Phase 1 committed scores independently.
+    # ~400 unique companies → ~27 gpt-4o batches of 15 → ~60s. Uses only Apollo
+    # metadata (industry, size, description) — no web search.
+    top_for_intel = scored
 
     from services.lead_scoring.company_intelligence_service import evaluate_company_fit
     candidate_prefs_for_intel = {
