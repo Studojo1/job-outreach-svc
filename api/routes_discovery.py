@@ -181,6 +181,10 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         logger.info("[SCORE_BG] Phase 2 score adjustments committed")
     except Exception as ci_err:
         logger.warning("[SCORE_BG] Company intelligence failed (%s) — keeping heuristic scores", ci_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
@@ -281,8 +285,19 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                         len(justifications), len(top_leads))
         except Exception as e:
             logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as commit_err:
+        logger.warning("[SCORE_BG] Final commit failed (%s) — scores may be partial", commit_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return count
 
 
