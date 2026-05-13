@@ -416,6 +416,16 @@ async def playwright_send_invitation(
             page.on("response", capture_response)
 
             try:
+                # Visit /feed first so LinkedIn's JS bootstraps the session (populates
+                # localStorage / Redux store). Without this, cookie-injected contexts
+                # silently skip modal rendering on the profile page.
+                logger.info("Playwright: bootstrapping session via /feed")
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                feed_url = page.url
+                if "/login" in feed_url or "/uas/login" in feed_url:
+                    raise LinkedInAuthError("Session expired — browser redirected to login on /feed")
+                await page.wait_for_timeout(2000)
+
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
                             slug, bool(proxy), "fresh" if fresh_jsessionid else "stored")
                 await page.goto(
