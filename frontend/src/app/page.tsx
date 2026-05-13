@@ -1,241 +1,1022 @@
 'use client';
 
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
+import { useAuth } from '@/lib/hooks/useAuth';
+import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
-import { Upload, Search, Mail, ArrowRight, ClipboardList } from 'lucide-react';
+import { ProgressSteps } from '@/components/ui/ProgressSteps';
+import { Button } from '@/components/ui/Button';
+import { Spinner } from '@/components/ui/Spinner';
+import {
+  ChevronRight, ChevronLeft, Eye, EyeOff, ShieldCheck,
+  AlertCircle, ExternalLink, CheckCircle, Users, MessageSquare,
+  Send, Pause, Play, ThumbsUp, ThumbsDown, Minus, Linkedin, Search,
+} from 'lucide-react';
+import api from '@/lib/api';
+import type { LinkedInCampaign, CampaignStats, ConnectionRequest } from '@/lib/types/linkedin';
 
-const STUDOJO_BASE = process.env.NEXT_PUBLIC_PLATFORM_URL || '';
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-const DOJO_LINKS = [
-  { href: `${STUDOJO_BASE}/dojos/assignment`, label: 'Assignment Dojo', desc: 'Master your assignments', color: 'bg-violet-500', internal: false },
-  { href: '/onboarding/upload', label: 'Opportunity Apply', desc: 'Reach hiring managers directly', color: 'bg-emerald-500', internal: true },
-];
+type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
-const SOCIAL_LINKS = [
-  { href: 'https://www.linkedin.com/company/studojo/', label: 'LinkedIn' },
-  { href: 'https://instagram.com/studojo', label: 'Instagram' },
-  { href: 'https://chat.whatsapp.com/CUV8DSjQWqB82yXKRE66ol?mode=gi_t', label: 'WhatsApp' },
-];
-
-function SocialIcon({ label }: { label: string }) {
-  switch (label) {
-    case 'LinkedIn':
-      return (
-        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
-        </svg>
-      );
-    case 'Instagram':
-      return (
-        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/>
-        </svg>
-      );
-    case 'WhatsApp':
-      return (
-        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-        </svg>
-      );
-    default:
-      return <span className="text-sm font-bold">{label[0]}</span>;
-  }
+interface QuizData {
+  target_role: string;
+  target_industries: string[];
+  target_locations: string[];
+  target_company_sizes: string[];
+  target_keywords: string;
+  campaign_name: string;
 }
 
-export default function LandingPage() {
-  const router = useRouter();
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-  const features = [
-    { icon: <Upload className="w-6 h-6" />, title: 'Upload Your Resume', desc: 'Our AI analyzes your background and career goals in under a minute.' },
-    { icon: <Search className="w-6 h-6" />, title: 'Discover Decision Makers', desc: 'We find hiring managers at companies that match your profile.' },
-    { icon: <Mail className="w-6 h-6" />, title: 'Launch Outreach', desc: 'Send personalized emails at scale with intelligent scheduling.' },
-  ];
+const STEPS = ['Target', 'Industries', 'Location', 'Connect', 'Messages', 'Live'];
+
+const INDUSTRIES = [
+  'SaaS / Software', 'Fintech', 'E-commerce', 'Health Tech',
+  'Ed Tech', 'Climate Tech', 'Media / Content', 'Consulting',
+  'D2C / Consumer', 'AI / ML',
+];
+
+const LOCATIONS = [
+  'India', 'United States', 'United Kingdom',
+  'UAE / Dubai', 'Singapore', 'Europe', 'Southeast Asia', 'Global',
+];
+
+const COMPANY_SIZES = [
+  '1–10 (pre-seed/seed)',
+  '11–50 (early stage)',
+  '51–200 (Series A/B)',
+  '201–1000 (growth)',
+  '1000+ (enterprise)',
+];
+
+const ROLE_SUGGESTIONS = [
+  'Founder / Co-founder', 'Head of Marketing', 'VP Sales',
+  'Product Manager', 'CTO', 'HR Manager', 'Chief of Staff',
+];
+
+const NOTE_PLACEHOLDER = `Hi {{name}}, came across your work at {{company}} — really interesting what you're building. Would love to connect!`;
+const FOLLOWUP_PLACEHOLDER = `Hey {{name}}, thanks for connecting! I'm a student really interested in {{role}} and what you're doing at {{company}}. Would love to chat for 15 min if you have time.`;
+
+const STATUS_LABELS: Record<string, { label: string; color: string }> = {
+  pending:       { label: 'Queued',        color: 'bg-gray-100 text-gray-500' },
+  sent:          { label: 'Sent',           color: 'bg-blue-100 text-blue-700' },
+  accepted:      { label: 'Accepted',       color: 'bg-green-100 text-green-700' },
+  followup_sent: { label: 'Follow-up sent', color: 'bg-violet-100 text-violet-700' },
+  replied:       { label: 'Replied',        color: 'bg-emerald-100 text-emerald-700' },
+  error:         { label: 'Error',          color: 'bg-red-100 text-red-600' },
+};
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
+
+function Chip({
+  label, selected, onClick,
+}: { label: string; selected: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-2 rounded-full text-sm border transition-all ${
+        selected
+          ? 'bg-primary text-white border-primary font-medium'
+          : 'border-border text-foreground hover:border-primary/50 bg-white'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function StepNav({
+  onBack, onNext, nextLabel = 'Continue', disabled = false, hideBack = false,
+}: {
+  onBack?: () => void;
+  onNext: () => void;
+  nextLabel?: string;
+  disabled?: boolean;
+  hideBack?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between mt-8">
+      {!hideBack && onBack ? (
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" /> Back
+        </button>
+      ) : <div />}
+      <Button onClick={onNext} disabled={disabled}>
+        {nextLabel} <ChevronRight className="w-4 h-4 ml-1" />
+      </Button>
+    </div>
+  );
+}
+
+function MetricTile({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
+  return (
+    <div className="bg-white border border-border rounded-xl p-4 text-center">
+      <p className="text-2xl font-bold text-foreground">{value}</p>
+      <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
+      {sub && <p className="text-xs text-primary font-medium mt-1">{sub}</p>}
+    </div>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
+
+export default function LinkedInOnboardingPage() {
+  const router = useRouter();
+  useAuth();
+
+  const STORAGE_KEY = 'li_wizard_v1';
+
+  const [step, setStep] = useState<Step>(1);
+  const [restored, setRestored] = useState(false);
+
+  const saveWizard = (s: Step, q: QuizData, cid: number | null) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ step: s, quiz: q, campaignId: cid }));
+    } catch {}
+  };
+
+  const clearWizard = () => {
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+  };
+
+  // Quiz state
+  const [quiz, setQuiz] = useState<QuizData>({
+    target_role: '',
+    target_industries: [],
+    target_locations: [],
+    target_company_sizes: [],
+    target_keywords: '',
+    campaign_name: '',
+  });
+
+  // LinkedIn connect state
+  const [liEmail, setLiEmail] = useState('');
+  const [liPassword, setLiPassword] = useState('');
+  const [showPass, setShowPass] = useState(false);
+  const [connectLoading, setConnectLoading] = useState(false);
+  const [connectError, setConnectError] = useState('');
+  const [challengeRequired, setChallengeRequired] = useState(false);
+  const [sessionKey, setSessionKey] = useState('');
+  const [pin, setPin] = useState('');
+  const [pinLoading, setPinLoading] = useState(false);
+  const [loginTab, setLoginTab] = useState<'password' | 'cookies'>('password');
+  const [liAtCookie, setLiAtCookie] = useState('');
+  const [jsessionidCookie, setJsessionidCookie] = useState('');
+  const [cookieLoading, setCookieLoading] = useState(false);
+  const [extInstalled, setExtInstalled] = useState(false);
+  const [extLoading, setExtLoading] = useState(false);
+
+  // Messages state
+  const [connectionNote, setConnectionNote] = useState('');
+  const [followupMessage, setFollowupMessage] = useState('');
+  const [dailyLimit, setDailyLimit] = useState(20);
+
+  // Campaign + leads state
+  const [campaignId, setCampaignId] = useState<number | null>(null);
+  const [leads, setLeads] = useState<ConnectionRequest[]>([]);
+  const [searchingLeads, setSearchingLeads] = useState(false);
+  const [leadsError, setLeadsError] = useState('');
+  const [launching, setLaunching] = useState(false);
+  const [launchError, setLaunchError] = useState('');
+
+  // Dashboard state
+  const [campaign, setCampaign] = useState<LinkedInCampaign | null>(null);
+  const [stats, setStats] = useState<CampaignStats | null>(null);
+  const [requests, setRequests] = useState<ConnectionRequest[]>([]);
+  const [toggling, setToggling] = useState(false);
+  const [activeTab, setActiveTab] = useState<'all' | 'sent' | 'accepted' | 'replied'>('all');
+
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Toggle helpers
+  const toggleMulti = (field: 'target_industries' | 'target_locations' | 'target_company_sizes', val: string) => {
+    setQuiz(q => {
+      const arr = q[field];
+      return { ...q, [field]: arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val] };
+    });
+  };
+
+  // Step validity
+  const canNext = (): boolean => {
+    if (step === 1) return quiz.target_role.trim().length > 1;
+    if (step === 2) return quiz.target_industries.length > 0;
+    if (step === 3) return quiz.target_locations.length > 0 && quiz.target_company_sizes.length > 0 && quiz.campaign_name.trim().length > 1;
+    if (step === 4) return liEmail.length > 0 && liPassword.length > 0;
+    return true;
+  };
+
+  const next = () => setStep(s => { const n = (s + 1) as Step; saveWizard(n, quiz, campaignId); return n; });
+  const back = () => setStep(s => { const n = (s - 1) as Step; saveWizard(n, quiz, campaignId); return n; });
+
+  // Step 4 → connect + search leads
+  const startLeadSearch = async (id: number) => {
+    setSearchingLeads(true);
+    setLeadsError('');
+    setLeads([]);
+    await api.post(`/linkedin/automation/campaigns/${id}/search-leads`);
+    let attempts = 0;
+    const poll = async () => {
+      try {
+        const [rRes, cRes] = await Promise.all([
+          api.get(`/linkedin/automation/campaigns/${id}/requests?limit=50`),
+          api.get(`/linkedin/automation/campaigns/${id}`),
+        ]);
+        if (rRes.data.length > 0) { setLeads(rRes.data); setSearchingLeads(false); return; }
+        if (cRes.data.status === 'search_failed') {
+          setSearchingLeads(false);
+          setLeadsError('search_failed');
+          return;
+        }
+      } catch {}
+      attempts++;
+      if (attempts < 20) pollRef.current = setTimeout(poll, 3000);
+      else { setSearchingLeads(false); setLeadsError('No leads found. Try broadening your search criteria.'); }
+    };
+    poll();
+  };
+
+  const proceedAfterLogin = async () => {
+    // If we already have a campaign (reconnect from dashboard), just resume it
+    if (campaignId && campaign?.status === 'auth_failed') {
+      await api.post(`/linkedin/automation/campaigns/${campaignId}/resume`);
+      await fetchDashboard(campaignId);
+      setStep(6);
+      saveWizard(6, quiz, campaignId);
+      pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
+      return;
+    }
+
+    const res = await api.post('/linkedin/automation/campaigns', {
+      name: quiz.campaign_name || `${quiz.target_role} outreach`,
+      target_role: quiz.target_role,
+      target_industries: quiz.target_industries,
+      target_locations: quiz.target_locations,
+      target_company_sizes: quiz.target_company_sizes,
+      target_keywords: quiz.target_keywords || null,
+      daily_limit: dailyLimit,
+    });
+    const id = res.data.id;
+    setCampaignId(id);
+    setStep(5);
+    saveWizard(5, quiz, id);
+    await startLeadSearch(id);
+  };
+
+  const handleConnect = async () => {
+    setConnectLoading(true);
+    setConnectError('');
+    try {
+      const res = await api.post('/linkedin/automation/login', { email: liEmail, password: liPassword });
+      if (res.data.challenge_required) {
+        setSessionKey(res.data.session_key);
+        setChallengeRequired(true);
+        return;
+      }
+      await proceedAfterLogin();
+    } catch (err: any) {
+      setConnectError(err.response?.data?.detail || 'Connection failed. Check your credentials.');
+    } finally {
+      setConnectLoading(false);
+    }
+  };
+
+  const handleVerifyPin = async () => {
+    setPinLoading(true);
+    setConnectError('');
+    try {
+      await api.post('/linkedin/automation/login/verify-pin', { session_key: sessionKey, pin });
+      setChallengeRequired(false);
+      await proceedAfterLogin();
+    } catch (err: any) {
+      setConnectError(err.response?.data?.detail || 'Incorrect code. Please try again.');
+    } finally {
+      setPinLoading(false);
+    }
+  };
+
+  const handleCookieLogin = async () => {
+    setCookieLoading(true);
+    setConnectError('');
+    try {
+      await api.post('/linkedin/automation/login/cookies', {
+        li_at: liAtCookie.trim(),
+        jsessionid: jsessionidCookie.trim(),
+      });
+      await proceedAfterLogin();
+    } catch (err: any) {
+      setConnectError(err.response?.data?.detail || 'Invalid cookies. Please check and try again.');
+    } finally {
+      setCookieLoading(false);
+    }
+  };
+
+  const handleExtensionLogin = () => {
+    setExtLoading(true);
+    setConnectError('');
+
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const onCookies = (e: Event) => {
+      clearTimeout(timeoutId);
+      const { li_at, jsessionid, error } = (e as CustomEvent).detail || {};
+      window.removeEventListener('STUDOJO_LI_COOKIES', onCookies);
+      if (error || !li_at) {
+        setConnectError(error || 'Extension could not read LinkedIn cookies. Make sure you\'re logged in to LinkedIn.');
+        setExtLoading(false);
+        return;
+      }
+      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '' })
+        .then(() => proceedAfterLogin())
+        .catch((err: any) => {
+          setConnectError(err.response?.data?.detail || 'LinkedIn session invalid. Please re-login to LinkedIn and try again.');
+        })
+        .finally(() => setExtLoading(false));
+    };
+
+    window.addEventListener('STUDOJO_LI_COOKIES', onCookies);
+    window.dispatchEvent(new CustomEvent('STUDOJO_REQUEST_LI_COOKIES'));
+
+    // Timeout if extension doesn't respond
+    timeoutId = setTimeout(() => {
+      window.removeEventListener('STUDOJO_LI_COOKIES', onCookies);
+      setExtLoading(prev => {
+        if (prev) setConnectError('Extension did not respond. Try refreshing or installing the extension.');
+        return false;
+      });
+    }, 5000);
+  };
+
+  // Step 6 → launch
+  const handleLaunch = async () => {
+    if (!campaignId) return;
+    setLaunching(true);
+    setLaunchError('');
+    try {
+      await api.put(`/linkedin/automation/campaigns/${campaignId}`, {
+        name: quiz.campaign_name || `${quiz.target_role} outreach`,
+        target_role: quiz.target_role,
+        target_industries: quiz.target_industries,
+        target_locations: quiz.target_locations,
+        target_company_sizes: quiz.target_company_sizes,
+        target_keywords: quiz.target_keywords || null,
+        connection_note: connectionNote || NOTE_PLACEHOLDER,
+        followup_message: followupMessage || FOLLOWUP_PLACEHOLDER,
+        daily_limit: dailyLimit,
+      });
+      await api.post(`/linkedin/automation/campaigns/${campaignId}/launch`);
+
+      // Load dashboard data
+      await fetchDashboard(campaignId);
+      setStep(6);
+      saveWizard(6, quiz, campaignId);
+
+      // Auto-refresh every 30s
+      pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
+    } catch (err: any) {
+      setLaunchError(err.response?.data?.detail || 'Launch failed. Please try again.');
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const fetchDashboard = async (id: number) => {
+    const [cRes, sRes, rRes] = await Promise.all([
+      api.get(`/linkedin/automation/campaigns/${id}`),
+      api.get(`/linkedin/automation/campaigns/${id}/stats`),
+      api.get(`/linkedin/automation/campaigns/${id}/requests?limit=200`),
+    ]);
+    setCampaign(cRes.data);
+    setStats(sRes.data);
+    setRequests(rRes.data);
+  };
+
+  const toggleCampaign = async () => {
+    if (!campaign || !campaignId) return;
+    setToggling(true);
+    try {
+      const action = campaign.status === 'running' ? 'pause' : 'resume';
+      await api.post(`/linkedin/automation/campaigns/${campaignId}/${action}`);
+      await fetchDashboard(campaignId);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Detect Studojo extension
+  useEffect(() => {
+    const onReady = () => setExtInstalled(true);
+    window.addEventListener('STUDOJO_EXT_READY', onReady);
+    const t = setTimeout(() => window.removeEventListener('STUDOJO_EXT_READY', onReady), 500);
+    return () => { clearTimeout(t); window.removeEventListener('STUDOJO_EXT_READY', onReady); };
+  }, []);
+
+  // Restore wizard state on mount
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) { setRestored(true); return; }
+    try {
+      const saved = JSON.parse(raw);
+      const savedStep: Step = saved.step ?? 1;
+      const savedQuiz: QuizData = saved.quiz ?? quiz;
+      const savedCampaignId: number | null = saved.campaignId ?? null;
+
+      setQuiz(savedQuiz);
+      setCampaignId(savedCampaignId);
+
+      if (savedStep === 6 && savedCampaignId) {
+        // Restore live dashboard
+        fetchDashboard(savedCampaignId).then(() => {
+          setStep(6);
+          setRestored(true);
+          pollRef.current = setInterval(() => fetchDashboard(savedCampaignId), 30000);
+        }).catch(() => { clearWizard(); setRestored(true); });
+      } else if (savedStep === 5 && savedCampaignId) {
+        // Restore leads step — re-fetch existing leads (don't re-trigger search)
+        api.get(`/linkedin/automation/campaigns/${savedCampaignId}/requests?limit=50`)
+          .then(r => {
+            if (r.data.length > 0) {
+              setLeads(r.data);
+            } else {
+              setLeadsError('No leads found. Try broadening your search criteria.');
+            }
+            setStep(5);
+            setRestored(true);
+          })
+          .catch(() => { clearWizard(); setRestored(true); });
+      } else {
+        setStep(savedStep);
+        setRestored(true);
+      }
+    } catch {
+      clearWizard();
+      setRestored(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filteredRequests = requests.filter(r => {
+    if (activeTab === 'sent') return ['sent', 'accepted', 'followup_sent', 'replied'].includes(r.status);
+    if (activeTab === 'accepted') return ['accepted', 'followup_sent', 'replied'].includes(r.status);
+    if (activeTab === 'replied') return r.status === 'replied';
+    return true;
+  });
+
+  // ── Render steps ──────────────────────────────────────────────────────────────
 
   return (
-    <div className="w-full bg-white">
+    <div className="min-h-screen bg-background">
       <Navbar />
+      <Container className="py-10 max-w-xl">
 
-      {/* Hero */}
-      <section className="border-b border-ink bg-gradient-to-br from-violet-700 via-purple-700 to-violet-800">
-        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:py-20">
-          <div className="flex flex-col gap-6 text-center md:gap-8 md:text-left">
-            <h1 className="max-w-3xl font-clash text-3xl font-semibold leading-tight tracking-tight text-white md:text-4xl lg:text-5xl">
-              Find Hiring Managers for Your Dream Job
-            </h1>
-            <p className="max-w-xl font-satoshi text-sm font-normal leading-6 text-white/90 md:text-base md:leading-7">
-              OpportunityApply uses AI to discover decision makers, enrich contacts, and launch personalized outreach campaigns — all from your resume.
+        {!restored && (
+          <div className="flex items-center justify-center py-20">
+            <Spinner className="w-6 h-6 text-primary" />
+          </div>
+        )}
+
+        {restored && <>
+
+        {/* Progress */}
+        <div className="mb-10">
+          <ProgressSteps steps={STEPS} currentStep={step} />
+        </div>
+
+        {/* ── Step 1: Target role ─────────────────────────────────────── */}
+        {step === 1 && (
+          <div>
+            <h2 className="text-xl font-bold mb-1">Who do you want to reach?</h2>
+            <p className="text-sm text-muted-foreground mb-6">
+              Enter the job title of your ideal LinkedIn connection.
             </p>
-            <div className="flex flex-col gap-4 md:flex-row md:flex-wrap">
-              <Button
-                onClick={() => router.push('/onboarding/upload')}
-                size="lg"
-                variant="accent"
-              >
-                Get Started <ArrowRight className="w-5 h-5 ml-2 inline" />
-              </Button>
-              <Button
-                onClick={() => router.push('/orders')}
-                size="lg"
-                variant="ghost"
-                className="border-2 border-white/40 text-white hover:bg-white/10"
-              >
-                <ClipboardList className="w-5 h-5 mr-2 inline" /> View Campaigns
-              </Button>
+            <input
+              type="text"
+              value={quiz.target_role}
+              onChange={e => setQuiz(q => ({ ...q, target_role: e.target.value }))}
+              placeholder="e.g. Head of Marketing, Founder, VP Sales"
+              className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 mb-4"
+              autoFocus
+            />
+            <div className="flex flex-wrap gap-2">
+              {ROLE_SUGGESTIONS.map(r => (
+                <Chip
+                  key={r} label={r} selected={quiz.target_role === r}
+                  onClick={() => setQuiz(q => ({ ...q, target_role: r }))}
+                />
+              ))}
             </div>
+            <StepNav hideBack onNext={next} disabled={!canNext()} />
           </div>
-        </div>
-      </section>
+        )}
 
-      {/* Features */}
-      <section className="border-b border-ink bg-white">
-        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:pt-24 md:pb-16">
-          <h2 className="font-clash text-3xl font-bold text-center mb-12">How It Works</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {features.map((f, i) => (
-              <Card key={i} hoverable className="text-center">
-                <div className="w-14 h-14 rounded-xl bg-purple-100 border-2 border-ink flex items-center justify-center mx-auto text-primary mb-6">
-                  {f.icon}
-                </div>
-                <h3 className="font-clash text-xl font-bold mb-2">{f.title}</h3>
-                <p className="text-sm text-muted font-satoshi">{f.desc}</p>
-              </Card>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* CTA */}
-      <section className="border-b border-ink bg-gradient-to-br from-purple-100 via-violet-100 to-purple-50">
-        <div className="mx-auto max-w-[80rem] px-4 pt-8 pb-8 md:px-8 md:py-24 text-center">
-          <h2 className="font-clash text-3xl font-bold mb-4">Ready to find your next opportunity?</h2>
-          <p className="text-lg text-muted mb-10 font-satoshi">
-            Upload your resume and let AI do the outreach.
-          </p>
-          <Button onClick={() => router.push('/onboarding/upload')} size="lg">
-            Start Now <ArrowRight className="w-4 h-4 ml-2 inline" />
-          </Button>
-        </div>
-      </section>
-
-      {/* Footer */}
-      <footer className="relative border-b border-ink bg-white">
-        <div className="mx-auto max-w-[80rem] px-4 pt-8 py-8 md:px-8 md:py-24">
-          <div className="flex flex-col gap-8 md:grid md:grid-cols-2 md:gap-16">
-            {/* Left: branding + Join the Dojo + contact */}
-            <div className="flex flex-col gap-8 md:gap-12">
-              <a href="/" className="font-satoshi text-2xl font-black tracking-tight text-ink md:text-3xl">
-                studojo
-              </a>
-
-              <div className="flex flex-col gap-3 rounded-2xl border border-ink/20 bg-white p-6 md:rounded-3xl md:bg-purple-50 md:gap-4 md:p-8">
-                <h3 className="font-clash text-lg font-medium text-ink md:text-2xl">Join the Dojo</h3>
-                <p className="font-satoshi text-sm text-muted md:text-base">
-                  Get weekly wisdom, tips, and exclusive student insights
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-100 text-primary">
-                  <Mail className="w-4 h-4" />
-                </span>
-                <span className="font-satoshi text-sm text-ink md:text-base">admin@studojo.com</span>
-              </div>
+        {/* ── Step 2: Industries ──────────────────────────────────────── */}
+        {step === 2 && (
+          <div>
+            <h2 className="text-xl font-bold mb-1">What industries?</h2>
+            <p className="text-sm text-muted-foreground mb-6">Select all that apply.</p>
+            <div className="flex flex-wrap gap-2">
+              {INDUSTRIES.map(ind => (
+                <Chip
+                  key={ind} label={ind}
+                  selected={quiz.target_industries.includes(ind)}
+                  onClick={() => toggleMulti('target_industries', ind)}
+                />
+              ))}
             </div>
-
-            {/* Right: Explore Our Dojos + links */}
-            <div className="flex flex-col gap-8">
-              <div className="hidden md:block">
-                <h3 className="font-satoshi text-2xl font-black tracking-tight text-ink">Explore Our Dojos</h3>
-                <ul className="mt-6 flex flex-col gap-6">
-                  {DOJO_LINKS.map(({ href, label, desc, color, internal }) => (
-                    <li key={label}>
-                      {internal ? (
-                        <Link href={href} className={`flex items-center justify-between rounded-2xl ${color} p-6 transition opacity-90 hover:opacity-100`}>
-                          <div>
-                            <p className="font-clash text-2xl font-medium text-white">{label}</p>
-                            <p className="font-satoshi text-sm text-white/80">{desc}</p>
-                          </div>
-                          <span className="text-white" aria-hidden>&#8594;</span>
-                        </Link>
-                      ) : (
-                        <a href={href} className={`flex items-center justify-between rounded-2xl ${color} p-6 transition opacity-90 hover:opacity-100`}>
-                          <div>
-                            <p className="font-clash text-2xl font-medium text-white">{label}</p>
-                            <p className="font-satoshi text-sm text-white/80">{desc}</p>
-                          </div>
-                          <span className="text-white" aria-hidden>&#8594;</span>
-                        </a>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div className="grid grid-cols-2 gap-8">
-                <div>
-                  <h3 className="font-satoshi text-xs font-medium text-ink md:text-base md:font-black">Help Center</h3>
-                  <ul className="mt-3 flex flex-col gap-2 md:mt-4 md:gap-3">
-                    <li>
-                      <a href="mailto:admin@studojo.com" className="font-satoshi text-xs text-muted md:text-base hover:underline">Contact Support</a>
-                    </li>
-                    <li>
-                      <a href="https://chat.whatsapp.com/CUV8DSjQWqB82yXKRE66ol?mode=gi_t" className="font-satoshi text-xs text-muted md:text-base hover:underline">Community</a>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            </div>
+            <StepNav onBack={back} onNext={next} disabled={!canNext()} />
           </div>
+        )}
 
-          {/* Social links — proper SVG icons */}
-          <div className="mt-8 flex flex-col gap-4 border-t border-ink/10 pt-6 md:mt-16 md:border-y md:border-ink/20 md:py-12">
-            <div className="flex flex-col items-center gap-4 text-center">
-              <p className="font-satoshi text-xs text-muted md:text-base">
-                Connect with thousands of students reaching their journey
-              </p>
-              <div className="flex gap-3 md:gap-4">
-                {SOCIAL_LINKS.map(({ href, label }) => (
-                  <a
-                    key={label}
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-100 text-primary transition hover:bg-purple-200 md:h-14 md:w-14 md:rounded-2xl"
-                    aria-label={label}
-                  >
-                    <SocialIcon label={label} />
-                  </a>
+        {/* ── Step 3: Location + company size + name ───────────────────── */}
+        {step === 3 && (
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-xl font-bold mb-1">Where are they based?</h2>
+              <p className="text-sm text-muted-foreground mb-4">Pick your target markets.</p>
+              <div className="flex flex-wrap gap-2">
+                {LOCATIONS.map(loc => (
+                  <Chip
+                    key={loc} label={loc}
+                    selected={quiz.target_locations.includes(loc)}
+                    onClick={() => toggleMulti('target_locations', loc)}
+                  />
                 ))}
               </div>
             </div>
-          </div>
 
-          {/* Legal */}
-          <div className="mt-8 flex flex-col items-center justify-between gap-4 border-t border-ink/10 pt-6 md:mt-8 md:flex-row md:border-0 md:pt-0">
-            <p className="text-center font-satoshi text-xs text-muted md:text-lg">
-              &copy; 2025 Studojo. Crafted with ❤️ by students
-            </p>
-            <div className="flex flex-wrap justify-center gap-4 md:gap-8">
-              <a href={`${STUDOJO_BASE}/privacy`} className="font-satoshi text-xs text-muted md:text-lg hover:underline">Privacy Policy</a>
-              <a href={`${STUDOJO_BASE}/terms`} className="font-satoshi text-xs text-muted md:text-lg hover:underline">Terms of Service</a>
-              <a href={`${STUDOJO_BASE}/refund-policy`} className="font-satoshi text-xs text-muted md:text-lg hover:underline">Refund Policy</a>
+            <div>
+              <p className="text-sm font-medium mb-3">Company size</p>
+              <div className="space-y-2">
+                {COMPANY_SIZES.map(size => (
+                  <button
+                    key={size}
+                    onClick={() => toggleMulti('target_company_sizes', size)}
+                    className={`w-full text-left px-4 py-3 rounded-xl border text-sm transition-all ${
+                      quiz.target_company_sizes.includes(size)
+                        ? 'bg-primary/5 border-primary font-medium'
+                        : 'border-border hover:border-primary/40'
+                    }`}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium block mb-1.5">Campaign name</label>
+              <input
+                type="text"
+                value={quiz.campaign_name}
+                onChange={e => setQuiz(q => ({ ...q, campaign_name: e.target.value }))}
+                placeholder={`${quiz.target_role} outreach — ${new Date().toLocaleDateString('en', { month: 'short', year: 'numeric' })}`}
+                className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium block mb-1.5">
+                Extra keywords <span className="font-normal text-muted-foreground">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={quiz.target_keywords}
+                onChange={e => setQuiz(q => ({ ...q, target_keywords: e.target.value }))}
+                placeholder="e.g. Series A startup, YC, AI"
+                className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+
+            <StepNav onBack={back} onNext={next} disabled={!canNext()} />
+          </div>
+        )}
+
+        {/* ── Step 4: Connect LinkedIn ────────────────────────────────── */}
+        {step === 4 && (
+          <div>
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-[#0077B5] rounded-xl flex items-center justify-center">
+                <Linkedin className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold">
+                  {challengeRequired ? 'Check your email' : 'Connect your LinkedIn'}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {challengeRequired
+                    ? `LinkedIn sent a verification code to ${liEmail}`
+                    : "We'll search for leads and send requests on your behalf."}
+                </p>
+              </div>
+            </div>
+
+            {!challengeRequired ? (
+              <>
+                {/* Email + password form */}
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn email</label>
+                    <input type="email" value={liEmail} onChange={e => setLiEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoComplete="email" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn password</label>
+                    <div className="relative">
+                      <input type={showPass ? 'text' : 'password'} value={liPassword}
+                        onChange={e => setLiPassword(e.target.value)} placeholder="••••••••"
+                        className="w-full border border-border rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        onKeyDown={e => e.key === 'Enter' && canNext() && handleConnect()} />
+                      <button type="button" onClick={() => setShowPass(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
+                        {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2 mb-5">
+                  {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
+                    <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                      <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" /><span>{item}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between mb-5">
+                  <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                  <Button onClick={handleConnect} disabled={!canNext() || connectLoading}>
+                    {connectLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
+                </div>
+
+                {/* Cookies fallback — collapsed by default */}
+                <details className="group">
+                  <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1.5 select-none">
+                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                    Can&apos;t log in with email? Use cookies instead
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-700 space-y-1">
+                      <p>1. Open <strong>linkedin.com</strong> and log in</p>
+                      <p>2. Press <strong>F12</strong> → Application → Cookies → linkedin.com</p>
+                      <p>3. Copy <strong>li_at</strong> and <strong>JSESSIONID</strong> values below</p>
+                    </div>
+                    <div className="bg-white border border-border rounded-2xl p-4 space-y-3">
+                      <div>
+                        <label className="text-xs font-medium block mb-1">li_at cookie</label>
+                        <textarea value={liAtCookie} onChange={e => setLiAtCookie(e.target.value)}
+                          placeholder="AQEDATxxxxxx..."
+                          rows={2}
+                          className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none" />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium block mb-1">JSESSIONID cookie</label>
+                        <input type="text" value={jsessionidCookie} onChange={e => setJsessionidCookie(e.target.value)}
+                          placeholder="ajax:xxxxxxxxxx"
+                          className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                      <Button onClick={handleCookieLogin} disabled={!liAtCookie.trim() || !jsessionidCookie.trim() || cookieLoading} className="w-full">
+                        {cookieLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
+                      </Button>
+                    </div>
+                  </div>
+                </details>
+              </>
+            ) : (
+              <>
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">Verification code</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={pin}
+                      onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                      placeholder="Enter the code LinkedIn emailed you"
+                      className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 tracking-widest text-center text-lg font-mono"
+                      autoFocus
+                      onKeyDown={e => e.key === 'Enter' && pin.length >= 4 && handleVerifyPin()}
+                    />
+                  </div>
+
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>{connectError}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => { setChallengeRequired(false); setPin(''); setConnectError(''); }}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                  <Button onClick={handleVerifyPin} disabled={pin.length < 4 || pinLoading}>
+                    {pinLoading ? 'Verifying...' : 'Verify & continue'}
+                    <ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
+                </div>
+
+                <div className="mt-4 pt-4 border-t border-border text-center">
+                  <p className="text-xs text-muted-foreground mb-2">Code not arriving?</p>
+                  <button
+                    onClick={() => { setChallengeRequired(false); setPin(''); setConnectError(''); }}
+                    className="text-sm text-primary hover:underline font-medium"
+                  >
+                    Try again with a different email
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Step 5: Leads + messages ────────────────────────────────── */}
+        {step === 5 && (
+          <div>
+            {/* Leads found section */}
+            <div className="mb-6">
+              {searchingLeads ? (
+                <div className="bg-white border border-border rounded-2xl p-6 text-center">
+                  <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-3">
+                    <Search className="w-5 h-5 text-primary animate-pulse" />
+                  </div>
+                  <p className="font-medium text-sm">Finding {quiz.target_role}s...</p>
+                  <p className="text-xs text-muted-foreground mt-1">Searching LinkedIn for your target profiles</p>
+                </div>
+              ) : leadsError === 'search_failed' ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 space-y-3">
+                  <div className="flex items-start gap-2 text-amber-800">
+                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-medium">No leads found</p>
+                      <p className="text-xs mt-0.5 text-amber-700">
+                        This usually means your LinkedIn session expired or the search criteria returned no results.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      onClick={() => campaignId && startLeadSearch(campaignId)}
+                      className="w-full text-sm"
+                    >
+                      <Search className="w-3.5 h-3.5 mr-1.5" /> Retry search
+                    </Button>
+                    <button
+                      onClick={() => {
+                        setLeadsError('');
+                        setStep(4);
+                        saveWizard(4, quiz, campaignId);
+                      }}
+                      className="text-xs text-amber-700 hover:underline text-center"
+                    >
+                      Reconnect LinkedIn session instead
+                    </button>
+                  </div>
+                </div>
+              ) : leadsError ? (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-3">
+                  <p className="text-sm text-red-700">{leadsError}</p>
+                  <Button
+                    onClick={() => campaignId && startLeadSearch(campaignId)}
+                    className="w-full text-sm"
+                  >
+                    <Search className="w-3.5 h-3.5 mr-1.5" /> Retry search
+                  </Button>
+                </div>
+              ) : (
+                <div className="bg-white border border-border rounded-2xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+                    <Users className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-medium">{leads.length} leads found</span>
+                  </div>
+                  <div className="divide-y divide-border max-h-48 overflow-y-auto">
+                    {leads.slice(0, 10).map(lead => (
+                      <div key={lead.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{lead.name}</p>
+                          {lead.headline && <p className="text-xs text-muted-foreground truncate">{lead.headline}</p>}
+                        </div>
+                        <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-foreground flex-shrink-0">
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    ))}
+                    {leads.length > 10 && (
+                      <div className="px-4 py-2 text-xs text-center text-muted-foreground">
+                        + {leads.length - 10} more leads
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Message templates */}
+            <h2 className="text-lg font-bold mb-4">Set up your messages</h2>
+
+            <div className="space-y-4 mb-6">
+              <div className="bg-white border border-border rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-primary" />
+                    <span className="text-sm font-medium">Connection note</span>
+                  </div>
+                  <span className={`text-xs ${connectionNote.length > 300 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                    {connectionNote.length}/300
+                  </span>
+                </div>
+                <textarea
+                  value={connectionNote}
+                  onChange={e => setConnectionNote(e.target.value)}
+                  placeholder={NOTE_PLACEHOLDER}
+                  rows={2}
+                  className="w-full text-sm border border-border rounded-xl px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  Use <code className="bg-gray-100 px-1 rounded">{'{{name}}'}</code> and <code className="bg-gray-100 px-1 rounded">{'{{company}}'}</code> — AI personalises per lead
+                </p>
+              </div>
+
+              <div className="bg-white border border-border rounded-2xl p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Send className="w-4 h-4 text-amber-500" />
+                  <span className="text-sm font-medium">Follow-up</span>
+                  <span className="text-xs text-muted-foreground">sent after they accept</span>
+                </div>
+                <textarea
+                  value={followupMessage}
+                  onChange={e => setFollowupMessage(e.target.value)}
+                  placeholder={FOLLOWUP_PLACEHOLDER}
+                  rows={3}
+                  className="w-full text-sm border border-border rounded-xl px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+
+              <div className="bg-white border border-border rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm font-medium">Daily limit</span>
+                  <span className="text-sm font-bold text-primary">{dailyLimit}/day</span>
+                </div>
+                <input
+                  type="range" min={5} max={40} value={dailyLimit}
+                  onChange={e => setDailyLimit(Number(e.target.value))}
+                  className="w-full"
+                />
+                <p className="text-xs text-muted-foreground mt-1">Recommended: 15–25/day</p>
+              </div>
+            </div>
+
+            {launchError && (
+              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700 mb-4">
+                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <span>{launchError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                <ChevronLeft className="w-4 h-4" /> Back
+              </button>
+              <Button
+                onClick={handleLaunch}
+                disabled={searchingLeads || connectionNote.length > 300 || launching}
+              >
+                {launching ? 'Launching...' : 'Launch campaign'}
+                <ChevronRight className="w-4 h-4 ml-1" />
+              </Button>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Giant studojo text — matches platform footer */}
-        <div className="relative flex w-full items-center justify-center overflow-hidden px-2 pb-4 pt-8 md:px-0 md:pb-8 md:pt-16">
-          <span
-            className="pointer-events-none select-none whitespace-nowrap font-clash font-semibold leading-[0.6] tracking-tight text-purple-100/60 text-[clamp(72px,22vw,180px)] md:text-[min(356px,40vw)]"
-            aria-hidden
-          >
-            studojo
-          </span>
-        </div>
-      </footer>
+        {/* ── Step 6: Live dashboard ──────────────────────────────────── */}
+        {step === 6 && campaign && stats && (
+          <div>
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-xl font-bold">{campaign.name}</h2>
+                <p className="text-sm text-muted-foreground">{campaign.target_role} · {campaign.daily_limit}/day limit</p>
+              </div>
+              <Button
+                onClick={toggleCampaign}
+                disabled={toggling || campaign.status === 'auth_failed'}
+                variant={campaign.status === 'running' ? 'outline' : 'primary'}
+                className="flex items-center gap-1.5 text-sm"
+              >
+                {campaign.status === 'running'
+                  ? <><Pause className="w-3.5 h-3.5" /> Pause</>
+                  : <><Play className="w-3.5 h-3.5" /> Resume</>
+                }
+              </Button>
+            </div>
+
+            {/* Auth failed banner */}
+            {campaign.status === 'auth_failed' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-5 flex items-start gap-3">
+                <AlertCircle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-amber-800">LinkedIn session expired</p>
+                  <p className="text-xs text-amber-700 mt-0.5">Campaign paused — reconnect to resume sending.</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setStep(4);
+                    saveWizard(4, quiz, campaignId);
+                  }}
+                  className="flex-shrink-0 text-xs font-medium text-amber-800 underline hover:no-underline"
+                >
+                  Reconnect
+                </button>
+              </div>
+            )}
+
+            {/* Metrics */}
+            <div className="grid grid-cols-4 gap-3 mb-6">
+              <MetricTile label="Sent" value={stats.total_sent} />
+              <MetricTile label="Accepted" value={stats.total_accepted} sub={`${stats.acceptance_rate}%`} />
+              <MetricTile label="Follow-ups" value={stats.total_followups_sent} />
+              <MetricTile label="Replies" value={stats.total_replied} sub={`${stats.reply_rate}%`} />
+            </div>
+
+            {/* Request list */}
+            <div className="bg-white border border-border rounded-2xl overflow-hidden">
+              <div className="flex border-b border-border">
+                {(['all', 'sent', 'accepted', 'replied'] as const).map(tab => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    className={`flex-1 py-3 text-xs font-medium transition-colors ${
+                      activeTab === tab ? 'text-primary border-b-2 border-primary' : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {filteredRequests.length === 0 ? (
+                <div className="text-center py-10 text-sm text-muted-foreground">
+                  {activeTab === 'all' ? 'Requests will appear here as the campaign runs.' : `No ${activeTab} yet.`}
+                </div>
+              ) : (
+                <div className="divide-y divide-border max-h-96 overflow-y-auto">
+                  {filteredRequests.map(req => {
+                    const s = STATUS_LABELS[req.status] || STATUS_LABELS.pending;
+                    return (
+                      <div key={req.id} className="px-4 py-3 flex items-center gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-sm font-medium truncate">{req.name}</p>
+                            <a href={req.profile_url} target="_blank" rel="noopener noreferrer" className="text-muted-foreground">
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                          {req.headline && <p className="text-xs text-muted-foreground truncate">{req.headline}</p>}
+                          {req.reply_text && (
+                            <p className="text-xs text-foreground/70 italic mt-1 line-clamp-1">"{req.reply_text}"</p>
+                          )}
+                        </div>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${s.color}`}>
+                          {s.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <p className="text-center text-xs text-muted-foreground mt-4">
+              Refreshes every 30s · {campaign.total_leads} total leads loaded
+            </p>
+          </div>
+        )}
+
+        </> }
+
+      </Container>
     </div>
   );
 }
