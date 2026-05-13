@@ -6,6 +6,7 @@ const PLATFORM_URL = process.env.NEXT_PUBLIC_PLATFORM_URL || '';
 const api = axios.create({
   baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
+  withCredentials: true, // send BetterAuth session cookie on every request (fallback auth)
 });
 
 // Attach JWT on every request
@@ -32,9 +33,10 @@ api.interceptors.response.use(
 
 /**
  * Exchange BetterAuth session cookie for a JWT token.
- * Calls the platform's /api/auth/token endpoint (same-origin, cookie sent
- * automatically) and stores the JWT in localStorage for control-plane calls.
- * Returns the token string or null if not authenticated.
+ * Tries the platform /api/auth/token endpoint first; falls back to the outreach
+ * backend /auth/token endpoint. If neither works, returns null — the backend
+ * also accepts the BetterAuth session cookie directly on same-origin requests,
+ * so axios calls still authenticate via the cookie even without a JWT.
  */
 export async function ensureAuthToken(): Promise<string | null> {
   if (typeof window === 'undefined') return null;
@@ -42,19 +44,30 @@ export async function ensureAuthToken(): Promise<string | null> {
   const existing = localStorage.getItem('token');
   if (existing) return existing;
 
-  try {
-    const res = await fetch(`${PLATFORM_URL}/api/auth/token`);
-    if (!res.ok) return null;
+  // Try platform token endpoint first, then outreach backend
+  const endpoints = [
+    `${PLATFORM_URL}/api/auth/token`,
+    `${API_BASE}/auth/token`,
+  ];
 
-    const data = await res.json();
-    const token = data?.token || data?.accessToken || null;
-    if (token) {
-      localStorage.setItem('token', token);
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, { credentials: 'include' });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const token = data?.token || data?.accessToken || null;
+      if (token) {
+        localStorage.setItem('token', token);
+        return token;
+      }
+    } catch {
+      // try next endpoint
     }
-    return token;
-  } catch {
-    return null;
   }
+
+  // Both failed — backend accepts session cookie on same-origin requests, so
+  // we proceed without a JWT. The cookie is sent automatically by the browser.
+  return null;
 }
 
 export default api;

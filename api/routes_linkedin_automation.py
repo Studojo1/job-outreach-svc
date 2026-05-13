@@ -665,14 +665,16 @@ async def retry_errors(
     Leads with no profile_urn have a 404/private profile and won't resolve.
     """
     c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    # Reset all errored leads — include those without a URN so they can retry
+    # URN resolution. The old guard (urn.isnot(None)) permanently orphaned any
+    # lead that failed at the resolve step before the error field was populated.
     updated = (
         db.query(LinkedInConnectionRequest)
         .filter(
             LinkedInConnectionRequest.campaign_id == campaign_id,
             LinkedInConnectionRequest.status == "error",
-            LinkedInConnectionRequest.profile_urn.isnot(None),
         )
-        .update({"status": "pending", "error": None, "updated_at": datetime.utcnow()})
+        .update({"status": "pending", "error": None, "profile_urn": None, "updated_at": datetime.utcnow()})
     )
     db.commit()
     return {"ok": True, "reset": updated}
