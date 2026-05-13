@@ -74,19 +74,20 @@ async def login_with_credentials(
         raise HTTPException(status_code=400, detail="email and password are required")
 
     try:
-        li_at, jsessionid, result = linkedin_login_start(body.email, body.password)
+        from core.config import settings as _s
+        proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
+        li_at, jsessionid, display_name, session_key = await linkedin_login_start(
+            body.email, body.password, proxy_url
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
     if li_at is None:
-        # result is the session_key — challenge required
-        entry = __import__('services.linkedin_outreach.login', fromlist=['_pending'])._pending.get(result, {})
-        challenge_type = entry.get("challenge_type", "pin")
-        return {"ok": False, "challenge_required": True, "session_key": result, "challenge_type": challenge_type}
+        from services.linkedin_outreach.login import _pending
+        challenge_type = _pending.get(session_key, {}).get("challenge_type", "pin")
+        return {"ok": False, "challenge_required": True, "session_key": session_key, "challenge_type": challenge_type}
 
-    display_name = _store_token(db, current_user.id, li_at, jsessionid, result)
+    _store_token(db, current_user.id, li_at, jsessionid, display_name)
     return {"ok": True, "linkedin_name": display_name}
 
 
@@ -101,7 +102,7 @@ async def verify_pin(
         raise HTTPException(status_code=400, detail="session_key and pin are required")
 
     try:
-        li_at, jsessionid, display_name = linkedin_verify_pin(body.session_key, body.pin)
+        li_at, jsessionid, display_name = await linkedin_verify_pin(body.session_key, body.pin)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

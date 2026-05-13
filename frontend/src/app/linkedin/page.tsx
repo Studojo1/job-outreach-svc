@@ -620,178 +620,86 @@ export default function LinkedInOnboardingPage() {
               </div>
             </div>
 
-            {/* Tab switcher — only show when not in challenge flow */}
-            {!challengeRequired && (
-              <div className="flex border border-border rounded-xl overflow-hidden mb-5">
-                <button
-                  onClick={() => { setLoginTab('password'); setConnectError(''); }}
-                  className={`flex-1 py-2.5 text-sm font-medium transition-colors ${loginTab === 'password' ? 'bg-primary text-white' : 'bg-white text-muted-foreground hover:text-foreground'}`}
-                >
-                  Email & password
-                </button>
-                <button
-                  onClick={() => { setLoginTab('cookies'); setConnectError(''); }}
-                  className={`flex-1 py-2.5 text-sm font-medium transition-colors ${loginTab === 'cookies' ? 'bg-primary text-white' : 'bg-white text-muted-foreground hover:text-foreground'}`}
-                >
-                  Use extension
-                </button>
-              </div>
-            )}
-
             {!challengeRequired ? (
               <>
-                {loginTab === 'password' ? (
-                  <>
-                    <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
-                      <div>
-                        <label className="text-sm font-medium block mb-1.5">LinkedIn email</label>
-                        <input type="email" value={liEmail} onChange={e => setLiEmail(e.target.value)}
-                          placeholder="you@example.com"
-                          className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                          autoComplete="email" />
-                      </div>
-                      <div>
-                        <label className="text-sm font-medium block mb-1.5">LinkedIn password</label>
-                        <div className="relative">
-                          <input type={showPass ? 'text' : 'password'} value={liPassword}
-                            onChange={e => setLiPassword(e.target.value)} placeholder="••••••••"
-                            className="w-full border border-border rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-                            onKeyDown={e => e.key === 'Enter' && canNext() && handleConnect()} />
-                          <button type="button" onClick={() => setShowPass(v => !v)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                            {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-                        </div>
-                      </div>
-                      {connectError && (
-                        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
-                        </div>
-                      )}
-                    </div>
-                    <div className="space-y-2 mb-6">
-                      {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
-                        <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
-                          <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" /><span>{item}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-                        <ChevronLeft className="w-4 h-4" /> Back
+                {/* Email + password form */}
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn email</label>
+                    <input type="email" value={liEmail} onChange={e => setLiEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoComplete="email" />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium block mb-1.5">LinkedIn password</label>
+                    <div className="relative">
+                      <input type={showPass ? 'text' : 'password'} value={liPassword}
+                        onChange={e => setLiPassword(e.target.value)} placeholder="••••••••"
+                        className="w-full border border-border rounded-xl px-4 py-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        onKeyDown={e => e.key === 'Enter' && canNext() && handleConnect()} />
+                      <button type="button" onClick={() => setShowPass(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
+                        {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
-                      <Button onClick={handleConnect} disabled={!canNext() || connectLoading}>
-                        {connectLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
+                    </div>
+                  </div>
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2 mb-5">
+                  {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
+                    <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                      <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" /><span>{item}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between mb-5">
+                  <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                  <Button onClick={handleConnect} disabled={!canNext() || connectLoading}>
+                    {connectLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
+                </div>
+
+                {/* Cookies fallback — collapsed by default */}
+                <details className="group">
+                  <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1.5 select-none">
+                    <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
+                    Can&apos;t log in with email? Use cookies instead
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-700 space-y-1">
+                      <p>1. Open <strong>linkedin.com</strong> and log in</p>
+                      <p>2. Press <strong>F12</strong> → Application → Cookies → linkedin.com</p>
+                      <p>3. Copy <strong>li_at</strong> and <strong>JSESSIONID</strong> values below</p>
+                    </div>
+                    <div className="bg-white border border-border rounded-2xl p-4 space-y-3">
+                      <div>
+                        <label className="text-xs font-medium block mb-1">li_at cookie</label>
+                        <textarea value={liAtCookie} onChange={e => setLiAtCookie(e.target.value)}
+                          placeholder="AQEDATxxxxxx..."
+                          rows={2}
+                          className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none" />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium block mb-1">JSESSIONID cookie</label>
+                        <input type="text" value={jsessionidCookie} onChange={e => setJsessionidCookie(e.target.value)}
+                          placeholder="ajax:xxxxxxxxxx"
+                          className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                      </div>
+                      <Button onClick={handleCookieLogin} disabled={!liAtCookie.trim() || !jsessionidCookie.trim() || cookieLoading} className="w-full">
+                        {cookieLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
                       </Button>
                     </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="space-y-4">
-                      {/* Download card — always visible */}
-                      <div className="bg-primary/5 border border-primary/20 rounded-2xl p-5 space-y-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1">
-                            <p className="font-medium text-sm mb-0.5">Studojo LinkedIn Connector</p>
-                            <p className="text-xs text-muted-foreground">
-                              One-click extension that reads your LinkedIn session securely — no copy-pasting.
-                            </p>
-                          </div>
-                          <a
-                            href="/outreach/studojo-linkedin-connector.zip"
-                            download
-                            className="flex-shrink-0 inline-flex items-center gap-1.5 bg-primary text-white text-xs font-medium px-3 py-2 rounded-lg hover:bg-primary/90 transition-colors"
-                          >
-                            Download
-                          </a>
-                        </div>
-                        <p className="text-xs text-muted-foreground">
-                          After downloading: <strong>chrome://extensions</strong> → Developer mode → Load unpacked → select the unzipped folder → come back here.
-                        </p>
-                      </div>
-
-                      {/* Connect button (shown if extension detected) or not-yet-detected notice */}
-                      {extInstalled ? (
-                        <div className="bg-white border border-border rounded-2xl p-5 text-center space-y-3">
-                          <div className="flex items-center justify-center gap-2 text-green-700 text-sm font-medium">
-                            <ShieldCheck className="w-4 h-4" /> Extension detected
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            Make sure you&apos;re logged in to{' '}
-                            <a href="https://www.linkedin.com" target="_blank" rel="noreferrer" className="underline">linkedin.com</a>
-                            , then click below.
-                          </p>
-                          {connectError && (
-                            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700 text-left">
-                              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
-                            </div>
-                          )}
-                          <Button onClick={handleExtensionLogin} disabled={extLoading} className="w-full">
-                            {extLoading ? 'Reading session...' : 'Connect via extension'}
-                            {!extLoading && <ChevronRight className="w-4 h-4 ml-1" />}
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="bg-white border border-border rounded-2xl p-4 text-center space-y-2">
-                          <p className="text-xs text-muted-foreground">Extension not detected yet.</p>
-                          <button
-                            onClick={() => {
-                              window.dispatchEvent(new CustomEvent('STUDOJO_REQUEST_LI_COOKIES'));
-                              setTimeout(() => window.location.reload(), 300);
-                            }}
-                            className="text-xs text-primary hover:underline font-medium"
-                          >
-                            I installed it — refresh to detect
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Manual paste fallback */}
-                      <details className="group">
-                        <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1.5 select-none">
-                          <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
-                          Paste cookies manually instead
-                        </summary>
-                        <div className="mt-3 space-y-3">
-                          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-700 space-y-1">
-                            <p>1. Open <strong>linkedin.com</strong> and log in</p>
-                            <p>2. Press <strong>F12</strong> → Application → Cookies → linkedin.com</p>
-                            <p>3. Copy <strong>li_at</strong> and <strong>JSESSIONID</strong> values below</p>
-                          </div>
-                          <div className="bg-white border border-border rounded-2xl p-4 space-y-3">
-                            <div>
-                              <label className="text-xs font-medium block mb-1">li_at cookie</label>
-                              <textarea value={liAtCookie} onChange={e => setLiAtCookie(e.target.value)}
-                                placeholder="AQEDATxxxxxx..."
-                                rows={2}
-                                className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none" />
-                            </div>
-                            <div>
-                              <label className="text-xs font-medium block mb-1">JSESSIONID cookie</label>
-                              <input type="text" value={jsessionidCookie} onChange={e => setJsessionidCookie(e.target.value)}
-                                placeholder="ajax:xxxxxxxxxx"
-                                className="w-full border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30" />
-                            </div>
-                            {connectError && (
-                              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
-                                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /><span>{connectError}</span>
-                              </div>
-                            )}
-                            <Button onClick={handleCookieLogin} disabled={!liAtCookie.trim() || !jsessionidCookie.trim() || cookieLoading} className="w-full">
-                              {cookieLoading ? 'Connecting...' : 'Connect & find leads'}<ChevronRight className="w-4 h-4 ml-1" />
-                            </Button>
-                          </div>
-                        </div>
-                      </details>
-
-                      <div className="flex items-center justify-between pt-1">
-                        <button onClick={back} className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
-                          <ChevronLeft className="w-4 h-4" /> Back
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
+                  </div>
+                </details>
               </>
             ) : (
               <>
@@ -834,10 +742,10 @@ export default function LinkedInOnboardingPage() {
                 <div className="mt-4 pt-4 border-t border-border text-center">
                   <p className="text-xs text-muted-foreground mb-2">Code not arriving?</p>
                   <button
-                    onClick={() => { setChallengeRequired(false); setLoginTab('cookies'); setPin(''); setConnectError(''); }}
+                    onClick={() => { setChallengeRequired(false); setPin(''); setConnectError(''); }}
                     className="text-sm text-primary hover:underline font-medium"
                   >
-                    Try another way — use the extension instead
+                    Try again with a different email
                   </button>
                 </div>
               </>
