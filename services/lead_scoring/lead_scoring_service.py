@@ -609,6 +609,10 @@ def apply_domain_affinity_to_top_leads(
         lid = lead.get("id")
         domain = (lead.get("company_domain") or "").lower()
         facts = company_facts_by_domain.get(domain) if domain else None
+        if facts is None:
+            name = (lead.get("company") or "").strip()
+            if name:
+                facts = company_facts_by_domain.get(name) or company_facts_by_domain.get(name.lower())
         delta = domain_affinity_adjustment(
             facts=facts,
             subdomain=subdomain,

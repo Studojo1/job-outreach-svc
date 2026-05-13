@@ -139,6 +139,26 @@ def _format_candidate_block(candidate: dict) -> str:
     return "\n".join(parts)
 
 
+def _resolve_company(lead: dict, companies: Dict[str, dict]) -> Optional[dict]:
+    """Look up company profile by domain first, then by company name."""
+    domain = (lead.get("company_domain") or "").lower()
+    if domain:
+        hit = companies.get(domain)
+        if hit:
+            return hit
+    name = (lead.get("company") or "").strip()
+    if name:
+        hit = companies.get(name)
+        if hit:
+            return hit
+        # Try case-insensitive scan as last resort
+        name_lower = name.lower()
+        for k, v in companies.items():
+            if k.lower() == name_lower:
+                return v
+    return None
+
+
 def _format_lead_block(lead: dict, company: Optional[dict]) -> str:
     lines = [
         f"lead_id: {lead['id']}",
@@ -196,8 +216,7 @@ def _build_batch_prompt(candidate: dict, leads: List[dict], companies: Dict[str,
     candidate_block = _format_candidate_block(candidate)
     lead_blocks = []
     for lead in leads:
-        domain = (lead.get("company_domain") or "").lower()
-        company_payload = companies.get(domain)
+        company_payload = _resolve_company(lead, companies)
         lead_blocks.append(_format_lead_block(lead, company_payload))
 
     return f"""{_SYSTEM_PROMPT}
