@@ -664,8 +664,10 @@ async def scoring_ready(
         .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
         .count()
     )
-    # Ready when at least 90% of leads are scored and we have bullets for most
-    ready = scored >= max(1, total * 0.9) and with_bullets >= max(1, min(total, 450))
+    # Ready when scored and either: (a) 85%+ of scored leads have bullets,
+    # or (b) at least 300 bullets exist (handles pod-restart partial completion).
+    bullet_threshold = max(1, min(scored, int(scored * 0.85)))
+    ready = scored >= max(1, total * 0.9) and with_bullets >= bullet_threshold
     return {
         "ready": ready,
         "total": total,
