@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from api.dependencies import get_current_user
 from database.models import User, LinkedInToken, LinkedInSearchJob, LinkedInOutreachLead
 from database.session import get_db
-from services.linkedin_outreach.crypto import encrypt_pair, decrypt
+from services.linkedin_outreach.crypto import encrypt_pair, decrypt, decrypt_second
 from services.linkedin_outreach.voyager import search_people, send_linkedin_message, send_linkedin_connection
 from services.linkedin_outreach.message_gen import generate_messages_for_leads
 
@@ -145,7 +145,7 @@ def _get_decrypted_tokens(user_id: str, db: Session) -> tuple[str, str]:
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected. Install the extension and connect first.")
     li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-    jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+    jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
     return li_at, jsessionid
 
 

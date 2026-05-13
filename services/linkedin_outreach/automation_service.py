@@ -54,24 +54,40 @@ def _headers(li_at: str, jsessionid: str) -> dict:
 
 
 async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, session_id: str | None = None) -> Optional[str]:
-    """Extract fsd_profile URN from a LinkedIn profile URL.
+    """Extract fsd_profile URN from a LinkedIn profile URL via Voyager API (~20 KB, not HTML).
 
-    Raises LinkedInAuthError if the session is expired (401/403 or redirect to login page).
+    Raises LinkedInAuthError if the session is expired.
     """
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0].split("/")[0]
-    url = f"https://www.linkedin.com/in/{slug}/"
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy(session_id)) as client:
+        # Voyager identity endpoint — returns JSON with entityUrn containing fsd_profile URN
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False, **_proxy(session_id)) as client:
             res = await client.get(
-                url,
-                headers={**_headers(li_at, jsessionid), "Accept": "text/html"},
+                f"https://www.linkedin.com/voyager/api/identity/profiles/{slug}",
+                headers=_headers(li_at, jsessionid),
             )
         if res.status_code in (401, 403):
             raise LinkedInAuthError(f"Session expired (status {res.status_code}) resolving {profile_url}")
-        # Redirect to login page indicates expired session even with follow_redirects=True
-        if "/login" in str(res.url) or "/uas/login" in str(res.url):
+        if res.status_code == 200:
+            data = res.json()
+            # entityUrn is "urn:li:fsd_profile:ACoAAC..." — extract the ID
+            entity_urn = data.get("data", {}).get("entityUrn", "") or data.get("entityUrn", "")
+            if "fsd_profile:" in entity_urn:
+                return entity_urn.split("fsd_profile:")[-1]
+            # Fallback: scan included entities
+            for entity in data.get("included", []):
+                urn = entity.get("entityUrn", "")
+                if "fsd_profile:" in urn:
+                    return urn.split("fsd_profile:")[-1]
+        # Final fallback: HTML scrape (2× larger but reliable)
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy(session_id)) as client:
+            res2 = await client.get(
+                f"https://www.linkedin.com/in/{slug}/",
+                headers={**_headers(li_at, jsessionid), "Accept": "text/html"},
+            )
+        if "/login" in str(res2.url):
             raise LinkedInAuthError("Session expired (redirected to login page)")
-        matches = re.findall(r"fsd_profile:([A-Za-z0-9_-]{30,})", res.text)
+        matches = re.findall(r"fsd_profile:([A-Za-z0-9_-]{30,})", res2.text)
         for m in matches:
             if m != "urn":
                 return m
@@ -735,7 +751,7 @@ class LinkedInAutomationDaemon:
     async def _tick(self):
         from database.session import SessionLocal
         from database.models import LinkedInCampaign, LinkedInConnectionRequest, LinkedInToken
-        from services.linkedin_outreach.crypto import decrypt
+        from services.linkedin_outreach.crypto import decrypt, decrypt_second
 
         db = SessionLocal()
         try:
@@ -758,7 +774,7 @@ class LinkedInAutomationDaemon:
 
                     try:
                         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-                        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+                        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
                     except Exception:
                         # Decryption failed — key mismatch (e.g. staging vs prod pod) or
                         # token corrupted. Skip silently; the pod that encrypted the token
@@ -869,39 +885,91 @@ class LinkedInAutomationDaemon:
                 db.commit()
 
         # Phase 2: check for accepted connections → send follow-up
-        sent_requests = (
+        # Only run every 4 hours to avoid hammering the Voyager API
+        should_check_accepted = (
+            campaign.updated_at is None
+            or (datetime.utcnow() - campaign.updated_at).total_seconds() >= 14400
+            or campaign.total_sent > 0 and campaign.total_accepted == 0  # first acceptance pass
+        )
+
+        if should_check_accepted:
+            sent_requests = (
+                db.query(LinkedInConnectionRequest)
+                .filter(
+                    LinkedInConnectionRequest.campaign_id == campaign.id,
+                    LinkedInConnectionRequest.status == "sent",
+                    LinkedInConnectionRequest.sent_at >= datetime.utcnow() - timedelta(days=14),
+                )
+                .limit(20)
+                .all()
+            )
+
+            for req in sent_requests:
+                if not req.profile_urn:
+                    continue
+                accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
+                if accepted:
+                    req.status = "accepted"
+                    req.accepted_at = datetime.utcnow()
+                    campaign.total_accepted += 1
+                    db.commit()
+
+                    # Send follow-up 2–3 minutes after acceptance (human-like delay)
+                    if campaign.followup_message and req.followup_message:
+                        await asyncio.sleep(random.uniform(120, 180))
+                        ok = await send_message(
+                            li_at, jsessionid, req.profile_urn, req.followup_message, session_id
+                        )
+                        if ok:
+                            req.status = "followup_sent"
+                            req.followup_sent_at = datetime.utcnow()
+                            campaign.total_followups_sent += 1
+                            db.commit()
+
+        # Phase 3: detect replies — only every 2 hours to reduce proxy data usage
+        should_check_replies = (
+            campaign.updated_at is None
+            or (datetime.utcnow() - campaign.updated_at).total_seconds() >= 7200
+        )
+
+        followup_reqs = (
             db.query(LinkedInConnectionRequest)
             .filter(
                 LinkedInConnectionRequest.campaign_id == campaign.id,
-                LinkedInConnectionRequest.status == "sent",
-                LinkedInConnectionRequest.sent_at >= datetime.utcnow() - timedelta(days=14),
+                LinkedInConnectionRequest.status == "followup_sent",
+                LinkedInConnectionRequest.profile_urn.isnot(None),
             )
-            .limit(10)
+            .limit(20)
             .all()
         )
 
-        for req in sent_requests:
-            if not req.profile_urn:
-                continue
-            accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
-            if accepted:
-                req.status = "accepted"
-                req.accepted_at = datetime.utcnow()
-                campaign.total_accepted += 1
-                db.commit()
-
-                # Send follow-up if configured
-                if campaign.followup_message and req.followup_message:
-                    await asyncio.sleep(random.uniform(30, 120))
-                    ok = await send_message(
-                        li_at, jsessionid, req.profile_urn, req.followup_message, session_id
+        if should_check_replies and followup_reqs:
+            urn_to_req = {r.profile_urn: r for r in followup_reqs}
+            try:
+                async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
+                    inbox_res = await client.get(
+                        "https://www.linkedin.com/voyager/api/messaging/conversations"
+                        "?keyVersion=LEGACY_INBOX&q=inbox&count=20",
+                        headers=_headers(li_at, jsessionid),
                     )
-                    if ok:
-                        req.status = "followup_sent"
-                        req.followup_sent_at = datetime.utcnow()
-                        campaign.total_followups_sent += 1
-                        db.commit()
-
+                if inbox_res.status_code == 200:
+                    data = inbox_res.json()
+                    for conv in data.get("data", {}).get("elements", []):
+                        last_ms = conv.get("lastActivityAt", 0)
+                        if not last_ms:
+                            continue
+                        last_dt = datetime.utcfromtimestamp(last_ms / 1000)
+                        for p_ref in conv.get("*participants", []):
+                            purn = str(p_ref).split("fsd_profile:")[-1].split(")")[0].strip()
+                            req = urn_to_req.get(purn)
+                            if req and req.followup_sent_at and last_dt > req.followup_sent_at:
+                                req.status = "replied"
+                                req.reply_received_at = last_dt
+                                campaign.total_replied += 1
+                                db.commit()
+                                break
+            except Exception as e:
+                logger.warning("Campaign %d: reply check failed: %s", campaign.id, e)
         campaign.updated_at = datetime.utcnow()
 
 
