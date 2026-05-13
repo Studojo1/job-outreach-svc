@@ -243,21 +243,25 @@ async def _find_connect_button(page):
         # Find Connect link by vanityName from the current URL.
         # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
         # Scoping by vanityName avoids PYMK "Connect" links on the same page.
-        # Use JS .click() — getBoundingClientRect() returns (0,0) for dropdown items
-        # in headless mode (dropdown renders off-screen), so mouse coordinates fail.
+        # Use Playwright locator.click(force=True) — CDP-level click generates isTrusted=true
+        # events which LinkedIn requires to open the invite modal.
         vanity = page.url.rstrip('/').split('/')[-1]
-        connect_clicked = await page.evaluate(f"""
-            () => {{
-                const vanity = '{vanity}';
-                const link = document.querySelector('a[href*="custom-invite"][href*="' + vanity + '"]');
-                if (!link) return false;
-                link.click();
-                return true;
-            }}
-        """)
-        logger.info("Playwright: Connect JS click for %s: %s", vanity, connect_clicked)
 
-        if connect_clicked:
+        # Confirm the link exists in the DOM first
+        connect_exists = await page.evaluate(f"""
+            () => !!document.querySelector('a[href*="custom-invite"][href*="{vanity}"]')
+        """)
+        logger.info("Playwright: Connect link exists for %s: %s", vanity, connect_exists)
+
+        if connect_exists:
+            connect_loc = page.locator(f'a[href*="custom-invite"][href*="{vanity}"]').first
+            try:
+                await connect_loc.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+            logger.info("Playwright: clicking Connect via CDP (force=True)")
+            await connect_loc.click(force=True, timeout=5000)
+            logger.info("Playwright: Connect CDP click fired")
             await page.wait_for_timeout(3000)
 
             # Use Playwright's bounding_box() (CDP-based) — works even when body has
@@ -412,6 +416,16 @@ async def playwright_send_invitation(
             page.on("response", capture_response)
 
             try:
+                # Visit /feed first so LinkedIn's JS bootstraps the session (populates
+                # localStorage / Redux store). Without this, cookie-injected contexts
+                # silently skip modal rendering on the profile page.
+                logger.info("Playwright: bootstrapping session via /feed")
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                feed_url = page.url
+                if "/login" in feed_url or "/uas/login" in feed_url:
+                    raise LinkedInAuthError("Session expired — browser redirected to login on /feed")
+                await page.wait_for_timeout(2000)
+
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
                             slug, bool(proxy), "fresh" if fresh_jsessionid else "stored")
                 await page.goto(
