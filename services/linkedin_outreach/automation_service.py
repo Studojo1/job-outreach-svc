@@ -740,9 +740,15 @@ class LinkedInAutomationDaemon:
                         continue
 
                 try:
-                    ok = await send_connection_request(
-                        li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
+                    from services.linkedin_outreach.playwright_service import playwright_send_invitation
+                    from core.config import settings as _s
+                    proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
+                    pw_result = await playwright_send_invitation(
+                        li_at, jsessionid, req.profile_url, req.connection_note or "", proxy_url, req.profile_urn
                     )
+                    ok = pw_result.get("ok", False)
+                    if pw_result.get("profile_urn"):
+                        req.profile_urn = pw_result["profile_urn"]
                 except LinkedInAuthError:
                     # Session expired — pause campaign so user knows to reconnect
                     logger.warning("Campaign %d: LinkedIn session expired, pausing", campaign.id)
@@ -750,6 +756,9 @@ class LinkedInAutomationDaemon:
                     campaign.updated_at = datetime.utcnow()
                     db.commit()
                     return
+                except Exception as pw_err:
+                    logger.warning("Campaign %d: Playwright send error for %s: %s", campaign.id, req.profile_url, pw_err)
+                    ok = False
                 if ok:
                     req.status = "sent"
                     req.sent_at = datetime.utcnow()
