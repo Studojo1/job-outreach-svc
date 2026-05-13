@@ -212,10 +212,11 @@ async def _find_connect_button(page):
         # scroll_into_view_if_needed times out on LinkedIn sticky headers).
         await page.evaluate("el => el.scrollIntoView({behavior: 'instant', block: 'center'})", more_handle)
         await page.wait_for_timeout(400)
-        logger.info("Playwright: clicking More button via ElementHandle")
-        # Use force=True so Playwright skips the pointer-interception check and
-        # sends the CDP click directly to the element's center coordinates.
-        await more_elem.click(timeout=5000, force=True)
+        logger.info("Playwright: clicking More button via JS click()")
+        # Use JS .click() instead of Playwright ElementHandle.click() — avoids the
+        # 5 s timeout that fires when LinkedIn re-renders and the handle goes stale.
+        clicked = await page.evaluate("el => { el.click(); return true; }", more_handle)
+        logger.info("Playwright: More JS click returned: %s", clicked)
         await page.wait_for_timeout(1500)
 
         # Log what opened to confirm the dropdown appeared
