@@ -243,25 +243,21 @@ async def _find_connect_button(page):
         # Find Connect link by vanityName from the current URL.
         # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
         # Scoping by vanityName avoids PYMK "Connect" links on the same page.
+        # Use JS .click() — getBoundingClientRect() returns (0,0) for dropdown items
+        # in headless mode (dropdown renders off-screen), so mouse coordinates fail.
         vanity = page.url.rstrip('/').split('/')[-1]
-        connect_rect = await page.evaluate(f"""
+        connect_clicked = await page.evaluate(f"""
             () => {{
                 const vanity = '{vanity}';
                 const link = document.querySelector('a[href*="custom-invite"][href*="' + vanity + '"]');
-                if (!link) return null;
-                const r = link.getBoundingClientRect();
-                return {{x: r.x + r.width/2, y: r.y + r.height/2}};
+                if (!link) return false;
+                link.click();
+                return true;
             }}
         """)
-        logger.info("Playwright: Connect link center for %s: %s", vanity, connect_rect)
+        logger.info("Playwright: Connect JS click for %s: %s", vanity, connect_clicked)
 
-        if connect_rect:
-            # Click Connect WITHOUT route intercept — /preload/custom-invite/ is handled
-            # by LinkedIn's SPA client-side (history.pushState), not a real navigation,
-            # so intercepting/aborting the request prevents the modal from opening.
-            await page.mouse.move(connect_rect['x'], connect_rect['y'])
-            await page.wait_for_timeout(150)
-            await page.mouse.click(connect_rect['x'], connect_rect['y'])
+        if connect_clicked:
             await page.wait_for_timeout(3000)
 
             # Use Playwright's bounding_box() (CDP-based) — works even when body has
