@@ -74,10 +74,10 @@ async def login_with_credentials(
         raise HTTPException(status_code=400, detail="email and password are required")
 
     try:
-        # No proxy for login — a rotating foreign IP triggers LinkedIn's device-verification.
-        # The pod's native datacenter IP is more consistent and less suspicious for auth.
+        from core.config import settings as _s
+        proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
         li_at, jsessionid, display_name, session_key = await linkedin_login_start(
-            body.email, body.password, proxy_url=None
+            body.email, body.password, proxy_url=proxy_url
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
