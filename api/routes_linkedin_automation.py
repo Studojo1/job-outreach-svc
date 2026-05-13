@@ -1,12 +1,28 @@
 """LinkedIn automation routes — email+password login, campaign CRUD, launch/pause, stats."""
 
 import logging
+import time as _time
+from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
+# Simple in-memory rate limiter for the login endpoint
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+_LOGIN_WINDOW = 600   # 10 minutes
+_LOGIN_MAX = 5        # max 5 attempts per window
+
+
+def _check_login_rate_limit(user_id: str):
+    now = _time.time()
+    recent = [t for t in _login_attempts[user_id] if now - t < _LOGIN_WINDOW]
+    _login_attempts[user_id] = recent
+    if len(recent) >= _LOGIN_MAX:
+        raise HTTPException(status_code=429, detail="Too many login attempts. Wait 10 minutes and try again.")
+    _login_attempts[user_id].append(now)
 
 from api.dependencies import get_current_user
 from database.models import (
@@ -76,6 +92,7 @@ async def login_with_credentials(
     """Step 1 — attempt login. Returns ok=True on success, or challenge_required=True + session_key if PIN needed."""
     if not body.email or not body.password:
         raise HTTPException(status_code=400, detail="email and password are required")
+    _check_login_rate_limit(current_user.id)
 
     try:
         from core.config import settings as _s
@@ -520,6 +537,29 @@ async def launch_campaign(
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected")
 
+    # Pre-flight: verify session is alive via Voyager through the residential proxy.
+    # This catches expired sessions before the daemon wastes a send attempt.
+    try:
+        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
+
+    try:
+        import httpx as _httpx
+        from services.linkedin_outreach.automation_service import _headers, _proxy
+        async with _httpx.AsyncClient(timeout=10, follow_redirects=False, **_proxy(token_row.proxy_session_id)) as _cl:
+            _r = await _cl.get(
+                "https://www.linkedin.com/voyager/api/me",
+                headers=_headers(li_at, jsessionid),
+            )
+        if _r.status_code in (401, 403):
+            raise HTTPException(status_code=401, detail="LinkedIn session expired. Please reconnect before launching.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Network/proxy error — allow launch; daemon will catch auth failures on first send
+
     c.status = "running"
     c.launched_at = c.launched_at or datetime.utcnow()
     c.updated_at = datetime.utcnow()
@@ -784,7 +824,7 @@ async def check_campaign_auth(
 
     try:
         decrypt(token_row.li_at_enc, token_row.nonce)
-        decrypt(token_row.jsessionid_enc, token_row.nonce)
+        decrypt_second(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
         if c.status == "running":
             c.status = "auth_failed"

@@ -5,12 +5,20 @@ import logging
 import random
 import re
 import threading
-from datetime import datetime, timedelta
+import time as _time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _is_ist_sending_window() -> bool:
+    """Return True if current UTC time falls within 9am–6pm IST (UTC+5:30)."""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    hour = datetime.now(ist).hour
+    return 9 <= hour < 18
 
 
 def _proxy(session_id: str | None = None) -> dict:
@@ -33,6 +41,12 @@ MAX_DAILY_REQUESTS = 25
 # Gap between each send (seconds)
 MIN_GAP_SECONDS = 90
 MAX_GAP_SECONDS = 240
+
+# Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
+_last_accept_check: dict[int, float] = {}
+_last_reply_check: dict[int, float] = {}
+_ACCEPT_INTERVAL = 14400  # 4 hours
+_REPLY_INTERVAL = 7200    # 2 hours
 
 
 # ── Voyager helpers ────────────────────────────────────────────────────────────
@@ -340,24 +354,6 @@ _ROLE_EXPANSION: dict[str, list[str]] = {
 }
 
 
-def _apollo_match_by_id(person_id: str) -> Optional[str]:
-    """Fetch LinkedIn URL for a single Apollo person ID. Free — no credits consumed."""
-    from services.shared.apollo_key_manager import apollo_post as _ap
-    try:
-        r = _ap(
-            "https://api.apollo.io/api/v1/people/match",
-            json={"id": person_id},
-            timeout=15,
-        )
-        if not r.ok:
-            return None
-        p = r.json().get("person") or {}
-        url = (p.get("linkedin_url") or "").strip()
-        return url if "/in/" in url else None
-    except Exception:
-        return None
-
-
 async def search_linkedin_leads_apollo(
     target_role: str,
     locations: list[str],
@@ -405,25 +401,19 @@ async def search_linkedin_leads_apollo(
         raw_people = data.get("people", [])
         logger.info("Apollo search: %d raw candidates for role=%r", len(raw_people), target_role)
 
-        # Step 2: enrich each person by ID to get their LinkedIn URL (free, no credits)
-        people = []
-        sem = asyncio.Semaphore(10)  # max 10 concurrent match calls
-
-        async def enrich(p: dict) -> Optional[dict]:
-            person_id = p.get("id")
-            if not person_id:
+        # Use the LinkedIn URL already present in Apollo search results — no people/match needed.
+        # people/match burns credits and is strictly prohibited by the project constraint.
+        def enrich(p: dict) -> Optional[dict]:
+            linkedin_url = (p.get("linkedin_url") or "").strip()
+            if not linkedin_url or "/in/" not in linkedin_url:
                 return None
-            first = p.get("first_name") or ""
-            org = p.get("organization") or {}
-            company = org.get("name", "") if isinstance(org, dict) else ""
-            async with sem:
-                linkedin_url = await asyncio.to_thread(_apollo_match_by_id, person_id)
-            if not linkedin_url:
-                return None
-            # Use matched data: might have full last name in match response
-            name = first.strip()
+            first = (p.get("first_name") or "").strip()
+            last = (p.get("last_name") or "").strip()
+            name = f"{first} {last}".strip()
             if not name:
                 return None
+            org = p.get("organization") or {}
+            company = org.get("name", "") if isinstance(org, dict) else ""
             return {
                 "name": name,
                 "headline": p.get("title") or "",
@@ -432,7 +422,7 @@ async def search_linkedin_leads_apollo(
                 "profile_image_url": p.get("photo_url"),
             }
 
-        results = await asyncio.gather(*[enrich(p) for p in raw_people])
+        results = [enrich(p) for p in raw_people]
         people = [r for r in results if r is not None][:limit]
         logger.info("Apollo search: %d leads with LinkedIn URLs from %d candidates", len(people), len(raw_people))
         return people
@@ -524,11 +514,36 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search for leads using Playwright browser (LinkedIn People search page)."""
+    """Search for leads. Tries lightweight Voyager HTTP first, Playwright browser as fallback."""
     from core.config import settings
     proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
+
+    # Voyager search via requests (no browser — ~100 KB vs ~2 MB for Playwright)
     try:
-        people = await _search_linkedin_leads_playwright(
+        people = await asyncio.to_thread(
+            _search_linkedin_leads_sync,
+            li_at=li_at,
+            jsessionid=jsessionid,
+            target_role=target_role,
+            locations=locations,
+            industries=industries,
+            keywords=keywords,
+            limit=limit,
+            proxy_url=proxy_url or "",
+        )
+        if people:
+            logger.info("Voyager sync search found %d leads", len(people))
+            return people
+        logger.info("Voyager sync search returned 0 results — falling back to Playwright")
+    except Exception as e:
+        logger.warning("Voyager sync search failed: %s — falling back to Playwright", e)
+
+    if not proxy_url:
+        logger.warning("No proxy configured — skipping Playwright lead search fallback")
+        return []
+
+    try:
+        return await _search_linkedin_leads_playwright(
             li_at=li_at,
             jsessionid=jsessionid,
             target_role=target_role,
@@ -538,10 +553,8 @@ async def search_linkedin_leads(
             limit=limit,
             proxy_url=proxy_url,
         )
-        if people:
-            return people
     except Exception as e:
-        logger.error("Playwright lead search failed: %s", e)
+        logger.error("Playwright lead search also failed: %s", e)
     return []
 
 
@@ -815,8 +828,8 @@ class LinkedInAutomationDaemon:
 
         remaining_today = campaign.daily_limit - sent_today
 
-        # Phase 1: send pending connection requests
-        if remaining_today > 0:
+        # Phase 1: send pending connection requests (IST business hours only)
+        if remaining_today > 0 and _is_ist_sending_window():
             pending = (
                 db.query(LinkedInConnectionRequest)
                 .filter(
@@ -830,12 +843,12 @@ class LinkedInAutomationDaemon:
             first_in_batch = True
             for req in pending:
                 # Sleep between sends but NOT before the very first attempt —
-                # this way auth failures surface immediately on the first tick.
+                # auth failures surface immediately on the first tick.
                 if not first_in_batch:
                     await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
                 first_in_batch = False
 
-                # Resolve URN if we don't have it
+                # Resolve URN via Voyager (~20 KB) before sending
                 if not req.profile_urn:
                     try:
                         urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
@@ -854,26 +867,21 @@ class LinkedInAutomationDaemon:
                         db.commit()
                         continue
 
+                # Send via Voyager HTTP — no Playwright browser overhead
                 try:
-                    from services.linkedin_outreach.playwright_service import playwright_send_invitation
-                    from core.config import settings as _s
-                    proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
-                    pw_result = await playwright_send_invitation(
-                        li_at, jsessionid, req.profile_url, req.connection_note or "", proxy_url, req.profile_urn
+                    ok = await send_connection_request(
+                        li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
                     )
-                    ok = pw_result.get("ok", False)
-                    if pw_result.get("profile_urn"):
-                        req.profile_urn = pw_result["profile_urn"]
                 except LinkedInAuthError:
-                    # Session expired — pause campaign so user knows to reconnect
-                    logger.warning("Campaign %d: LinkedIn session expired, pausing", campaign.id)
+                    logger.warning("Campaign %d: LinkedIn session expired, marking auth_failed", campaign.id)
                     campaign.status = "auth_failed"
                     campaign.updated_at = datetime.utcnow()
                     db.commit()
                     return
-                except Exception as pw_err:
-                    logger.warning("Campaign %d: Playwright send error for %s: %s", campaign.id, req.profile_url, pw_err)
+                except Exception as send_err:
+                    logger.warning("Campaign %d: send error for %s: %s", campaign.id, req.profile_url, send_err)
                     ok = False
+
                 if ok:
                     req.status = "sent"
                     req.sent_at = datetime.utcnow()
@@ -883,16 +891,18 @@ class LinkedInAutomationDaemon:
                     req.error = "Send failed"
                 req.updated_at = datetime.utcnow()
                 db.commit()
+        elif remaining_today > 0:
+            logger.debug("Campaign %d: outside IST sending window, skipping Phase 1", campaign.id)
 
-        # Phase 2: check for accepted connections → send follow-up
-        # Only run every 4 hours to avoid hammering the Voyager API
+        # Phase 2: check accepted connections → send follow-up (every 4h, independent timer)
+        now_ts = _time.monotonic()
         should_check_accepted = (
-            campaign.updated_at is None
-            or (datetime.utcnow() - campaign.updated_at).total_seconds() >= 14400
-            or campaign.total_sent > 0 and campaign.total_accepted == 0  # first acceptance pass
+            now_ts - _last_accept_check.get(campaign.id, 0) >= _ACCEPT_INTERVAL
+            or (campaign.total_sent > 0 and campaign.total_accepted == 0)
         )
 
         if should_check_accepted:
+            _last_accept_check[campaign.id] = now_ts
             sent_requests = (
                 db.query(LinkedInConnectionRequest)
                 .filter(
@@ -907,7 +917,11 @@ class LinkedInAutomationDaemon:
             for req in sent_requests:
                 if not req.profile_urn:
                     continue
-                accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
+                try:
+                    accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
+                except Exception as e:
+                    logger.warning("Campaign %d: acceptance check error for %s: %s", campaign.id, req.profile_urn, e)
+                    continue
                 if accepted:
                     req.status = "accepted"
                     req.accepted_at = datetime.utcnow()
@@ -926,11 +940,8 @@ class LinkedInAutomationDaemon:
                             campaign.total_followups_sent += 1
                             db.commit()
 
-        # Phase 3: detect replies — only every 2 hours to reduce proxy data usage
-        should_check_replies = (
-            campaign.updated_at is None
-            or (datetime.utcnow() - campaign.updated_at).total_seconds() >= 7200
-        )
+        # Phase 3: detect replies — independent 2h timer so it runs even when Phase 2 is cooling down
+        should_check_replies = (now_ts - _last_reply_check.get(campaign.id, 0) >= _REPLY_INTERVAL)
 
         followup_reqs = (
             db.query(LinkedInConnectionRequest)
@@ -944,6 +955,7 @@ class LinkedInAutomationDaemon:
         )
 
         if should_check_replies and followup_reqs:
+            _last_reply_check[campaign.id] = now_ts
             urn_to_req = {r.profile_urn: r for r in followup_reqs}
             try:
                 async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
@@ -954,13 +966,26 @@ class LinkedInAutomationDaemon:
                     )
                 if inbox_res.status_code == 200:
                     data = inbox_res.json()
-                    for conv in data.get("data", {}).get("elements", []):
+                    # Voyager normalises: conversations are in data.elements,
+                    # and in some response shapes directly in included.
+                    convs = (
+                        data.get("data", {}).get("elements", [])
+                        or data.get("included", [])
+                    )
+                    for conv in convs:
                         last_ms = conv.get("lastActivityAt", 0)
                         if not last_ms:
                             continue
                         last_dt = datetime.utcfromtimestamp(last_ms / 1000)
-                        for p_ref in conv.get("*participants", []):
-                            purn = str(p_ref).split("fsd_profile:")[-1].split(")")[0].strip()
+
+                        # Participants come as a list of URN strings or reference objects
+                        participants = conv.get("participants") or conv.get("*participants") or []
+                        for p_ref in participants:
+                            p_str = str(p_ref)
+                            if "fsd_profile:" in p_str:
+                                purn = p_str.split("fsd_profile:")[-1].split(")")[0].strip().strip('"')
+                            else:
+                                purn = p_str.strip().strip('"')
                             req = urn_to_req.get(purn)
                             if req and req.followup_sent_at and last_dt > req.followup_sent_at:
                                 req.status = "replied"
@@ -970,6 +995,7 @@ class LinkedInAutomationDaemon:
                                 break
             except Exception as e:
                 logger.warning("Campaign %d: reply check failed: %s", campaign.id, e)
+
         campaign.updated_at = datetime.utcnow()
 
 
