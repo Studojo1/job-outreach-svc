@@ -116,7 +116,6 @@ def evaluate_probe_with_llm(
                 {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0,
             max_completion_tokens=600,
         )
         raw = (response.choices[0].message.content or "").strip()

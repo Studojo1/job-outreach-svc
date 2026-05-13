@@ -91,7 +91,6 @@ def extract_resume_profile(
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
-        temperature=0,
         max_completion_tokens=600,
     )
 
@@ -211,7 +210,6 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
             {"role": "system", "content": _ENHANCED_SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
-        temperature=0,
         max_completion_tokens=1200,
     )
 

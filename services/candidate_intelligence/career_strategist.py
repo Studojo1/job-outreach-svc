@@ -253,7 +253,6 @@ def run_career_strategist(
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            temperature=0,
             max_completion_tokens=1200,
         )
         raw_text = (response.choices[0].message.content or "").strip()

@@ -124,7 +124,6 @@ def _call_llm_batch(companies: list[dict], candidate_context: str) -> dict[str, 
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        temperature=0,
         max_completion_tokens=600,
     )
     raw = (response.choices[0].message.content or "").strip()
