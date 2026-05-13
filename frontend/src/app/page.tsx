@@ -162,9 +162,11 @@ export default function LinkedInOnboardingPage() {
   const [connectLoading, setConnectLoading] = useState(false);
   const [connectError, setConnectError] = useState('');
   const [challengeRequired, setChallengeRequired] = useState(false);
+  const [challengeType, setChallengeType] = useState<'pin' | 'phone_tap'>('pin');
   const [sessionKey, setSessionKey] = useState('');
   const [pin, setPin] = useState('');
   const [pinLoading, setPinLoading] = useState(false);
+  const [phoneTapLoading, setPhoneTapLoading] = useState(false);
   const [loginTab, setLoginTab] = useState<'password' | 'cookies'>('password');
   const [liAtCookie, setLiAtCookie] = useState('');
   const [jsessionidCookie, setJsessionidCookie] = useState('');
@@ -275,6 +277,7 @@ export default function LinkedInOnboardingPage() {
       const res = await api.post('/linkedin/automation/login', { email: liEmail, password: liPassword });
       if (res.data.challenge_required) {
         setSessionKey(res.data.session_key);
+        setChallengeType(res.data.challenge_type === 'phone_tap' ? 'phone_tap' : 'pin');
         setChallengeRequired(true);
         return;
       }
@@ -297,6 +300,24 @@ export default function LinkedInOnboardingPage() {
       setConnectError(err.response?.data?.detail || 'Incorrect code. Please try again.');
     } finally {
       setPinLoading(false);
+    }
+  };
+
+  const handleCheckPhoneTap = async () => {
+    setPhoneTapLoading(true);
+    setConnectError('');
+    try {
+      const res = await api.post('/linkedin/automation/login/check-phone-tap', { session_key: sessionKey });
+      if (res.data.still_waiting) {
+        setConnectError('Not approved yet — tap "Yes" on your phone first, then click Continue.');
+        return;
+      }
+      setChallengeRequired(false);
+      await proceedAfterLogin();
+    } catch (err: any) {
+      setConnectError(err.response?.data?.detail || 'Session expired. Please log in again.');
+    } finally {
+      setPhoneTapLoading(false);
     }
   };
 
@@ -610,12 +631,14 @@ export default function LinkedInOnboardingPage() {
               </div>
               <div>
                 <h2 className="text-xl font-bold">
-                  {challengeRequired ? 'Check your email' : 'Connect your LinkedIn'}
+                  {!challengeRequired ? 'Connect your LinkedIn' : challengeType === 'phone_tap' ? 'Check your phone' : 'Check your email'}
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {challengeRequired
-                    ? `LinkedIn sent a verification code to ${liEmail}`
-                    : "We'll search for leads and send requests on your behalf."}
+                  {!challengeRequired
+                    ? "We'll search for leads and send requests on your behalf."
+                    : challengeType === 'phone_tap'
+                    ? 'LinkedIn sent a notification to your phone'
+                    : `LinkedIn sent a verification code to ${liEmail}`}
                 </p>
               </div>
             </div>
@@ -700,6 +723,47 @@ export default function LinkedInOnboardingPage() {
                     </div>
                   </div>
                 </details>
+              </>
+            ) : challengeType === 'phone_tap' ? (
+              <>
+                <div className="bg-white border border-border rounded-2xl p-5 space-y-4 mb-5">
+                  <div className="text-center py-3 space-y-3">
+                    <div className="w-14 h-14 bg-[#0077B5]/10 rounded-full flex items-center justify-center mx-auto">
+                      <Linkedin className="w-7 h-7 text-[#0077B5]" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-foreground">Open your LinkedIn app</p>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Tap <strong>"Yes, it&apos;s me"</strong> on the notification, then click Continue below.
+                      </p>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-700 text-left space-y-1">
+                      <p>1. Check your phone for a LinkedIn notification</p>
+                      <p>2. Tap <strong>Yes, it&apos;s me</strong> to approve the sign-in</p>
+                      <p>3. Come back here and click <strong>Continue</strong></p>
+                    </div>
+                  </div>
+
+                  {connectError && (
+                    <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>{connectError}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => { setChallengeRequired(false); setConnectError(''); }}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+                  >
+                    <ChevronLeft className="w-4 h-4" /> Back
+                  </button>
+                  <Button onClick={handleCheckPhoneTap} disabled={phoneTapLoading}>
+                    {phoneTapLoading ? 'Checking...' : 'I approved it — Continue'}
+                    <ChevronRight className="w-4 h-4 ml-1" />
+                  </Button>
+                </div>
               </>
             ) : (
               <>

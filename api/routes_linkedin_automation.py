@@ -18,7 +18,7 @@ from database.models import (
 from database.session import get_db
 from services.linkedin_outreach.automation_service import search_linkedin_leads
 from services.linkedin_outreach.crypto import decrypt, encrypt_pair
-from services.linkedin_outreach.login import linkedin_login_start, linkedin_verify_pin
+from services.linkedin_outreach.login import linkedin_check_phone_tap, linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,10 @@ class LinkedInLoginRequest(BaseModel):
 class LinkedInVerifyPinRequest(BaseModel):
     session_key: str
     pin: str
+
+
+class LinkedInCheckPhoneTapRequest(BaseModel):
+    session_key: str
 
 
 def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: str | None):
@@ -106,6 +110,26 @@ async def verify_pin(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    _store_token(db, current_user.id, li_at, jsessionid, display_name)
+    return {"ok": True, "linkedin_name": display_name}
+
+
+@router.post("/login/check-phone-tap")
+async def check_phone_tap(
+    body: LinkedInCheckPhoneTapRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll whether the user approved the phone notification. Returns ok=True when approved."""
+    if not body.session_key:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    try:
+        result = await linkedin_check_phone_tap(body.session_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result is None:
+        return {"ok": False, "still_waiting": True}
+    li_at, jsessionid, display_name = result
     _store_token(db, current_user.id, li_at, jsessionid, display_name)
     return {"ok": True, "linkedin_name": display_name}
 
