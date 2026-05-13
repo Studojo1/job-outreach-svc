@@ -110,23 +110,8 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
 
-    # Company Intelligence — LLM evaluates each unique company against the candidate profile.
-    # Batched (15 per call), cached by company domain. Produces company_fit_scores dict.
-    from services.lead_scoring.company_intelligence_service import evaluate_company_fit
-    candidate_prefs_for_intel = {
-        "company_stage": [prefs.get("company_stage", "any")],
-        "niche_keywords": prefs.get("niche_keywords", []),
-        "preferred_roles": preferred_roles,
-        "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
-        "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
-    }
-    try:
-        company_fit_scores = evaluate_company_fit(lead_dicts, candidate_prefs_for_intel, db)
-        logger.info("[SCORE_BG] Company intelligence: %d companies evaluated", len(company_fit_scores))
-    except Exception as ci_err:
-        logger.warning("[SCORE_BG] Company intelligence failed (%s) — scoring without it", ci_err)
-        company_fit_scores = {}
-
+    # ── Phase 1: Heuristic scoring across all leads ──────────────────────────
+    # Fast, no LLM calls. Run on all leads, commit immediately.
     from services.lead_scoring.lead_scoring_service import score_and_select_leads as score_leads_svc
     scored = score_leads_svc(
         leads=lead_dicts,
@@ -134,11 +119,9 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         role_intelligence=role_intelligence,
         target_count=len(lead_dicts),
         dream_companies=candidate.dream_companies or [],
-        company_fit_scores=company_fit_scores,
+        company_fit_scores={},  # empty — company intel runs on top-K below
     )
 
-    # Build LeadScore rows in memory first so we can attach justification_json
-    # to the top-K before commit.
     score_rows: dict[int, LeadScore] = {}
     fallback_explanation = f"Scored against {', '.join(preferred_roles[:3])} (seniority={candidate_seniority})"
     count = 0
@@ -160,10 +143,45 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         score_rows[lead_id] = ls
         count += 1
 
-    # Commit heuristic scores now so they're durable regardless of what the
-    # LLM justification pipeline does. Connection drops during web research
-    # used to roll back all scores together with the justification.
+    # Commit heuristic scores immediately — durable regardless of what LLM phases do.
     db.commit()
+    logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
+
+    # ── Phase 2: Company intelligence on top-200 only ────────────────────────
+    # Running on all 500 leads produces ~400 unique companies → 30 LLM batches
+    # and causes DB connection timeouts. Top-200 covers the visible results with
+    # ~120 unique companies → ~8 batches, completes in ~20s.
+    COMPANY_INTEL_TOP_K = 200
+    top_for_intel = sorted(scored, key=lambda ld: ld.get("score", 0), reverse=True)[:COMPANY_INTEL_TOP_K]
+
+    from services.lead_scoring.company_intelligence_service import evaluate_company_fit
+    candidate_prefs_for_intel = {
+        "company_stage": [prefs.get("company_stage", "any")],
+        "niche_keywords": prefs.get("niche_keywords", []),
+        "preferred_roles": preferred_roles,
+        "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
+        "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
+    }
+    try:
+        company_fit_scores = evaluate_company_fit(top_for_intel, candidate_prefs_for_intel, db)
+        logger.info("[SCORE_BG] Phase 2 done: company intel on %d companies", len(company_fit_scores))
+        # Apply company fit deltas to existing score rows
+        for ld in top_for_intel:
+            name_lower = (ld.get("company") or "").lower()
+            fit = company_fit_scores.get(name_lower)
+            if fit is None:
+                continue
+            row = score_rows.get(ld.get("id"))
+            if row is None:
+                continue
+            # Normalise 1-10 fit score → 0-15 pts, apply as adjustment
+            fit_pts = round((fit - 1) / 9 * 15)
+            current = row.overall_score or 0
+            row.overall_score = max(0, min(100, current + fit_pts - 7))  # -7 = neutral baseline
+        db.commit()
+        logger.info("[SCORE_BG] Phase 2 score adjustments committed")
+    except Exception as ci_err:
+        logger.warning("[SCORE_BG] Company intelligence failed (%s) — keeping heuristic scores", ci_err)
 
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
@@ -171,7 +189,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     # score bucket — they have richer signal and produce better justifications.
     top_leads = sorted(
         [ld for ld in scored if ld.get("id") in score_rows],
-        key=lambda ld: (ld.get("score", 0), 1 if ld.get("company_domain") else 0),
+        key=lambda ld: (score_rows[ld["id"]].overall_score or 0, 1 if ld.get("company_domain") else 0),
         reverse=True,
     )[:JUSTIFY_TOP_K]
 
