@@ -54,7 +54,7 @@ Return only the message text, nothing else."""
         response = await client.chat.completions.create(
             model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=120,
+            max_completion_tokens=120,
             temperature=0.85,
         )
         message = response.choices[0].message.content or ""

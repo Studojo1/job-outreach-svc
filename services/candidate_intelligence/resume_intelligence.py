@@ -92,7 +92,7 @@ def extract_resume_profile(
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
         temperature=0,
-        max_tokens=600,
+        max_completion_tokens=600,
     )
 
     raw = response.choices[0].message.content or ""
@@ -212,7 +212,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
         temperature=0,
-        max_tokens=1200,
+        max_completion_tokens=1200,
     )
 
     raw = response.choices[0].message.content or ""

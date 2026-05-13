@@ -125,7 +125,7 @@ def _call_llm_batch(companies: list[dict], candidate_context: str) -> dict[str, 
             {"role": "user", "content": user_content},
         ],
         temperature=0,
-        max_tokens=600,
+        max_completion_tokens=600,
     )
     raw = (response.choices[0].message.content or "").strip()
     if raw.startswith("```"):

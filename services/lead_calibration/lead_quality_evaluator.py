@@ -117,7 +117,7 @@ def evaluate_probe_with_llm(
                 {"role": "user", "content": user_content},
             ],
             temperature=0,
-            max_tokens=600,
+            max_completion_tokens=600,
         )
         raw = (response.choices[0].message.content or "").strip()
         # Strip markdown fences if the model included them anyway
