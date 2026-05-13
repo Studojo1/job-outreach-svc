@@ -28,21 +28,12 @@ async def linkedin_login_start(
 
     proxy = _parse_proxy(proxy_url) if proxy_url else None
 
-    # Try with proxy first; fall back to direct if proxy times out
-    proxies_to_try = [proxy, None] if proxy else [None]
-
-    last_error: Exception | None = None
-    for attempt_proxy in proxies_to_try:
-        try:
-            result = await _linkedin_login_attempt(email, password, attempt_proxy)
-            return result
-        except Exception as e:
-            last_error = e
-            if attempt_proxy is not None and "Timeout" in str(e):
-                logger.warning("Login proxy timed out, retrying without proxy")
-                continue
-            raise
-    raise last_error  # type: ignore
+    try:
+        return await _linkedin_login_attempt(email, password, proxy)
+    except ValueError as e:
+        if "Timeout" in str(e):
+            raise ValueError("Connection timed out. The proxy may be slow — please try again in a few seconds.")
+        raise
 
 
 async def _linkedin_login_attempt(
@@ -73,7 +64,7 @@ async def _linkedin_login_attempt(
         page = await ctx.new_page()
 
         try:
-            await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60000)
+            await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=90000)
             await page.wait_for_timeout(1500)
 
             await page.fill("#username", email)
