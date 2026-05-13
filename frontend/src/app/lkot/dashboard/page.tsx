@@ -65,7 +65,7 @@ export default function LinkedInDashboardPage() {
   }, [campaignId]);
 
   useEffect(() => {
-    if (!campaignId) { router.push('/linkedin'); return; }
+    if (!campaignId) { router.push('/lkot'); return; }
     fetchAll();
     const interval = setInterval(fetchAll, 30000);
     return () => clearInterval(interval);
@@ -110,7 +110,7 @@ export default function LinkedInDashboardPage() {
         <div className="flex items-start justify-between mb-8">
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <button onClick={() => router.push('/linkedin')} className="text-sm text-muted-foreground hover:text-foreground">
+              <button onClick={() => router.push('/lkot')} className="text-sm text-muted-foreground hover:text-foreground">
                 ← Campaigns
               </button>
             </div>
