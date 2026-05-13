@@ -119,7 +119,6 @@ def research_company(name: str, domain: Optional[str] = None) -> Optional[dict]:
         "input": prompt,
         "max_output_tokens": _MAX_OUTPUT_TOKENS,
         "tools": [{"type": "web_search_preview"}],
-        "reasoning": {"effort": "low"},
     }
 
     try:
