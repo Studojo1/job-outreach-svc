@@ -24,10 +24,33 @@ async def linkedin_login_start(
     On challenge: li_at/jsessionid are None, session_key is set.
     Raises ValueError on bad credentials or unrecoverable error.
     """
-    from playwright.async_api import async_playwright
     from services.linkedin_outreach.playwright_service import _parse_proxy
 
     proxy = _parse_proxy(proxy_url) if proxy_url else None
+
+    # Try with proxy first; fall back to direct if proxy times out
+    proxies_to_try = [proxy, None] if proxy else [None]
+
+    last_error: Exception | None = None
+    for attempt_proxy in proxies_to_try:
+        try:
+            result = await _linkedin_login_attempt(email, password, attempt_proxy)
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt_proxy is not None and "Timeout" in str(e):
+                logger.warning("Login proxy timed out, retrying without proxy")
+                continue
+            raise
+    raise last_error  # type: ignore
+
+
+async def _linkedin_login_attempt(
+    email: str,
+    password: str,
+    proxy,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -50,7 +73,7 @@ async def linkedin_login_start(
         page = await ctx.new_page()
 
         try:
-            await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
+            await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(1500)
 
             await page.fill("#username", email)
