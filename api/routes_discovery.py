@@ -22,10 +22,11 @@ from api.dependencies import get_current_user
 from core.analytics import capture
 
 # Top-K leads that get the full enrichment + LLM justification pass.
-# 100 leads (~25 batches of 4 in parallel pool of 10 = 3 sequential rounds
-# = ~30s extra). Worth the cost: every justified lead gets a tailored
-# explanation instead of falling back to the generic FlashCard heuristic.
-JUSTIFY_TOP_K = 500
+# Justify ALL collected leads (800). The LLM's signal_strength output is the
+# real quality filter — the frontend hides "low" signal leads so the user only
+# sees high+medium (~500 of the 800). Collecting 800 gives us a buffer so
+# after filtering we still have ~500 genuinely good leads.
+JUSTIFY_TOP_K = 800
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def _launch_web_research_bg(top_companies: list) -> None:
 
 class DiscoveryRequest(BaseModel):
     candidate_id: int
-    target_leads: int = 500
+    target_leads: int = 800
     filters: Optional[LeadFilter] = None
 
 
@@ -430,10 +431,11 @@ async def search_leads(
 ):
     """Execute lead discovery based on candidate profile."""
     t_start = time.perf_counter()
-    # Hard minimum: always retrieve at least 500 leads for a usable pool
-    if request.target_leads < 500:
-        logger.info(f"[DISCOVERY] target_leads={request.target_leads} below minimum, enforcing 500")
-        request.target_leads = 500
+    # Hard minimum: always retrieve at least 800 leads so after LLM filtering
+    # the user still sees ~500 high+medium signal leads.
+    if request.target_leads < 800:
+        logger.info(f"[DISCOVERY] target_leads={request.target_leads} below minimum, enforcing 800")
+        request.target_leads = 800
     logger.info(f"[DISCOVERY] POST /discovery/search — candidate_id={request.candidate_id}, target={request.target_leads}")
     capture("lead_discovery_started", str(current_user.id), {
         "candidate_id": request.candidate_id,
@@ -664,9 +666,9 @@ async def scoring_ready(
         .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
         .count()
     )
-    # Ready when scored and either: (a) 85%+ of scored leads have bullets,
-    # or (b) at least 300 bullets exist (handles pod-restart partial completion).
-    bullet_threshold = max(1, min(scored, int(scored * 0.85)))
+    # Ready when 90%+ of leads are scored AND 80%+ of scored leads have bullets.
+    # 80% threshold (not 85%) gives headroom for LLM batch failures across 800 leads.
+    bullet_threshold = max(1, int(scored * 0.80))
     ready = scored >= max(1, total * 0.9) and with_bullets >= bullet_threshold
     return {
         "ready": ready,
