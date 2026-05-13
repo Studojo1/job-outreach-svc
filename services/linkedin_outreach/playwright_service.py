@@ -260,37 +260,14 @@ async def _find_connect_button(page):
         logger.info("Playwright: Connect href for %s: %s", vanity, connect_href)
 
         if connect_href:
+            # Navigate directly to the invite URL — the SPA router opens the modal.
+            # Do NOT click Send here; let the outer playwright_send_invitation handle it
+            # so ok=True is only set after confirmed Send click + API interception.
             logger.info("Playwright: navigating to Connect href directly")
             await page.goto(connect_href, wait_until="domcontentloaded", timeout=20000)
             logger.info("Playwright: after goto Connect href, url=%s", page.url)
-            await page.wait_for_timeout(3000)
-
-            # Use Playwright's bounding_box() (CDP-based) — works even when body has
-            # overflow:hidden set by the modal, which breaks offsetParent and
-            # getBoundingClientRect() for elements inside the React portal.
-            send_locator = page.locator(
-                'button:has-text("Send without"), '
-                'button:has-text("Send now"), '
-                'button:has-text("Send invite")'
-            ).first
-            try:
-                bbox = await send_locator.bounding_box(timeout=6000)
-                logger.info("Playwright: Send button bbox: %s", bbox)
-                if bbox:
-                    sx = bbox['x'] + bbox['width'] / 2
-                    sy = bbox['y'] + bbox['height'] / 2
-                    await page.mouse.move(sx, sy)
-                    await page.wait_for_timeout(150)
-                    await page.mouse.click(sx, sy)
-                    await page.wait_for_timeout(1000)
-                    logger.info("Playwright: Send without a note clicked — invite sent")
-                    return "DROPDOWN_CONNECT_CLICKED"
-                else:
-                    logger.info("Playwright: Send button bbox None — modal may not have opened")
-                    return "DROPDOWN_CONNECT_CLICKED"
-            except Exception as e:
-                logger.info("Playwright: Send button error: %s", e)
-                return "DROPDOWN_CONNECT_CLICKED"
+            await page.wait_for_timeout(1500)
+            return "DROPDOWN_CONNECT_CLICKED"
 
         logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
         await page.keyboard.press("Escape")
