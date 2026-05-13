@@ -811,13 +811,6 @@ def build_question_sequence(state: dict) -> list[dict]:
     if clarity in ("medium", "high"):
         sequence.append(_build_niche_question(resume_profile))
 
-    # Tech stack — asked for high clarity AND technical cluster
-    if clarity == "high":
-        cluster = _detect_role_cluster(answers, resume_profile)
-        ts_q = _build_tech_stack_question(cluster)
-        if ts_q is not None:
-            sequence.append(ts_q)
-
     # Flex (email-fuel) questions — always asked, role-adaptive copy
     flex_key = _flex_copy_key(answers, resume_profile)
     sequence.append(_build_flex_project_question(flex_key, resume_profile))
