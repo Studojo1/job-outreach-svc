@@ -142,18 +142,22 @@ def bulk_enrich_top_companies(
     db: Session,
     companies: Iterable[Any],
     enable_scrape: bool = True,
+    enable_llm_research: bool = True,
 ) -> Dict[str, CompanyProfile]:
-    """Enrich every company in the input via LLM web search.
+    """Enrich every company in the input via cache + optional LLM web search.
 
     Accepts two input shapes (back-compatible):
       - List of domain strings (legacy)
       - List of {"domain": str|None, "name": str|None} dicts (new)
 
-    Cache strategy (fixes the previous null-domain cache-miss bug):
+    Cache strategy:
       1. If domain is known → check CompanyProfile by domain (30-day TTL)
       2. If only name is known → check CompanyProfile by normalised name field
-      3. Cache miss → call LLM web search, which also discovers the domain
+      3. Cache miss → call LLM web search only if enable_llm_research=True
       4. Persist by resolved domain; register name alias for caller lookup
+
+    Set enable_llm_research=False and enable_scrape=False for cache-only mode
+    (scoring pipeline uses this to stay fast; web research runs separately).
 
     Returns {key: CompanyProfile} where key is domain OR original name.
     """
@@ -221,7 +225,7 @@ def bulk_enrich_top_companies(
     )
 
     # ── Phase 2: LLM web search for cache misses (parallel) ─────────────────
-    if to_research:
+    if to_research and enable_llm_research:
         research_results = research_companies_bulk(to_research)
         llm_ok = 0
         for input_key, facts in research_results.items():

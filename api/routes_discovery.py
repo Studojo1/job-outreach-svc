@@ -32,6 +32,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
 
 
+def _launch_web_research_bg(top_companies: list) -> None:
+    """Spawn a daemon thread to run LLM web research for uncached companies.
+
+    Runs after justification is committed so it never blocks the scoring pipeline.
+    Populates CompanyProfile cache so the next run for any of these companies
+    gets company-specific bullets instead of generic ones.
+    """
+    import threading
+    from services.company_intelligence.company_enrichment_service import bulk_enrich_top_companies
+
+    def _run():
+        db = SessionLocal()
+        try:
+            bulk_enrich_top_companies(db, top_companies, enable_scrape=False, enable_llm_research=True)
+            db.commit()
+        except Exception as exc:
+            logger.warning("[WEB_RESEARCH_BG] failed: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    logger.info("[WEB_RESEARCH_BG] launched for %d companies", len(top_companies))
+
+
 class DiscoveryRequest(BaseModel):
     candidate_id: int
     target_leads: int = 500
@@ -210,7 +239,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
                         unique_count, len(top_leads))
 
-            profiles = bulk_enrich_top_companies(db, top_companies, enable_scrape=True)
+            # Cache-only: don't block scoring on LLM web search.
+            # Web research runs as a daemon thread after justification completes.
+            profiles = bulk_enrich_top_companies(
+                db, top_companies, enable_scrape=False, enable_llm_research=False
+            )
             company_payloads = {d: profile_to_llm_dict(p) for d, p in profiles.items()}
 
             # Backfill discovered domains onto Lead rows so subsequent runs
@@ -283,6 +316,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                     row.justification_json = payload
             logger.info("[JUSTIFY] attached %d/%d justifications to top-K LeadScores",
                         len(justifications), len(top_leads))
+
+            # Kick off LLM web research for uncached companies in a daemon thread.
+            # This populates the cache so subsequent runs get company-specific bullets.
+            _launch_web_research_bg(top_companies)
+
         except Exception as e:
             logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)
             try:
