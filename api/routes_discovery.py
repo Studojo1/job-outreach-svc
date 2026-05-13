@@ -623,15 +623,22 @@ async def search_leads(
             "collection_duration_seconds": duration,
         })
 
+        # Close the request DB session before synchronous scoring — it would time
+        # out if held open for the 2-3 min scoring duration. Scoring opens its own
+        # session. candidate.id and current_user.id are already captured above.
+        _candidate_id = candidate.id
+        _user_id = str(current_user.id)
+        db.close()
+
         # Phase 1 (heuristic) + Phase 3 (justification) run synchronously here
         # so leads arrive with bullets already attached.
         # Phase 2 (company intel score adjustments) runs in background afterward.
         scored_count = 0
         if count > 0:
             scored_count = await asyncio.to_thread(
-                _score_candidate_leads_sync, candidate.id, str(current_user.id)
+                _score_candidate_leads_sync, _candidate_id, _user_id
             )
-            background_tasks.add_task(_run_company_intel_bg, candidate.id)
+            background_tasks.add_task(_run_company_intel_bg, _candidate_id)
 
         return {"status": "success", "leads_collected": count, "leads_scored": scored_count, "scoring_async": False}
     except Exception as e:
