@@ -160,6 +160,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         score_rows[lead_id] = ls
         count += 1
 
+    # Commit heuristic scores now so they're durable regardless of what the
+    # LLM justification pipeline does. Connection drops during web research
+    # used to roll back all scores together with the justification.
+    db.commit()
+
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
     # Tiebreaker: leads with a known company_domain rank first within the same
