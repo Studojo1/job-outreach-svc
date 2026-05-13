@@ -25,7 +25,7 @@ from core.analytics import capture
 # 100 leads (~25 batches of 4 in parallel pool of 10 = 3 sequential rounds
 # = ~30s extra). Worth the cost: every justified lead gets a tailored
 # explanation instead of falling back to the generic FlashCard heuristic.
-JUSTIFY_TOP_K = 100
+JUSTIFY_TOP_K = 500
 
 logger = logging.getLogger(__name__)
 
@@ -176,45 +176,6 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
 
-    # ── Phase 2: Company intelligence on all 500 leads ───────────────────────
-    # Safe to run on full set now that Phase 1 committed scores independently.
-    # ~400 unique companies → ~27 gpt-4o batches of 15 → ~60s. Uses only Apollo
-    # metadata (industry, size, description) — no web search.
-    top_for_intel = scored
-
-    from services.lead_scoring.company_intelligence_service import evaluate_company_fit
-    candidate_prefs_for_intel = {
-        "company_stage": [prefs.get("company_stage", "any")],
-        "niche_keywords": prefs.get("niche_keywords", []),
-        "preferred_roles": preferred_roles,
-        "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
-        "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
-    }
-    try:
-        company_fit_scores = evaluate_company_fit(top_for_intel, candidate_prefs_for_intel, db)
-        logger.info("[SCORE_BG] Phase 2 done: company intel on %d companies", len(company_fit_scores))
-        # Apply company fit deltas to existing score rows
-        for ld in top_for_intel:
-            name_lower = (ld.get("company") or "").lower()
-            fit = company_fit_scores.get(name_lower)
-            if fit is None:
-                continue
-            row = score_rows.get(ld.get("id"))
-            if row is None:
-                continue
-            # Normalise 1-10 fit score → 0-15 pts, apply as adjustment
-            fit_pts = round((fit - 1) / 9 * 15)
-            current = row.overall_score or 0
-            row.overall_score = max(0, min(100, current + fit_pts - 7))  # -7 = neutral baseline
-        db.commit()
-        logger.info("[SCORE_BG] Phase 2 score adjustments committed")
-    except Exception as ci_err:
-        logger.warning("[SCORE_BG] Company intelligence failed (%s) — keeping heuristic scores", ci_err)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
     # Tiebreaker: leads with a known company_domain rank first within the same
@@ -339,20 +300,21 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     return count
 
 
-def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
-    """Background-task wrapper that opens its own DB session for scoring.
+def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
+    """Opens its own DB session, runs Phase 1 (heuristic) + Phase 3 (justification).
 
-    Runs after the HTTP response has been sent so the client isn't blocked
-    by the slow company-enrichment + LLM-justification pipeline.
+    Called via asyncio.to_thread from the search endpoint so scoring completes
+    before the HTTP response is returned — leads arrive with bullets already attached.
+    Phase 2 (company intel) runs separately in background afterward.
     """
     db = SessionLocal()
     try:
         candidate = db.query(Candidate).filter_by(id=candidate_id).first()
         if not candidate:
-            logger.warning("[SCORE_BG] candidate %d not found", candidate_id)
-            return
+            logger.warning("[SCORE_SYNC] candidate %d not found", candidate_id)
+            return 0
         scored_count = _score_candidate_leads(db, candidate)
-        logger.info("[SCORE_BG] candidate %d: scored %d leads", candidate_id, scored_count)
+        logger.info("[SCORE_SYNC] candidate %d: scored+justified %d leads", candidate_id, scored_count)
 
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, user_id, "leads_generated", candidate_id=candidate_id)
@@ -362,10 +324,101 @@ def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
             "candidate_id": candidate_id,
             "leads_scored": scored_count,
         })
+        return scored_count
+    except Exception as e:
+        logger.error("[SCORE_SYNC] failed for candidate %d: %s", candidate_id, e, exc_info=True)
+        return 0
+    finally:
+        db.close()
+
+
+def _run_company_intel_bg(candidate_id: int) -> None:
+    """Background: Phase 2 company intelligence score adjustments.
+
+    Runs after leads are already shown to the user. Fetches existing heuristic
+    scores, applies LLM company-fit adjustments, and commits updated scores.
+    """
+    db = SessionLocal()
+    try:
+        candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+        if not candidate:
+            return
+
+        parsed = candidate.parsed_json or {}
+        career = parsed.get("career_analysis", {})
+        prefs = parsed.get("preferences", {})
+        preferred_roles = [r.get("title", "") for r in career.get("recommended_roles", []) if r.get("title")]
+        if not preferred_roles:
+            preferred_roles = candidate.target_roles or ["Software Engineer"]
+
+        leads = db.query(Lead).filter_by(candidate_id=candidate_id).all()
+        if not leads:
+            return
+
+        lead_dicts = [{
+            "id": l.id,
+            "company": l.company,
+            "company_domain": l.company_domain,
+            "industry": l.industry,
+            "company_size": l.company_size,
+            "company_description": l.company_description,
+        } for l in leads]
+
+        score_rows = {
+            s.lead_id: s
+            for s in db.query(LeadScore).filter(
+                LeadScore.lead_id.in_([l.id for l in leads])
+            ).all()
+        }
+
+        from services.lead_scoring.company_intelligence_service import evaluate_company_fit
+        candidate_prefs_for_intel = {
+            "company_stage": [prefs.get("company_stage", "any")],
+            "niche_keywords": prefs.get("niche_keywords", []),
+            "preferred_roles": preferred_roles,
+            "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
+            "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
+        }
+        company_fit_scores = evaluate_company_fit(lead_dicts, candidate_prefs_for_intel, db)
+        logger.info("[COMPANY_INTEL_BG] candidate %d: %d companies evaluated", candidate_id, len(company_fit_scores))
+
+        for ld in lead_dicts:
+            name_lower = (ld.get("company") or "").lower()
+            fit = company_fit_scores.get(name_lower)
+            if fit is None:
+                continue
+            row = score_rows.get(ld["id"])
+            if row is None:
+                continue
+            fit_pts = round((fit - 1) / 9 * 15)
+            current = row.overall_score or 0
+            row.overall_score = max(0, min(100, current + fit_pts - 7))
+
+        db.commit()
+        logger.info("[COMPANY_INTEL_BG] candidate %d: score adjustments committed", candidate_id)
+    except Exception as e:
+        logger.warning("[COMPANY_INTEL_BG] failed for candidate %d: %s", candidate_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
+    """Fallback: runs all phases sequentially (used for manual rescoring)."""
+    db = SessionLocal()
+    try:
+        candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+        if not candidate:
+            return
+        _score_candidate_leads(db, candidate)
     except Exception as e:
         logger.error("[SCORE_BG] failed for candidate %d: %s", candidate_id, e, exc_info=True)
     finally:
         db.close()
+    _run_company_intel_bg(candidate_id)
 
 
 @router.post("/search")
@@ -570,14 +623,17 @@ async def search_leads(
             "collection_duration_seconds": duration,
         })
 
-        # Scoring (company enrichment + LLM justification) runs in the background
-        # so the HTTP response returns before the 300s ingress timeout.
+        # Phase 1 (heuristic) + Phase 3 (justification) run synchronously here
+        # so leads arrive with bullets already attached.
+        # Phase 2 (company intel score adjustments) runs in background afterward.
+        scored_count = 0
         if count > 0:
-            background_tasks.add_task(
-                _score_candidate_leads_bg, candidate.id, str(current_user.id)
+            scored_count = await asyncio.to_thread(
+                _score_candidate_leads_sync, candidate.id, str(current_user.id)
             )
+            background_tasks.add_task(_run_company_intel_bg, candidate.id)
 
-        return {"status": "success", "leads_collected": count, "leads_scored": 0, "scoring_async": True}
+        return {"status": "success", "leads_collected": count, "leads_scored": scored_count, "scoring_async": False}
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
