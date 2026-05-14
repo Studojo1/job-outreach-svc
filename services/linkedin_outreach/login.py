@@ -78,7 +78,11 @@ async def _linkedin_login_attempt(
         await page.fill("#username", email)
         await page.fill("#password", password)
         await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        # networkidle can take a while via residential proxy due to LinkedIn analytics scripts
+        try:
+            await page.wait_for_load_state("networkidle", timeout=45000)
+        except Exception:
+            pass  # URL change is enough — networkidle may never fully settle
         await page.wait_for_timeout(2000)
 
         current_url = page.url
