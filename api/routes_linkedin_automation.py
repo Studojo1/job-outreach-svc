@@ -680,6 +680,43 @@ async def retry_errors(
     return {"ok": True, "reset": updated}
 
 
+class MarkSentBody(BaseModel):
+    profile_urn: Optional[str] = None
+
+
+@router.post("/campaigns/{campaign_id}/leads/{lead_id}/mark-sent")
+async def mark_lead_sent(
+    campaign_id: int,
+    lead_id: int,
+    body: MarkSentBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a lead as sent externally (used by the local_sender.py script running from MacBook IP)."""
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    req = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == lead_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if req.status == "sent":
+        return {"ok": True, "already_sent": True}
+    req.status = "sent"
+    req.sent_at = datetime.utcnow()
+    if body.profile_urn:
+        req.profile_urn = body.profile_urn
+    req.updated_at = datetime.utcnow()
+    c.total_sent += 1
+    c.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/campaigns/{campaign_id}/pause")
 async def pause_campaign(
     campaign_id: int,
