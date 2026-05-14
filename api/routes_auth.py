@@ -11,19 +11,14 @@ from api.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-_JWT_SECRET = None  # lazy-loaded from settings
-
 
 def _make_jwt(user: User) -> str:
-    """Mint a short-lived HS256 JWT for the frontend localStorage token cache.
+    """Mint a short-lived HS256 JWT cached in the frontend's localStorage.
 
-    We don't have a signing key shared with the main platform, so we use the
-    app's LINKEDIN_ENCRYPTION_KEY as HMAC secret. The frontend only uses this
-    token as an Authorization: Bearer header — the backend validates it by
-    decoding the sub claim and looking up the user, same as get_admin_user.
-    TTL: 24 hours.
+    Uses LINKEDIN_ENCRYPTION_KEY as HMAC secret (both are AES-256 = 32 bytes,
+    which is also a valid HMAC-SHA256 key). TTL: 24 hours.
     """
-    import hmac, hashlib, os
+    import hmac, hashlib
     from core.config import settings
 
     header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).rstrip(b"=").decode()
@@ -62,47 +57,66 @@ def debug_cookies(request: Request):
 
 @router.get("/debug-voyager")
 async def debug_voyager(slug: str = "williamhgates", current_user: User = Depends(get_current_user)):
-    """Debug: attempt Voyager identity lookup for a slug and return raw response.
-
-    Reveals whether the LinkedIn session / proxy / Voyager API is working.
-    """
+    """Debug: attempt Voyager identity lookup and return raw status + any URNs found."""
+    import re as _re
     import httpx
-    from database.session import SessionLocal
+    from sqlalchemy.orm import Session as _Session
+    from database.session import get_db as _get_db
     from database.models import LinkedInToken
     from services.linkedin_outreach.crypto import decrypt, decrypt_second
-    from services.linkedin_outreach.automation_service import _headers, _proxy
+    from core.config import settings as _settings
 
-    db = SessionLocal()
+    # Use dependency-injected session pattern to avoid raw SessionLocal issues
+    from database.session import SessionLocal as _SL
+    db = _SL()
+    result: dict = {"slug": slug}
     try:
         token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
         if not token_row:
-            return {"error": "No LinkedIn token found — connect LinkedIn first"}
+            return {"error": "No LinkedIn token stored"}
 
-        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+        try:
+            li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+            jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+            result["li_at_prefix"] = li_at[:12] + "..."
+            result["decrypt_ok"] = True
+        except Exception as e:
+            return {"error": f"Decrypt failed: {e}"}
 
-        proxy_cfg = _proxy(token_row.proxy_session_id)
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False, **proxy_cfg) as client:
-            r = await client.get(
-                f"https://www.linkedin.com/voyager/api/identity/profiles/{slug}",
-                headers=_headers(li_at, jsessionid),
-            )
+        proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip()
+        result["proxy_configured"] = bool(proxy_url)
+        result["proxy_preview"] = proxy_url[:30] + "..." if proxy_url else None
 
-        body_preview = r.text[:500]
-        import re as _re
-        urns = _re.findall(r"fsd_profile:([A-Za-z0-9_-]{20,})", r.text)
+        proxy_kwarg = {"proxy": proxy_url} if proxy_url else {}
 
-        return {
-            "slug": slug,
-            "status": r.status_code,
-            "proxy_configured": bool(proxy_cfg),
-            "proxy_url_preview": str(list(proxy_cfg.values())[0])[:30] + "..." if proxy_cfg else None,
-            "urns_found": urns[:3],
-            "li_at_prefix": li_at[:10] + "...",
-            "response_preview": body_preview,
+        ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        hdrs = {
+            "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
+            "csrf-token": jsessionid,
+            "x-restli-protocol-version": "2.0.0",
+            "Accept": "application/vnd.linkedin.normalized+json+2.1",
+            "User-Agent": ua,
         }
+
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False, **proxy_kwarg) as client:
+                r = await client.get(
+                    f"https://www.linkedin.com/voyager/api/identity/profiles/{slug}",
+                    headers=hdrs,
+                )
+            urns = _re.findall(r"fsd_profile:([A-Za-z0-9_-]{20,})", r.text)
+            result["voyager_status"] = r.status_code
+            result["urns_found"] = urns[:3]
+            result["response_preview"] = r.text[:400]
+        except Exception as e:
+            result["voyager_error"] = str(e)
+
+    except Exception as e:
+        result["error"] = str(e)
     finally:
         db.close()
+
+    return result
 
 
 @router.get("/me")
