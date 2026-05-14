@@ -262,7 +262,6 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
         if not t or t.lower() in ("other", "skip", "") or t in seen:
             return
         matching_skills, computed_score = _compute_skill_match(t, candidate_skills)
-        # Blend base score (source quality) with computed skill score
         final_score = round((base_score * 0.4) + (computed_score * 0.6), 2)
         reasoning = _build_skill_reasoning(t, matching_skills, source)
         roles.append({
@@ -272,18 +271,19 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
             "salary_alignment": True,
             "reasoning": reasoning,
             "matching_skills": matching_skills,
+            "source": source,
         })
         seen.add(t)
 
-    # 1. Resume profile likely_roles — LLM-extracted from actual resume (highest signal)
-    for r in resume_profile.get("likely_roles", [])[:4]:
-        title = r if isinstance(r, str) else r.get("title", "")
-        _add(title, 0.95, "resume")
-
-    # 2. Explicit quiz target_role answer
+    # 1. Explicit quiz target_role — user's stated preference, always ranks first
     for t in _parse_multi(target_role):
         if t.lower() not in ("other", "skip"):
-            _add(t, 0.90, "quiz")
+            _add(t, 0.95, "quiz")
+
+    # 2. Resume profile likely_roles — LLM-inferred, supplements quiz choice
+    for r in resume_profile.get("likely_roles", [])[:4]:
+        title = r if isinstance(r, str) else r.get("title", "")
+        _add(title, 0.90, "resume")
 
     # 3. Infer from career_goal free text
     if career_goal and len(career_goal) > 5:
@@ -316,10 +316,12 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
             "salary_alignment": True,
             "reasoning": "General entry-level role",
             "matching_skills": [],
+            "source": "fallback",
         })
 
-    # Sort by fit_score descending
-    roles.sort(key=lambda r: r["fit_score"], reverse=True)
+    # Quiz-selected roles always rank above resume inferences regardless of score.
+    # Within each group, sort by fit_score descending.
+    roles.sort(key=lambda r: (0 if r.get("source") == "quiz" else 1, -r["fit_score"]))
     return roles[:5]
 
 
