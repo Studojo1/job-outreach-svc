@@ -17,7 +17,7 @@ from services.shared.ai.azure_openai_client import generate_json
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 PARALLEL_BATCHES = 5
 TEMPERATURE = 0.4
 
@@ -39,53 +39,18 @@ BANNED_PHRASES = [
     "excellent opportunity",
 ]
 
-_SYSTEM_PROMPT = """You are writing per-lead reasoning for a job-outreach product.
-Each flashcard explains why ONE specific candidate should reach out to ONE specific lead at
-ONE specific company. Output is rendered in a compact card — content MUST be tight.
+_SYSTEM_PROMPT = """You write per-lead outreach reasoning for a job-search product. Each entry is a compact flashcard: one headline + exactly 3 bullets explaining why THIS candidate should contact THIS lead.
 
-Output shape: a one-line headline + exactly 3 short bullets.
+INPUT: structured company facts (what_they_build, core_tech, recent_momentum, hiring_signal) — use these first. Candidate profile (subdomain, top_skills, tech_stack, target_industries, flex project). Lead title/name/location. Raw company text as fallback only.
 
-You are given:
-- Structured facts per company (what_they_build, core_tech, primary_market,
-  recent_momentum, hiring_signal). PRIORITIZE these — they're already distilled.
-- A wider candidate profile including their actual specialization (subdomain),
-  top skills, target industries, target roles, tech stack, and a flex project.
-- The lead's title, name, location, plus raw company description and website
-  summary as fallback.
+RULES:
+1. Real facts only — cite what_they_build, core_tech, hiring_signal, or candidate skills/project verbatim. Never invent.
+2. One candidate-signal × one company-signal per bullet. Strongest link first, then 2nd, then soft link (location/size/market).
+3. Headline ≤80 chars, each bullet ≤80 chars. No filler.
+4. FORBIDDEN phrases: "strong fit", "great match", "good fit", "perfect alignment", "reach out promptly", "ideal candidate", "perfect match", "excellent opportunity", "amazing", "exciting", any generic "X aligns with your Y". No em dashes (—) — use hyphen (-).
+5. signal_strength: "high" = direct tech/niche/project overlap; "medium" = sensible role/location fit; "low" = title-only guess. If data is thin, mark "low".
 
-Rules:
-
-1. CITE REAL FACTS ONLY. Every bullet must reference something concrete from the
-   company facts OR the lead. Never invent.
-
-2. PREFER STRUCTURED FACTS. When `what_they_build`, `core_tech`,
-   `recent_momentum`, or `hiring_signal` is provided, use it verbatim or close to it.
-   Examples of GOOD bullets:
-   - "Builds LLM/RAG to summarize sales calls — exact match to your ASR background"
-   - "Stack overlap: PyTorch + transformers (your core tools)"
-   - "Hiring an LLM Engineer right now — your role"
-   - "Just raised Series B — growth-stage hiring push"
-
-3. ONE CANDIDATE-COMPANY LINK PER BULLET. Connect a candidate signal
-   (subdomain, top_skills, tech_stack, target_industries, flex project) to a
-   company signal (what_they_build, core_tech, recent_momentum, hiring_signal).
-   Bullet 1 = strongest link. Bullet 2 = second strongest. Bullet 3 = the
-   "soft" link (location, headcount, market overlap).
-
-4. CONCISE. Each bullet ≤ 80 chars. Headline ≤ 80 chars. No throat-clearing.
-
-5. ABSOLUTELY FORBIDDEN. Never use these surface-level phrases:
-   "strong fit", "great match", "good fit", "perfect alignment", "reach out promptly",
-   "ideal candidate", "perfect match", "excellent opportunity", "great opportunity",
-   "amazing", "exciting", "company focus on AI aligns with your AI expertise"
-   (or any generic "X aligns with your Y" without naming X and Y specifically),
-   "shared Python expertise" (without naming what for).
-   Also NEVER use em dashes (—) anywhere. Use a plain hyphen (-) or restructure the sentence.
-
-6. DEGRADE GRACEFULLY. If structured facts are missing AND raw text is thin,
-   anchor on title, seniority, location overlap. Mark signal_strength: "low".
-
-Output one JSON object containing reasoning for ALL leads in this batch, keyed by lead_id (string)."""
+Output a single JSON object keyed by lead_id (string) covering ALL leads in this batch."""
 
 _LEAD_SCHEMA = {
     "type": "object",
@@ -169,47 +134,48 @@ def _format_lead_block(lead: dict, company: Optional[dict]) -> str:
         f"  Location: {lead.get('location') or 'unknown'}",
     ]
     if company:
-        # Round-2: prioritize the structured facts blob produced by the
-        # company_fact_extractor LLM. The justifier should anchor bullets on
-        # these high-signal fields first.
         facts = company.get("facts") or {}
+        rich_facts = sum(1 for k in ("what_they_build", "core_tech", "recent_momentum", "hiring_signal") if facts.get(k))
+
         if facts:
-            lines.append("  --- Structured facts (USE THESE FIRST) ---")
             if facts.get("what_they_build"):
-                lines.append(f"  what_they_build: {facts['what_they_build']}")
+                lines.append(f"  builds: {facts['what_they_build']}")
             if facts.get("core_tech"):
-                lines.append(f"  core_tech: {', '.join(facts['core_tech'])}")
+                lines.append(f"  tech: {', '.join(facts['core_tech'])}")
             if facts.get("primary_market"):
-                lines.append(f"  primary_market: {facts['primary_market']}")
+                lines.append(f"  market: {facts['primary_market']}")
             if facts.get("stage_signal"):
                 lines.append(f"  stage: {facts['stage_signal']}")
             if facts.get("recent_momentum"):
-                lines.append(f"  recent_momentum: {facts['recent_momentum']}")
+                lines.append(f"  momentum: {facts['recent_momentum']}")
             if facts.get("hiring_signal"):
-                lines.append(f"  hiring_signal: {facts['hiring_signal']}")
-            lines.append("  --- Raw fallback (use only if facts are thin) ---")
-        if company.get("short_description"):
-            lines.append(f"  Company description: {company['short_description']}")
-        if company.get("industries"):
-            lines.append(f"  Company industries: {', '.join(company['industries'])}")
-        if company.get("keywords"):
-            lines.append(f"  Company keywords: {', '.join(company['keywords'])}")
-        if company.get("technologies"):
-            lines.append(f"  Company tech: {', '.join(company['technologies'])}")
+                lines.append(f"  hiring: {facts['hiring_signal']}")
+
+        # Only include raw fallback fields when structured facts are sparse (<2 rich fields).
+        # When facts are rich, raw text is redundant and wastes tokens.
+        if rich_facts < 2:
+            if company.get("short_description"):
+                lines.append(f"  desc: {company['short_description']}")
+            if company.get("industries"):
+                lines.append(f"  industries: {', '.join(company['industries'])}")
+            if company.get("keywords"):
+                lines.append(f"  keywords: {', '.join(company['keywords'][:8])}")
+            if company.get("technologies"):
+                lines.append(f"  tech_stack: {', '.join(company['technologies'][:8])}")
+            if company.get("website_summary"):
+                lines.append(f"  website: {company['website_summary'][:200]}")
+
+        # Always include headcount and hiring signals — useful regardless of fact richness
         if company.get("employee_count"):
-            lines.append(f"  Headcount: {company['employee_count']}")
+            lines.append(f"  headcount: {company['employee_count']}")
         if company.get("headquarters_city"):
-            lines.append(f"  HQ: {company['headquarters_city']}")
-        if company.get("recent_news_summary"):
-            lines.append(f"  Recent news: {company['recent_news_summary']}")
+            lines.append(f"  hq: {company['headquarters_city']}")
         if company.get("recent_job_postings"):
-            posts = ", ".join(p.get("title", "") for p in company["recent_job_postings"][:3] if p.get("title"))
+            posts = ", ".join(p.get("title", "") for p in company["recent_job_postings"][:2] if p.get("title"))
             if posts:
-                lines.append(f"  Active job postings: {posts}")
-        if company.get("website_summary"):
-            lines.append(f"  Website summary: {company['website_summary']}")
+                lines.append(f"  open_roles: {posts}")
     elif lead.get("company_description"):
-        lines.append(f"  Company description (Apollo only): {lead['company_description']}")
+        lines.append(f"  desc: {lead['company_description'][:200]}")
     return "\n".join(lines)
 
 
@@ -225,21 +191,10 @@ def _build_batch_prompt(candidate: dict, leads: List[dict], companies: Dict[str,
 === CANDIDATE ===
 {candidate_block}
 
-=== LEADS IN THIS BATCH ===
+=== LEADS ===
 {chr(10).join(lead_blocks)}
 
-For EACH lead above, produce a JSON object with these fields:
-- headline: one line (≤80 chars). Should mention the company by name. Concrete, no fluff.
-- bullets: EXACTLY 3 items, each ≤80 chars. Each bullet ties one candidate signal to one
-  company signal. Lead with the strongest link (niche or tech overlap), then 2nd-strongest, etc.
-  Examples:
-    "Builds client-acquisition SaaS — same space as your AI-agent project"
-    "Stack overlap: Python + Kubernetes (your daily tools)"
-    "Hiring ML engineers actively in Bengaluru (your city)"
-- signal_strength: "high" for direct concrete overlap (tech / niche / project topic match);
-  "medium" for sensible role/seniority/location fit; "low" for generic title-based fit only.
-
-Return a JSON object whose top-level keys are the lead_ids (as strings).
+Return a JSON object keyed by lead_id (string). Each value: headline (≤80 chars, name the company), bullets (3 items ≤80 chars each), signal_strength (high/medium/low).
 """
 
 
