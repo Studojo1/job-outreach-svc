@@ -839,6 +839,27 @@ async def list_requests(
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+@router.get("/tokens/export")
+async def export_tokens(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the current user's decrypted LinkedIn session tokens.
+
+    Used by local_sender.py so it can make Voyager calls from MacBook's IP
+    without going through the staging proxy. Requires a valid BetterAuth session.
+    """
+    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token_row:
+        raise HTTPException(status_code=404, detail="No LinkedIn tokens stored — connect LinkedIn first")
+    try:
+        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
+        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Token decryption failed: {e}")
+    return {"li_at": li_at, "jsessionid": jsessionid}
+
+
 @router.post("/campaigns/{campaign_id}/check-auth")
 async def check_campaign_auth(
     campaign_id: int,
