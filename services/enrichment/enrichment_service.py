@@ -142,6 +142,17 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
         return None
 
     data = resp.json()
+
+    # Apollo returns HTTP 200 but embeds a credit/access error in the body.
+    # Treat this as key exhaustion so the key manager rotates to the next key.
+    body_error = data.get("error") or ""
+    if body_error and any(phrase in body_error.lower() for phrase in ("insufficient credits", "not accessible", "upgrade your plan")):
+        logger.warning("[ENRICHMENT] Apollo key exhausted (body error): %s", body_error[:120])
+        current_key = apollo_keys.get_key()
+        if current_key:
+            apollo_keys.report_failure(current_key, 402)
+        raise RuntimeError(f"Apollo key exhausted: {body_error[:120]}")
+
     person = data.get("person", {})
 
     email = person.get("email")
