@@ -389,7 +389,7 @@ async def search_linkedin_leads_apollo(
     _ = industries  # Apollo tag IDs required for industry filter — not used
 
     # Fetch more candidates than needed; many won't resolve to a URL
-    fetch_count = min(limit * 3, 90)
+    fetch_count = min(limit * 2, 30)
     payload: dict = {
         "person_titles": person_titles,
         "per_page": fetch_count,
@@ -558,12 +558,36 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search for leads. Priority: Apollo+Voyager resolve → Voyager role search → Playwright."""
+    """Search for leads. Priority: Voyager role search → Apollo+Voyager resolve → Playwright.
+
+    Voyager role search is tried first because it uses a single API call. The Apollo+Voyager
+    path fires one search per Apollo candidate (~90 calls) which quickly triggers rate limiting.
+    """
     from core.config import settings
     from services.shared.apollo_key_manager import apollo_keys
     proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
 
-    # Path 1: Apollo free search → Voyager URL resolution (zero credit cost)
+    # Path 1: Voyager role search — single API call, returns many results directly
+    try:
+        people = await asyncio.to_thread(
+            _search_linkedin_leads_sync,
+            li_at=li_at,
+            jsessionid=jsessionid,
+            target_role=target_role,
+            locations=locations,
+            industries=industries,
+            keywords=keywords,
+            limit=limit,
+            proxy_url=proxy_url or "",
+        )
+        if people:
+            logger.info("Voyager direct search found %d leads", len(people))
+            return people
+        logger.info("Voyager direct search returned 0 results — falling back to Apollo+Voyager")
+    except Exception as e:
+        logger.warning("Voyager direct search failed: %s — falling back to Apollo+Voyager", e)
+
+    # Path 2: Apollo free search → Voyager URL resolution (uses ~15 API calls max)
     if apollo_keys.has_valid_key():
         try:
             people = await search_linkedin_leads_apollo(
@@ -578,29 +602,9 @@ async def search_linkedin_leads(
             if people:
                 logger.info("Apollo+Voyager path found %d leads", len(people))
                 return people
-            logger.info("Apollo+Voyager returned 0 leads — falling back to Voyager role search")
+            logger.info("Apollo+Voyager returned 0 leads — falling back to Playwright")
         except Exception as e:
             logger.warning("Apollo+Voyager path failed: %s — falling back", e)
-
-    # Path 2: Voyager role search via requests (no browser — ~100 KB vs ~2 MB for Playwright)
-    try:
-        people = await asyncio.to_thread(
-            _search_linkedin_leads_sync,
-            li_at=li_at,
-            jsessionid=jsessionid,
-            target_role=target_role,
-            locations=locations,
-            industries=industries,
-            keywords=keywords,
-            limit=limit,
-            proxy_url=proxy_url or "",
-        )
-        if people:
-            logger.info("Voyager sync search found %d leads", len(people))
-            return people
-        logger.info("Voyager sync search returned 0 results — falling back to Playwright")
-    except Exception as e:
-        logger.warning("Voyager sync search failed: %s — falling back to Playwright", e)
 
     if not proxy_url:
         logger.warning("No proxy configured — skipping Playwright lead search fallback")
