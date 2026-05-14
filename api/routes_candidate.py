@@ -245,9 +245,33 @@ async def candidate_chat_stream(
 
     # Build answers dict incrementally (needed because sequence depends on answers)
     answers: dict[str, str] = {}
-    resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
     resume_text = candidate.resume_text or ""
     parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+
+    # Freeze resume_profile for the lifetime of this quiz session.
+    # Background LLM extraction writes to candidates.resume_profile asynchronously
+    # after upload. Without snapshotting, each question re-queries the DB and can
+    # read a different archetype mid-quiz (e.g. Q5 reads "founding product engineer",
+    # Q8 reads "zero-to-one gtm generalist" after the extraction overwrites it).
+    # Fix: on the first call that has a non-empty profile, store a snapshot in
+    # parsed_json["_qps"] and use it exclusively for all subsequent questions.
+    _QPS = "_qps"  # quiz profile snapshot key
+    if isinstance(parsed_json.get(_QPS), dict) and parsed_json[_QPS]:
+        resume_profile = parsed_json[_QPS]
+    else:
+        resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+        if resume_profile:
+            # Lock in this profile for all future quiz calls on this candidate.
+            try:
+                candidate.parsed_json = {**parsed_json, _QPS: resume_profile}
+                db.commit()
+                parsed_json = candidate.parsed_json
+            except Exception as snap_err:
+                logger.warning("[STREAM] Could not snapshot resume_profile: %s", snap_err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
     def _make_state() -> dict:
         return {
