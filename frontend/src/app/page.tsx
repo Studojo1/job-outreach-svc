@@ -703,12 +703,16 @@ export default function LinkedInOnboardingPage() {
                         </div>
                       </div>
                     </div>
-                    <div className="space-y-2 mb-5">
+                    <div className="space-y-2 mb-4">
                       {['Credentials encrypted with AES-256 before storage', 'Only used to send connection requests you configure', 'Disconnect at any time'].map(item => (
                         <div key={item} className="flex items-center gap-2.5 text-sm text-muted-foreground">
                           <ShieldCheck className="w-4 h-4 text-green-600 flex-shrink-0" /><span>{item}</span>
                         </div>
                       ))}
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-5 text-xs text-amber-800">
+                      <p className="font-semibold mb-0.5">Heads up — LinkedIn may verify your identity</p>
+                      <p>After clicking Connect, a notification may pop up on your phone from the LinkedIn app. Tap <strong>&quot;Yes, it&apos;s me&quot;</strong> to approve the login.</p>
                     </div>
                   </>
                 )}

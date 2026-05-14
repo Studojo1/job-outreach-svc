@@ -237,7 +237,7 @@ async def _get_display_name_from_page(page) -> str | None:
         m = re.search(r"^([^|<]+)", title or "")
         if m:
             n = m.group(1).strip()
-            if n and "LinkedIn" not in n and "Sign" not in n:
+            if n and "LinkedIn" not in n and "Sign" not in n and n.lower() != "feed":
                 return n
     except Exception:
         pass

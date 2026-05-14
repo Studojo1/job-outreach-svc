@@ -17,7 +17,7 @@ from database.models import (
 )
 from database.session import get_db
 from services.linkedin_outreach.automation_service import search_linkedin_leads
-from services.linkedin_outreach.crypto import decrypt, encrypt_pair
+from services.linkedin_outreach.crypto import decrypt, decrypt_second, encrypt_pair
 from services.linkedin_outreach.login import linkedin_check_phone_tap, linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
 
@@ -347,7 +347,7 @@ async def search_leads(
 
 async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
     from database.session import SessionLocal
-    from services.linkedin_outreach.crypto import decrypt
+    from services.linkedin_outreach.crypto import decrypt, decrypt_second
 
     db = SessionLocal()
     try:
@@ -357,7 +357,7 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
             return
 
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
 
         logger.info(
             "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
@@ -549,7 +549,7 @@ async def send_one_now(
 
     try:
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
+        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
         c.status = "auth_failed"
         c.updated_at = datetime.utcnow()
@@ -821,7 +821,7 @@ async def check_campaign_auth(
 
     try:
         decrypt(token_row.li_at_enc, token_row.nonce)
-        decrypt(token_row.jsessionid_enc, token_row.nonce)
+        decrypt_second(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
         if c.status == "running":
             c.status = "auth_failed"
