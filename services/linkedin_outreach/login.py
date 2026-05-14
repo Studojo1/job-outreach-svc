@@ -88,8 +88,8 @@ async def _linkedin_login_attempt(
         current_url = page.url
         logger.info("Login result URL: %s", current_url)
 
-        # Wrong password / account locked
-        if "login" in current_url and "authwall" not in current_url:
+        # Wrong password / account locked — URL stays on /login, not checkpoint
+        if "login" in current_url and "checkpoint" not in current_url and "authwall" not in current_url:
             error_text = await page.evaluate(
                 "() => document.querySelector('.error-for-password, .alert-content, [role=alert]')?.innerText || ''"
             )
