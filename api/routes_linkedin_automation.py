@@ -1,28 +1,12 @@
 """LinkedIn automation routes — email+password login, campaign CRUD, launch/pause, stats."""
 
 import logging
-import time as _time
-from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-
-# Simple in-memory rate limiter for the login endpoint
-_login_attempts: dict[str, list[float]] = defaultdict(list)
-_LOGIN_WINDOW = 600   # 10 minutes
-_LOGIN_MAX = 5        # max 5 attempts per window
-
-
-def _check_login_rate_limit(user_id: str):
-    now = _time.time()
-    recent = [t for t in _login_attempts[user_id] if now - t < _LOGIN_WINDOW]
-    _login_attempts[user_id] = recent
-    if len(recent) >= _LOGIN_MAX:
-        raise HTTPException(status_code=429, detail="Too many login attempts. Wait 10 minutes and try again.")
-    _login_attempts[user_id].append(now)
 
 from api.dependencies import get_current_user
 from database.models import (
@@ -33,7 +17,7 @@ from database.models import (
 )
 from database.session import get_db
 from services.linkedin_outreach.automation_service import search_linkedin_leads
-from services.linkedin_outreach.crypto import decrypt, decrypt_second, encrypt_pair
+from services.linkedin_outreach.crypto import decrypt, encrypt_pair
 from services.linkedin_outreach.login import linkedin_check_phone_tap, linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
 
@@ -92,7 +76,6 @@ async def login_with_credentials(
     """Step 1 — attempt login. Returns ok=True on success, or challenge_required=True + session_key if PIN needed."""
     if not body.email or not body.password:
         raise HTTPException(status_code=400, detail="email and password are required")
-    _check_login_rate_limit(current_user.id)
 
     try:
         from core.config import settings as _s
@@ -374,7 +357,7 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
             return
 
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
 
         logger.info(
             "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
@@ -537,29 +520,6 @@ async def launch_campaign(
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected")
 
-    # Pre-flight: verify session is alive via Voyager through the residential proxy.
-    # This catches expired sessions before the daemon wastes a send attempt.
-    try:
-        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
-
-    try:
-        import httpx as _httpx
-        from services.linkedin_outreach.automation_service import _headers, _proxy
-        async with _httpx.AsyncClient(timeout=10, follow_redirects=False, **_proxy(token_row.proxy_session_id)) as _cl:
-            _r = await _cl.get(
-                "https://www.linkedin.com/voyager/api/me",
-                headers=_headers(li_at, jsessionid),
-            )
-        if _r.status_code in (401, 403):
-            raise HTTPException(status_code=401, detail="LinkedIn session expired. Please reconnect before launching.")
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # Network/proxy error — allow launch; daemon will catch auth failures on first send
-
     c.status = "running"
     c.launched_at = c.launched_at or datetime.utcnow()
     c.updated_at = datetime.utcnow()
@@ -589,7 +549,7 @@ async def send_one_now(
 
     try:
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+        jsessionid = decrypt(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
         c.status = "auth_failed"
         c.updated_at = datetime.utcnow()
@@ -665,56 +625,17 @@ async def retry_errors(
     Leads with no profile_urn have a 404/private profile and won't resolve.
     """
     c = _get_campaign_or_404(campaign_id, current_user.id, db)
-    # Reset all errored leads — include those without a URN so they can retry
-    # URN resolution. The old guard (urn.isnot(None)) permanently orphaned any
-    # lead that failed at the resolve step before the error field was populated.
     updated = (
         db.query(LinkedInConnectionRequest)
         .filter(
             LinkedInConnectionRequest.campaign_id == campaign_id,
             LinkedInConnectionRequest.status == "error",
+            LinkedInConnectionRequest.profile_urn.isnot(None),
         )
-        .update({"status": "pending", "error": None, "profile_urn": None, "updated_at": datetime.utcnow()})
+        .update({"status": "pending", "error": None, "updated_at": datetime.utcnow()})
     )
     db.commit()
     return {"ok": True, "reset": updated}
-
-
-class MarkSentBody(BaseModel):
-    profile_urn: Optional[str] = None
-
-
-@router.post("/campaigns/{campaign_id}/leads/{lead_id}/mark-sent")
-async def mark_lead_sent(
-    campaign_id: int,
-    lead_id: int,
-    body: MarkSentBody,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Mark a lead as sent externally (used by the local_sender.py script running from MacBook IP)."""
-    c = _get_campaign_or_404(campaign_id, current_user.id, db)
-    req = (
-        db.query(LinkedInConnectionRequest)
-        .filter(
-            LinkedInConnectionRequest.id == lead_id,
-            LinkedInConnectionRequest.campaign_id == campaign_id,
-        )
-        .first()
-    )
-    if not req:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    if req.status == "sent":
-        return {"ok": True, "already_sent": True}
-    req.status = "sent"
-    req.sent_at = datetime.utcnow()
-    if body.profile_urn:
-        req.profile_urn = body.profile_urn
-    req.updated_at = datetime.utcnow()
-    c.total_sent += 1
-    c.updated_at = datetime.utcnow()
-    db.commit()
-    return {"ok": True}
 
 
 @router.post("/campaigns/{campaign_id}/pause")
@@ -799,6 +720,43 @@ class ConnectionRequestResponse(BaseModel):
     reply_sentiment: Optional[str]
 
 
+class MarkSentBody(BaseModel):
+    profile_urn: Optional[str] = None
+
+
+@router.post("/campaigns/{campaign_id}/leads/{lead_id}/mark-sent")
+async def mark_lead_sent(
+    campaign_id: int,
+    lead_id: int,
+    body: MarkSentBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a lead as sent externally (used by the local_sender.py script running from MacBook IP)."""
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    req = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == lead_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if req.status == "sent":
+        return {"ok": True, "already_sent": True}
+    req.status = "sent"
+    req.sent_at = datetime.utcnow()
+    if body.profile_urn:
+        req.profile_urn = body.profile_urn
+    req.updated_at = datetime.utcnow()
+    c.total_sent += 1
+    c.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/campaigns/{campaign_id}/requests", response_model=list[ConnectionRequestResponse])
 async def list_requests(
     campaign_id: int,
@@ -839,27 +797,6 @@ async def list_requests(
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-@router.get("/tokens/export")
-async def export_tokens(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Return the current user's decrypted LinkedIn session tokens.
-
-    Used by local_sender.py so it can make Voyager calls from MacBook's IP
-    without going through the staging proxy. Requires a valid BetterAuth session.
-    """
-    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
-    if not token_row:
-        raise HTTPException(status_code=404, detail="No LinkedIn tokens stored — connect LinkedIn first")
-    try:
-        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Token decryption failed: {e}")
-    return {"li_at": li_at, "jsessionid": jsessionid}
-
-
 @router.post("/campaigns/{campaign_id}/check-auth")
 async def check_campaign_auth(
     campaign_id: int,
@@ -884,7 +821,7 @@ async def check_campaign_auth(
 
     try:
         decrypt(token_row.li_at_enc, token_row.nonce)
-        decrypt_second(token_row.jsessionid_enc, token_row.nonce)
+        decrypt(token_row.jsessionid_enc, token_row.nonce)
     except Exception:
         if c.status == "running":
             c.status = "auth_failed"
