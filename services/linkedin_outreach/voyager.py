@@ -6,6 +6,7 @@ import logging
 import random
 import re
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 # LinkedIn Voyager API base
 VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
+
+# GraphQL query ID for people search (replaced deprecated /search/blended)
+_SEARCH_QUERY_ID = "voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0"
 
 # Mimick a real Chrome browser on macOS
 _USER_AGENT = (
@@ -43,69 +47,33 @@ def _build_headers(li_at: str, jsessionid: str) -> dict:
     }
 
 
-def _parse_search_results(data: dict) -> list[dict]:
-    """Parse Voyager blended search response into a flat list of people dicts."""
+def _parse_graphql_search_results(data: dict) -> list[dict]:
+    """Parse LinkedIn GraphQL search response into a flat list of people dicts."""
     people = []
-
-    # Voyager returns a normalised JSON: top-level 'data' + 'included' array
-    included = data.get("included", [])
-
-    # Build a lookup of all included entities by their $type + entityUrn
-    entity_map: dict[str, dict] = {}
-    for entity in included:
-        urn = entity.get("entityUrn", "")
-        if urn:
-            entity_map[urn] = entity
-
-    # The search results are under data.elements[].elements[]
-    elements = (
-        data.get("data", {})
-        .get("elements", [])
-    )
-
-    for cluster in elements:
-        for item in cluster.get("elements", []):
-            # Each item may have a trackingUrn pointing to the member
-            member_urn = item.get("targetUrn") or item.get("entityUrn", "")
-
-            # Try to find the profile entity
-            profile = entity_map.get(member_urn, {})
-
-            # publicIdentifier is the LinkedIn slug (e.g. "john-doe-12345")
-            public_id = profile.get("publicIdentifier") or item.get("publicIdentifier")
-            if not public_id:
+    clusters = (data.get("data") or {}).get("searchDashClustersByAll") or {}
+    for cluster in clusters.get("elements", []):
+        for item in cluster.get("items", []):
+            entity = ((item.get("item") or {}).get("entityResult")) or {}
+            if not entity:
                 continue
-
-            name = profile.get("firstName", "") + " " + profile.get("lastName", "")
-            name = name.strip()
-
-            headline = profile.get("headline", "")
-
-            # Company: look for miniProfile's occupation or headline
-            company = ""
-            occupation = profile.get("occupation", "")
-            if occupation:
-                company = occupation
-
-            # Profile image
-            image_url = ""
-            picture = profile.get("picture", {})
-            if picture:
-                artifacts = picture.get("com.linkedin.common.VectorImage", {}).get("artifacts", [])
-                if artifacts:
-                    root = picture.get("com.linkedin.common.VectorImage", {}).get("rootUrl", "")
-                    last = artifacts[-1].get("fileIdentifyingUrlPathSegment", "")
-                    if root and last:
-                        image_url = root + last
-
+            name = ((entity.get("title") or {}).get("text") or "").strip()
+            if not name:
+                continue
+            nav_url = entity.get("navigationUrl") or ""
+            if "/in/" not in nav_url:
+                continue
+            profile_url = re.sub(r"\?.*", "", nav_url).rstrip("/") + "/"
+            headline = (
+                ((entity.get("primarySubtitle") or {}).get("text") or "")
+                or ((entity.get("secondarySubtitle") or {}).get("text") or "")
+            )
             people.append({
-                "name": name or "Unknown",
+                "name": name,
                 "headline": headline,
-                "company": company,
-                "profile_url": f"https://www.linkedin.com/in/{public_id}/",
-                "profile_image_url": image_url,
+                "company": "",
+                "profile_url": profile_url,
+                "profile_image_url": "",
             })
-
     return people
 
 
@@ -120,22 +88,27 @@ async def search_people(
     """Search LinkedIn for people matching keywords.
 
     Returns a list of dicts with: name, headline, company, profile_url, profile_image_url.
-    Raises httpx.HTTPStatusError on auth failure or rate limit.
+    Raises ValueError on auth failure or rate limit.
     """
-    # Random human-like delay
     await asyncio.sleep(random.uniform(1.5, 3.0))
 
-    params: dict = {
-        "keywords": keywords if not location else f"{keywords} {location}",
-        "q": "all",
-        "filters": "List(resultType->PEOPLE)",
-        "origin": "SWITCH_SEARCH_VERTICAL",
-        "count": count,
-        "start": 0,
-    }
+    kw = f"{keywords} {location}".strip() if location else keywords
+    # Encode only the keyword value; structural chars (, : ( )) must remain literal
+    encoded_kw = quote(kw, safe="")
+    variables = (
+        f"(start:0,count:{count},origin:GLOBAL_SEARCH_HEADER,"
+        f"query:(keywords:{encoded_kw},flagshipSearchIntent:SEARCH_SRP,"
+        f"queryParameters:List((key:resultType,value:List(PEOPLE))),"
+        f"includeFiltersInResponse:false))"
+    )
+    url = (
+        f"{VOYAGER_BASE}/graphql"
+        f"?includeWebMetadata=true"
+        f"&variables={variables}"
+        f"&queryId={_SEARCH_QUERY_ID}"
+    )
 
     headers = _build_headers(li_at, jsessionid)
-
     proxy_map = {"http://": proxy_url, "https://": proxy_url} if proxy_url else None
 
     async with httpx.AsyncClient(
@@ -143,11 +116,7 @@ async def search_people(
         timeout=httpx.Timeout(30.0),
         proxies=proxy_map,
     ) as client:
-        resp = await client.get(
-            f"{VOYAGER_BASE}/search/blended",
-            params=params,
-            headers=headers,
-        )
+        resp = await client.get(url, headers=headers)
 
     if resp.status_code in (401, 403):
         logger.warning("LinkedIn auth failed (status %s) — token may be expired", resp.status_code)
@@ -165,7 +134,7 @@ async def search_people(
         logger.error("Failed to parse LinkedIn response: %s", e)
         return []
 
-    people = _parse_search_results(data)
+    people = _parse_graphql_search_results(data)
     logger.info("LinkedIn search '%s' returned %d people", keywords, len(people))
     return people
 

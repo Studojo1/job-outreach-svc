@@ -467,13 +467,10 @@ def _search_linkedin_leads_sync(
     limit: int = 50,
     proxy_url: str = "",
 ) -> list[dict]:
-    """Synchronous search using a plain requests.Session routed via residential proxy.
-
-    We use requests (not httpx) because requests preserves Voyager filter
-    syntax literally, while httpx encodes -> as %3E. Routed through the
-    Evomi residential proxy so LinkedIn doesn't reject the datacenter IP.
-    """
+    """Synchronous people search via LinkedIn GraphQL Voyager endpoint."""
+    import re as _re
     import requests
+    from urllib.parse import quote
 
     session = requests.Session()
     session.max_redirects = 3
@@ -481,33 +478,27 @@ def _search_linkedin_leads_sync(
         session.proxies = {"http": proxy_url, "https": proxy_url}
 
     keyword_str = f"{target_role} {keywords}".strip() if keywords else target_role
+    encoded_kw = quote(keyword_str, safe="")
 
-    # Use (field:X,values:List(Y)) syntax — no -> characters that requests would encode as %3E
-    filter_parts = ["(field:resultType,values:List(PEOPLE))"]
-    if locations:
-        loc_vals = ",".join(loc for loc in locations[:3])
-        filter_parts.append(f"(field:geoUrn,values:List({loc_vals}))")
-    if industries:
-        ind_vals = ",".join(i for i in industries[:3])
-        filter_parts.append(f"(field:industry,values:List({ind_vals}))")
+    variables = (
+        f"(start:0,count:{min(limit, 49)},origin:GLOBAL_SEARCH_HEADER,"
+        f"query:(keywords:{encoded_kw},flagshipSearchIntent:SEARCH_SRP,"
+        f"queryParameters:List((key:resultType,value:List(PEOPLE))),"
+        f"includeFiltersInResponse:false))"
+    )
+    url = (
+        "https://www.linkedin.com/voyager/api/graphql"
+        f"?includeWebMetadata=true"
+        f"&variables={variables}"
+        f"&queryId=voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0"
+    )
 
-    params = {
-        "count": min(limit, 49),
-        "filters": f"List({','.join(filter_parts)})",
-        "keywords": keyword_str,
-        "origin": "GLOBAL_SEARCH_HEADER",
-        "q": "all",
-        "start": 0,
-        "queryContext": "List(spellCorrectionEnabled->true,relatedSearchesEnabled->true)",
-    }
-
-    # JSESSIONID must match csrf-token exactly — no quotes around it in Cookie header
     headers = {
         "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
         "csrf-token": jsessionid,
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
-        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "Accept": "application/json",
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -515,17 +506,46 @@ def _search_linkedin_leads_sync(
         "Referer": "https://www.linkedin.com/search/results/people/",
     }
 
-    url = "https://www.linkedin.com/voyager/api/search/blended"
-    res = session.get(url, params=params, headers=headers, timeout=25, allow_redirects=True)
+    res = session.get(url, headers=headers, timeout=25, allow_redirects=True)
     logger.info("Lead search status=%d", res.status_code)
     if res.status_code != 200:
         logger.warning("Search returned %d: %s", res.status_code, res.text[:300])
         return []
 
     data = res.json()
-    people = _parse_search_results(data)
+    people = _parse_graphql_search_results(data)
     logger.info("Lead search parsed %d people", len(people))
     return people[:limit]
+
+
+def _parse_graphql_search_results(data: dict) -> list[dict]:
+    import re as _re
+    people = []
+    clusters = (data.get("data") or {}).get("searchDashClustersByAll") or {}
+    for cluster in clusters.get("elements", []):
+        for item in cluster.get("items", []):
+            entity = ((item.get("item") or {}).get("entityResult")) or {}
+            if not entity:
+                continue
+            name = ((entity.get("title") or {}).get("text") or "").strip()
+            if not name:
+                continue
+            nav_url = entity.get("navigationUrl") or ""
+            if "/in/" not in nav_url:
+                continue
+            profile_url = _re.sub(r"\?.*", "", nav_url).rstrip("/") + "/"
+            headline = (
+                ((entity.get("primarySubtitle") or {}).get("text") or "")
+                or ((entity.get("secondarySubtitle") or {}).get("text") or "")
+            )
+            people.append({
+                "name": name,
+                "headline": headline,
+                "company": "",
+                "profile_url": profile_url,
+                "profile_image_url": "",
+            })
+    return people
 
 
 async def search_linkedin_leads(
