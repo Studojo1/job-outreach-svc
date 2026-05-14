@@ -388,7 +388,7 @@ class LinkedInCampaign(Base):
     connection_note = Column(Text)     # ≤300 chars, personalised per lead by AI
     followup_message = Column(Text)    # sent after connection accepted
     # Automation settings
-    daily_limit = Column(Integer, default=20)
+    daily_limit = Column(Integer, default=10)
     # Aggregate stats (denormalised for fast reads)
     total_leads = Column(Integer, default=0)
     total_sent = Column(Integer, default=0)

@@ -189,7 +189,7 @@ class CreateCampaignRequest(BaseModel):
     target_keywords: Optional[str] = None
     connection_note: Optional[str] = None
     followup_message: Optional[str] = None
-    daily_limit: int = Field(default=20, ge=5, le=50)
+    daily_limit: int = Field(default=10, ge=1, le=20)
 
 
 class CampaignResponse(BaseModel):

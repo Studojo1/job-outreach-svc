@@ -834,7 +834,7 @@ class LinkedInAutomationDaemon:
                 db.query(LinkedInConnectionRequest)
                 .filter(
                     LinkedInConnectionRequest.campaign_id == campaign.id,
-                    LinkedInConnectionRequest.status == "pending",
+                    LinkedInConnectionRequest.status.in_(["pending", "error"]),
                 )
                 .limit(min(remaining_today, 5))  # max 5 per daemon tick
                 .all()
