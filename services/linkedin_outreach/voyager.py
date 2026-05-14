@@ -115,6 +115,7 @@ async def search_people(
     keywords: str,
     location: Optional[str] = None,
     count: int = 10,
+    proxy_url: Optional[str] = None,
 ) -> list[dict]:
     """Search LinkedIn for people matching keywords.
 
@@ -125,7 +126,7 @@ async def search_people(
     await asyncio.sleep(random.uniform(1.5, 3.0))
 
     params: dict = {
-        "keywords": keywords,
+        "keywords": keywords if not location else f"{keywords} {location}",
         "q": "all",
         "filters": "List(resultType->PEOPLE)",
         "origin": "SWITCH_SEARCH_VERTICAL",
@@ -133,16 +134,14 @@ async def search_people(
         "start": 0,
     }
 
-    if location:
-        # LinkedIn geo IDs: India=102713980, US=103644278, UK=101165590
-        # For MVP we pass location as a keyword filter
-        params["keywords"] = f"{keywords} {location}"
-
     headers = _build_headers(li_at, jsessionid)
+
+    proxy_map = {"http://": proxy_url, "https://": proxy_url} if proxy_url else None
 
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=httpx.Timeout(30.0),
+        proxies=proxy_map,
     ) as client:
         resp = await client.get(
             f"{VOYAGER_BASE}/search/blended",
@@ -150,7 +149,7 @@ async def search_people(
             headers=headers,
         )
 
-    if resp.status_code == 401 or resp.status_code == 403:
+    if resp.status_code in (401, 403):
         logger.warning("LinkedIn auth failed (status %s) — token may be expired", resp.status_code)
         raise ValueError("LinkedIn session expired. Please reconnect via the extension.")
 
@@ -169,6 +168,70 @@ async def search_people(
     people = _parse_search_results(data)
     logger.info("LinkedIn search '%s' returned %d people", keywords, len(people))
     return people
+
+
+async def resolve_linkedin_url(
+    first_name: str,
+    company: str,
+    title: str,
+    li_at: str,
+    jsessionid: str,
+    proxy_url: Optional[str] = None,
+) -> Optional[str]:
+    """Given Apollo-free data (first name + company + title), find the LinkedIn profile URL.
+
+    Searches Voyager for "{first_name} {company}", then scores results by
+    name + title similarity to pick the best match.
+    Returns the profile URL string or None if no confident match found.
+    """
+    keywords = f"{first_name} {company}".strip()
+    try:
+        results = await search_people(li_at, jsessionid, keywords, count=5, proxy_url=proxy_url)
+    except Exception as e:
+        logger.warning("Voyager resolve failed for '%s' at '%s': %s", first_name, company, e)
+        return None
+
+    if not results:
+        return None
+
+    first_lower = first_name.lower()
+    title_words = set(title.lower().split()) - {"of", "and", "the", "at", "in", "for", "a"}
+    company_lower = company.lower()
+
+    best_url: Optional[str] = None
+    best_score = -1
+
+    for r in results:
+        result_name = (r.get("name") or "").lower()
+        result_headline = (r.get("headline") or "").lower()
+        result_company = (r.get("company") or "").lower()
+
+        # First name must match — skip entirely if not
+        if not result_name.startswith(first_lower) and first_lower not in result_name:
+            continue
+
+        score = 3 if result_name.startswith(first_lower) else 1
+
+        # Title / headline word overlap
+        headline_words = set(result_headline.split())
+        score += len(title_words & headline_words)
+
+        # Company name overlap
+        if company_lower and (company_lower in result_company or result_company in company_lower):
+            score += 2
+
+        if score > best_score:
+            best_score = score
+            best_url = r.get("profile_url")
+
+    if best_url:
+        logger.info(
+            "Resolved '%s' at '%s' → %s (score=%d)", first_name, company, best_url, best_score
+        )
+    else:
+        logger.debug("No match for '%s' at '%s'", first_name, company)
+
+    return best_url
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

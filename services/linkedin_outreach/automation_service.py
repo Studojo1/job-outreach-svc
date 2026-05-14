@@ -360,25 +360,36 @@ async def search_linkedin_leads_apollo(
     industries: list[str],
     keywords: Optional[str] = None,
     limit: int = 50,
+    li_at: str = "",
+    jsessionid: str = "",
 ) -> list[dict]:
-    """Find leads via Apollo.io people search. Does not require LinkedIn session."""
+    """Find leads via Apollo free search + Voyager URL resolution.
+
+    Apollo provides first_name + title + company at zero credit cost.
+    Voyager then resolves each person's LinkedIn profile URL by searching
+    "{first_name} {company}" and title-matching the best result.
+    No Apollo credits are consumed at any point.
+    """
     from services.shared.apollo_key_manager import apollo_keys, apollo_post as _apollo_post
+    from services.linkedin_outreach.voyager import resolve_linkedin_url
+    from core.config import settings
+
     if not apollo_keys.has_valid_key():
         logger.warning("No valid Apollo API key — skipping Apollo lead search")
         return []
+    if not li_at:
+        logger.warning("No LinkedIn session — cannot resolve URLs via Voyager, skipping Apollo path")
+        return []
 
+    proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
     person_titles = _ROLE_EXPANSION.get(target_role, [target_role])
-
     mapped_locations = [_LOCATION_MAP.get(loc, loc) for loc in locations]
-    mapped_locations = [l for l in mapped_locations if l]  # drop blanks (Global)
+    mapped_locations = [l for l in mapped_locations if l]
 
-    # Apollo's organization_industries field requires internal tag IDs, not strings —
-    # string values always return 0 results. Filter by role + location only; the
-    # enrichment step (people/match) returns enough signal for targeting.
-    _ = industries  # kept in signature for API compatibility
+    _ = industries  # Apollo tag IDs required for industry filter — not used
 
-    # Fetch 2× the needed count — match calls filter out those without LinkedIn URLs
-    fetch_count = min(limit * 2, 60)
+    # Fetch more candidates than needed; many won't resolve to a URL
+    fetch_count = min(limit * 3, 90)
     payload: dict = {
         "person_titles": person_titles,
         "per_page": fetch_count,
@@ -399,36 +410,49 @@ async def search_linkedin_leads_apollo(
             return []
         data = r.json()
         raw_people = data.get("people", [])
-        logger.info("Apollo search: %d raw candidates for role=%r", len(raw_people), target_role)
-
-        # Use the LinkedIn URL already present in Apollo search results — no people/match needed.
-        # people/match burns credits and is strictly prohibited by the project constraint.
-        def enrich(p: dict) -> Optional[dict]:
-            linkedin_url = (p.get("linkedin_url") or "").strip()
-            if not linkedin_url or "/in/" not in linkedin_url:
-                return None
-            first = (p.get("first_name") or "").strip()
-            last = (p.get("last_name") or "").strip()
-            name = f"{first} {last}".strip()
-            if not name:
-                return None
-            org = p.get("organization") or {}
-            company = org.get("name", "") if isinstance(org, dict) else ""
-            return {
-                "name": name,
-                "headline": p.get("title") or "",
-                "company": company,
-                "profile_url": linkedin_url.rstrip("/") + "/",
-                "profile_image_url": p.get("photo_url"),
-            }
-
-        results = [enrich(p) for p in raw_people]
-        people = [r for r in results if r is not None][:limit]
-        logger.info("Apollo search: %d leads with LinkedIn URLs from %d candidates", len(people), len(raw_people))
-        return people
+        logger.info("Apollo free search: %d candidates for role=%r", len(raw_people), target_role)
     except Exception as e:
         logger.error("Apollo search failed: %s", e)
         return []
+
+    people: list[dict] = []
+    for p in raw_people:
+        if len(people) >= limit:
+            break
+
+        first = (p.get("first_name") or "").strip()
+        if not first:
+            continue
+
+        title = (p.get("title") or "").strip()
+        org = p.get("organization") or {}
+        company = (org.get("name") or p.get("organization_name") or "").strip()
+        if not company:
+            continue
+
+        profile_url = await resolve_linkedin_url(
+            first_name=first,
+            company=company,
+            title=title,
+            li_at=li_at,
+            jsessionid=jsessionid,
+            proxy_url=proxy_url,
+        )
+        if not profile_url:
+            continue
+
+        people.append({
+            "name": first,
+            "headline": title,
+            "company": company,
+            "profile_url": profile_url,
+            "profile_image_url": None,
+        })
+
+    logger.info(
+        "Apollo+Voyager: resolved %d/%d leads with profile URLs", len(people), len(raw_people)
+    )
+    return people
 
 
 # ── Lead search via LinkedIn Voyager (fallback) ────────────────────────────────
@@ -514,11 +538,31 @@ async def search_linkedin_leads(
     limit: int = 50,
     session_id: str | None = None,
 ) -> list[dict]:
-    """Search for leads. Tries lightweight Voyager HTTP first, Playwright browser as fallback."""
+    """Search for leads. Priority: Apollo+Voyager resolve → Voyager role search → Playwright."""
     from core.config import settings
+    from services.shared.apollo_key_manager import apollo_keys
     proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
 
-    # Voyager search via requests (no browser — ~100 KB vs ~2 MB for Playwright)
+    # Path 1: Apollo free search → Voyager URL resolution (zero credit cost)
+    if apollo_keys.has_valid_key():
+        try:
+            people = await search_linkedin_leads_apollo(
+                target_role=target_role,
+                locations=locations,
+                industries=industries,
+                keywords=keywords,
+                limit=limit,
+                li_at=li_at,
+                jsessionid=jsessionid,
+            )
+            if people:
+                logger.info("Apollo+Voyager path found %d leads", len(people))
+                return people
+            logger.info("Apollo+Voyager returned 0 leads — falling back to Voyager role search")
+        except Exception as e:
+            logger.warning("Apollo+Voyager path failed: %s — falling back", e)
+
+    # Path 2: Voyager role search via requests (no browser — ~100 KB vs ~2 MB for Playwright)
     try:
         people = await asyncio.to_thread(
             _search_linkedin_leads_sync,
