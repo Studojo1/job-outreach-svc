@@ -547,6 +547,12 @@ def _build_career_goal_question(resume_profile: dict, answers: dict) -> dict:
         elif domain == "finance":
             suggestion = "building financial models and supporting investment or strategy decisions"
             placeholder = "e.g. Building the financial model for a Series B raise, owning FP&A at a growth-stage company"
+        elif domain in ("operations", "operations_strategy", "general_management"):
+            suggestion = "running day-to-day operations, building processes that scale, and making sure execution actually happens"
+            placeholder = "e.g. Owning ops and execution for a fast-moving early-stage startup, making sure nothing falls through the cracks"
+        elif domain in ("hr", "people"):
+            suggestion = "managing people operations, running recruitment, and owning culture and talent end-to-end"
+            placeholder = "e.g. Owning people ops and talent acquisition at a high-growth startup"
 
     if suggestion:
         message = (
@@ -883,7 +889,7 @@ _COMPANY_TYPE_EXAMPLES = {
     "growth-stage-startup": "Swiggy, Meesho, Gupshup",
     "deep-tech": "DeepMind, OpenAI, Mistral",
     "consumer-tech": "Zepto, Blinkit, CRED",
-    "edtech": "Teachable, Maven, Outlier",
+    "edtech": "Classplus, Masai School, Teachmint",
 }
 
 

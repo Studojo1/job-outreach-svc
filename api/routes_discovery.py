@@ -22,11 +22,12 @@ from api.dependencies import get_current_user
 from core.analytics import capture
 
 # Top-K leads that get the full enrichment + LLM justification pass.
-# Justify ALL collected leads (800). The LLM's signal_strength output is the
-# real quality filter — the frontend hides "low" signal leads so the user only
-# sees high+medium (~500 of the 800). Collecting 800 gives us a buffer so
-# after filtering we still have ~500 genuinely good leads.
-JUSTIFY_TOP_K = 800
+# Justify only the top 300 leads (by heuristic score). Beyond 300 the LLM
+# quality gain is marginal and the runtime (~2+ min for 800) was regularly
+# exceeding the frontend 3-min timeout, causing users to land on results
+# with empty justifications. Un-justified leads still show the client-side
+# heuristic fallback — acceptable for the lower-ranked tail.
+JUSTIFY_TOP_K = 300
 
 logger = logging.getLogger(__name__)
 
