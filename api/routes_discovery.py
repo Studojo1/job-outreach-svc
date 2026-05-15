@@ -712,9 +712,12 @@ async def scoring_ready(
         .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
         .count()
     )
-    # Ready when 90%+ of leads are scored AND 80%+ of scored leads have bullets.
-    # 80% threshold (not 85%) gives headroom for LLM batch failures across 800 leads.
-    bullet_threshold = max(1, int(scored * 0.80))
+    # Ready when 90%+ of leads are scored AND 95%+ of the justified pool have bullets.
+    # JUSTIFY_TOP_K=300 means only the top 300 leads get bullets — the threshold must be
+    # relative to that ceiling, not to the full 800-lead count. Using 80% of all scored
+    # (=640) when we only generate 300 bullets meant ready was NEVER true and users hit
+    # the 6-min frontend timeout every run.
+    bullet_threshold = max(1, int(min(JUSTIFY_TOP_K, scored) * 0.95))
     ready = scored >= max(1, total * 0.9) and with_bullets >= bullet_threshold
     return {
         "ready": ready,
