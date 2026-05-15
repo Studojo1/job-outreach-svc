@@ -499,57 +499,50 @@ async def playwright_send_invitation(
                 if note:
                     # Try to click "Add a note" first
                     try:
-                        add_note_btn = page.locator('button[aria-label="Add a note"]').first
-                        if await add_note_btn.is_visible(timeout=2000):
-                            await add_note_btn.click()
-                            await page.wait_for_timeout(800)
-                            for ta_selector in [
-                                'textarea[name="message"]',
-                                'textarea.connect-button-send-invite__custom-message',
-                                'textarea',
-                            ]:
-                                try:
-                                    ta = page.locator(ta_selector).first
-                                    if await ta.is_visible(timeout=1000):
-                                        await ta.fill(note[:300])
-                                        break
-                                except Exception:
-                                    pass
-                            for send_sel in [
-                                'button[aria-label="Send"]',
-                                'button[aria-label="Done"]',
-                                'button:has-text("Send")',
-                            ]:
-                                try:
-                                    send_btn = page.locator(send_sel).first
-                                    if await send_btn.is_visible(timeout=1500):
-                                        await send_btn.click()
-                                        send_clicked = True
-                                        break
-                                except Exception:
-                                    pass
+                        await page.click('button[aria-label="Add a note"]', timeout=3000)
+                        await page.wait_for_timeout(800)
+                        for ta_selector in [
+                            'textarea[name="message"]',
+                            'textarea.connect-button-send-invite__custom-message',
+                            'textarea',
+                        ]:
+                            try:
+                                await page.fill(ta_selector, note[:300], timeout=2000)
+                                break
+                            except Exception:
+                                pass
+                        for send_sel in [
+                            'button[aria-label="Send"]',
+                            'button[aria-label="Done"]',
+                            'button:has-text("Send")',
+                        ]:
+                            try:
+                                await page.click(send_sel, timeout=3000)
+                                send_clicked = True
+                                break
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
                 if not send_clicked:
-                    # Try every likely "Send" selector — LinkedIn varies the text/aria-label
+                    # Try every likely "Send" selector — LinkedIn varies the text/aria-label.
+                    # Use page.click() directly (handles visibility + actionability internally).
                     for sel in [
                         'button[aria-label="Send without a note"]',
-                        'button[aria-label="Send now"]',
-                        'button[aria-label="Send"]',
-                        'button[aria-label="Done"]',
                         'button:has-text("Send without a note")',
+                        'button[aria-label="Send now"]',
                         'button:has-text("Send now")',
+                        'button[aria-label="Send"]',
                         'button:has-text("Send")',
+                        'button[aria-label="Done"]',
                         'button:has-text("Done")',
                     ]:
                         try:
-                            btn = page.locator(sel).first
-                            if await btn.is_visible(timeout=1500):
-                                logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
-                                await btn.click(timeout=10000)
-                                send_clicked = True
-                                break
+                            logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
+                            await page.click(sel, timeout=3000)
+                            send_clicked = True
+                            break
                         except Exception as send_err:
                             logger.info("Playwright: %s — send click failed for %r: %s", slug, sel, send_err)
 
