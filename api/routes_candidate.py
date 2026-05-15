@@ -496,6 +496,7 @@ async def get_candidate_profile(
     return {
         "candidate_id": candidate.id,
         "parsed_json": candidate.parsed_json,
+        "resume_profile": candidate.resume_profile or {},
         "target_roles": candidate.target_roles,
         "target_industries": candidate.target_industries,
         "dream_companies": candidate.dream_companies,
