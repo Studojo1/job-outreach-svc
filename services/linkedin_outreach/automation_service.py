@@ -229,6 +229,10 @@ async def send_connection_request(
             "Voyager API send failed (normInvitations=%s, relationships=%s) — falling back to Playwright",
             "301", "400",
         )
+    except LinkedInAuthError:
+        raise
+    except Exception as voyager_exc:
+        logger.warning("Voyager API threw exception — falling back to Playwright: %s", voyager_exc)
 
     # Playwright fallback: click the Connect button in a real browser
     try:
