@@ -198,12 +198,31 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 {"domain": ld.get("company_domain"), "name": ld.get("company")}
                 for ld in top_leads if ld.get("company") or ld.get("company_domain")
             ]
-            unique_count = len({(c["domain"] or c["name"] or "").lower() for c in top_companies})
-            logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
-                        unique_count, len(top_leads))
+            unique_keys: list[str] = []
+            unique_companies: list[dict] = []
+            for c in top_companies:
+                k = (c.get("domain") or c.get("name") or "").lower()
+                if k and k not in unique_keys:
+                    unique_keys.append(k)
+                    unique_companies.append(c)
 
-            # Cache-only: don't block scoring on LLM web search.
-            # Web research runs as a daemon thread after justification completes.
+            logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
+                        len(unique_companies), len(top_leads))
+
+            # Warm cache for top-20 unique companies via inline LLM web research.
+            # First-time candidates have no cached company profiles → justifier
+            # gets empty facts → writes generic bullets → banned phrases → null.
+            # Researching top-20 inline (~25s) ensures the justifier has real data.
+            # Companies after the top-20 fall back to cache-only (fine — they're
+            # lower ranked and cache will be populated by the bg daemon next run).
+            top_20 = unique_companies[:20]
+            if top_20:
+                logger.info("[JUSTIFY] inline LLM research for top-%d companies", len(top_20))
+                bulk_enrich_top_companies(
+                    db, top_20, enable_scrape=False, enable_llm_research=True
+                )
+
+            # Cache-only pass for all companies — top-20 are now cached.
             profiles = bulk_enrich_top_companies(
                 db, top_companies, enable_scrape=False, enable_llm_research=False
             )
@@ -602,7 +621,7 @@ async def search_leads(
                 quality_probe_loop,
                 filters,
                 candidate_prefs_for_probe,
-                3,  # max_iterations
+                1,  # max_iterations — 1 probe is enough; 3 added ~26s of sync latency
             )
             logger.info(
                 f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms "

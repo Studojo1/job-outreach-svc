@@ -17,8 +17,8 @@ from services.shared.ai.azure_openai_client import generate_json
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 8
-PARALLEL_BATCHES = 5
+BATCH_SIZE = 12
+PARALLEL_BATCHES = 10
 TEMPERATURE = 0.4
 
 # Phrases the LLM is forbidden from using — these are the markers of
