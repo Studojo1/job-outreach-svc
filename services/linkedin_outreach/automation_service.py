@@ -225,12 +225,36 @@ async def send_connection_request(
                     raise LinkedInAuthError(f"Session expired (status {r.status_code})")
                 res = r
 
-        logger.warning("All endpoints failed, last status=%d body=%s", res.status_code if res else -1, res.text[:200] if res else "")
+        logger.warning(
+            "Voyager API send failed (normInvitations=%s, relationships=%s) — falling back to Playwright",
+            "301", "400",
+        )
+
+    # Playwright fallback: click the Connect button in a real browser
+    try:
+        from services.linkedin_outreach.playwright_service import playwright_send_invitation
+        from core.config import settings
+        proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
+        # profile_url is not passed into this function — reconstruct from URN via /in/ lookup is not
+        # possible here, so we pass the URN directly as existing_urn and use a placeholder URL.
+        result = await playwright_send_invitation(
+            li_at=li_at,
+            jsessionid=jsessionid,
+            profile_url=f"https://www.linkedin.com/in/{profile_urn}/",
+            note=note,
+            proxy_url=proxy_url,
+            existing_urn=profile_urn,
+        )
+        if result.get("ok"):
+            logger.info("Playwright send succeeded for urn=%s", profile_urn)
+            return True
+        err = result.get("error", "unknown")
+        logger.warning("Playwright send failed for urn=%s: %s", profile_urn, err)
         return False
     except LinkedInAuthError:
         raise
     except Exception as e:
-        logger.error("send_connection_request failed: %s", e)
+        logger.error("Playwright send_connection_request failed: %s", e)
         return False
 
 

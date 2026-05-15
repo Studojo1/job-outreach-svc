@@ -192,6 +192,8 @@ export default function LinkedInOnboardingPage() {
   const [stats, setStats] = useState<CampaignStats | null>(null);
   const [requests, setRequests] = useState<ConnectionRequest[]>([]);
   const [toggling, setToggling] = useState(false);
+  const [sendingOne, setSendingOne] = useState(false);
+  const [sendOneResult, setSendOneResult] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'all' | 'sent' | 'accepted' | 'replied'>('all');
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
@@ -439,6 +441,21 @@ export default function LinkedInOnboardingPage() {
       await fetchDashboard(campaignId);
     } finally {
       setToggling(false);
+    }
+  };
+
+  const sendOneNow = async () => {
+    if (!campaignId) return;
+    setSendingOne(true);
+    setSendOneResult(null);
+    try {
+      const res = await api.post(`/linkedin/automation/campaigns/${campaignId}/send-one`);
+      setSendOneResult(res.data?.sent ? `Sent to ${res.data.profile_url || 'lead'}` : res.data?.message || 'Done');
+      await fetchDashboard(campaignId);
+    } catch (e: any) {
+      setSendOneResult(e?.response?.data?.detail || 'Failed');
+    } finally {
+      setSendingOne(false);
     }
   };
 
@@ -1057,18 +1074,35 @@ export default function LinkedInOnboardingPage() {
                 <h2 className="text-xl font-bold">{campaign.name}</h2>
                 <p className="text-sm text-muted-foreground">{campaign.target_role} · {campaign.daily_limit}/day limit</p>
               </div>
-              <Button
-                onClick={toggleCampaign}
-                disabled={toggling || campaign.status === 'auth_failed'}
-                variant={campaign.status === 'running' ? 'outline' : 'primary'}
-                className="flex items-center gap-1.5 text-sm"
-              >
-                {campaign.status === 'running'
-                  ? <><Pause className="w-3.5 h-3.5" /> Pause</>
-                  : <><Play className="w-3.5 h-3.5" /> Resume</>
-                }
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={sendOneNow}
+                  disabled={sendingOne || campaign.status !== 'running'}
+                  variant="outline"
+                  className="flex items-center gap-1.5 text-sm"
+                  title="Send one connection request immediately (bypasses IST window)"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  {sendingOne ? 'Sending…' : 'Send one now'}
+                </Button>
+                <Button
+                  onClick={toggleCampaign}
+                  disabled={toggling || campaign.status === 'auth_failed'}
+                  variant={campaign.status === 'running' ? 'outline' : 'primary'}
+                  className="flex items-center gap-1.5 text-sm"
+                >
+                  {campaign.status === 'running'
+                    ? <><Pause className="w-3.5 h-3.5" /> Pause</>
+                    : <><Play className="w-3.5 h-3.5" /> Resume</>
+                  }
+                </Button>
+              </div>
             </div>
+            {sendOneResult && (
+              <div className={`text-xs px-3 py-2 rounded-xl mb-4 ${sendOneResult.startsWith('Sent') ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                {sendOneResult}
+              </div>
+            )}
 
             {/* Auth failed banner */}
             {campaign.status === 'auth_failed' && (
