@@ -526,25 +526,37 @@ async def playwright_send_invitation(
                         pass
 
                 if not send_clicked:
-                    # Try every likely "Send" selector — LinkedIn varies the text/aria-label.
-                    # Use page.click() directly (handles visibility + actionability internally).
-                    for sel in [
-                        'button[aria-label="Send without a note"]',
-                        'button:has-text("Send without a note")',
-                        'button[aria-label="Send now"]',
-                        'button:has-text("Send now")',
-                        'button[aria-label="Send"]',
-                        'button:has-text("Send")',
-                        'button[aria-label="Done"]',
-                        'button:has-text("Done")',
-                    ]:
-                        try:
-                            logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
-                            await page.click(sel, timeout=3000)
-                            send_clicked = True
-                            break
-                        except Exception as send_err:
-                            logger.info("Playwright: %s — send click failed for %r: %s", slug, sel, send_err)
+                    # LinkedIn's invite modal is rendered with pointer-events blocked at the
+                    # viewport level in headless Chromium, so page.click() actionability checks
+                    # always time out even when the button is DOM-visible. Use a JS click to
+                    # bypass Playwright's hit-test and fire the event directly.
+                    js_clicked = await page.evaluate("""
+                        () => {
+                            const labels = [
+                                'Send without a note', 'Send now', 'Send', 'Done',
+                            ];
+                            for (const lbl of labels) {
+                                const byAttr = document.querySelector(
+                                    `button[aria-label="${lbl}"]`
+                                );
+                                if (byAttr) { byAttr.click(); return lbl; }
+                            }
+                            const all = [...document.querySelectorAll('button')];
+                            for (const lbl of labels) {
+                                const byText = all.find(
+                                    b => (b.innerText || '').trim().toLowerCase()
+                                            === lbl.toLowerCase()
+                                );
+                                if (byText) { byText.click(); return lbl; }
+                            }
+                            return null;
+                        }
+                    """)
+                    if js_clicked:
+                        logger.info("Playwright: %s — JS click fired for button: %s", slug, js_clicked)
+                        send_clicked = True
+                    else:
+                        logger.info("Playwright: %s — JS click found no matching button", slug)
 
                 if not send_clicked:
                     logger.warning("Playwright: %s — could not find Send button. Modal buttons were: %s", slug, modal_buttons)
