@@ -10,8 +10,8 @@
  */
 
 const API_BASES = [
-  'https://studojo.pro/job-outreach/api/v1/linkedin/automation',
-  'https://studojo.com/job-outreach/api/v1/linkedin/automation',
+  'https://studojo.pro/api/v1/outreach/linkedin/automation',
+  'https://studojo.com/api/v1/outreach/linkedin/automation',
 ];
 const POLL_PERIOD_MIN = 0.5;        // 30s
 const TASK_TIMEOUT_MS = 60_000;     // hard cap per send

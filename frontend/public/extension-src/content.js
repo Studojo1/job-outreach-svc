@@ -38,7 +38,7 @@ function pushAuthToBackground() {
       type: 'SET_STUDOJO_AUTH',
       jwt,
       // Use same-origin API base. Strip path to get origin + /job-outreach prefix.
-      origin: window.location.origin + '/job-outreach/api/v1/linkedin/automation',
+      origin: window.location.origin + '/api/v1/outreach/linkedin/automation',
     });
   } catch (_) { /* ignore */ }
 }
