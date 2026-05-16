@@ -792,7 +792,7 @@ export default function LinkedInOnboardingPage() {
                           <li>4. Come back here — the tab will update automatically</li>
                         </ol>
                         <a
-                          href="/extension/studojo-extension.zip"
+                          href="/lkot/extension/studojo-extension.zip"
                           download
                           className="inline-flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
                         >
