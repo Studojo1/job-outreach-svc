@@ -401,10 +401,26 @@ async def playwright_send_invitation(
                 # localStorage / Redux store). Without this, cookie-injected contexts
                 # silently skip modal rendering on the profile page.
                 logger.info("Playwright: bootstrapping session via /feed")
-                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                except Exception as goto_err:
+                    msg = str(goto_err)
+                    # Extension-login sessions are bound to the user's home IP — when routed
+                    # through our proxy, LinkedIn bounces every request to auth wall, causing
+                    # ERR_TOO_MANY_REDIRECTS. Surface this as auth-failed so the UI can prompt
+                    # the user to reconnect via Email & Password (which creates proxy-bound cookies).
+                    if "ERR_TOO_MANY_REDIRECTS" in msg or "ERR_HTTP_RESPONSE_CODE_FAILURE" in msg:
+                        raise LinkedInAuthError(
+                            "LinkedIn rejected the session — please reconnect using Email & Password. "
+                            "(Extension cookies don't work through our network proxy.)"
+                        )
+                    raise
                 feed_url = page.url
-                if "/login" in feed_url or "/uas/login" in feed_url:
-                    raise LinkedInAuthError("Session expired — browser redirected to login on /feed")
+                if "/login" in feed_url or "/uas/login" in feed_url or "/authwall" in feed_url:
+                    raise LinkedInAuthError(
+                        "LinkedIn rejected the session — please reconnect using Email & Password. "
+                        "(Extension cookies don't work through our network proxy.)"
+                    )
                 await page.wait_for_timeout(2000)
 
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
