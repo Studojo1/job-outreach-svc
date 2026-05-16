@@ -385,6 +385,10 @@ class LinkedInCampaign(Base):
     __tablename__ = "linkedin_campaigns"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    # Optional link to a candidate (student) profile — when present, the campaign
+    # targeting is auto-derived from resume_profile + quiz output, and per-lead
+    # message + match-reason use the student's context.
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
     name = Column(Text, nullable=False)
     status = Column(String(20), default="draft", nullable=False)  # draft|running|paused|completed
     # Quiz / ICP config
@@ -428,6 +432,7 @@ class LinkedInConnectionRequest(Base):
     # Outreach content
     connection_note = Column(Text)     # personalised note sent with request
     followup_message = Column(Text)    # personalised follow-up
+    match_reason = Column(Text)        # one-line "why this lead is a match" for the student
     # Status tracking
     status = Column(String(30), default="pending", nullable=False)
     # pending | sent | accepted | declined | ignored | followup_sent | replied

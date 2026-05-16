@@ -12,13 +12,14 @@ import {
   ChevronRight, ChevronLeft, Eye, EyeOff, ShieldCheck,
   AlertCircle, ExternalLink, CheckCircle, Users, MessageSquare,
   Send, Pause, Play, ThumbsUp, ThumbsDown, Minus, Linkedin, Search,
+  Loader2, ArrowRight, Sparkles,
 } from 'lucide-react';
 import api from '@/lib/api';
 import type { LinkedInCampaign, CampaignStats, ConnectionRequest } from '@/lib/types/linkedin';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6;
+type Step = 1 | 2 | 3 | 4;
 
 interface QuizData {
   target_role: string;
@@ -29,33 +30,25 @@ interface QuizData {
   campaign_name: string;
 }
 
+interface CandidateSummary {
+  id: number;
+  primary_role: string;
+  target_roles: string[];
+  target_industries: string[];
+  dream_companies: any[];
+  skills: string[];
+  location: string | null;
+  quiz_complete: boolean;
+  created_at: string | null;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const STEPS = ['Target', 'Industries', 'Location', 'Connect', 'Messages', 'Live'];
+const STEPS = ['Profile', 'Connect', 'Messages', 'Live'];
 
-const INDUSTRIES = [
-  'SaaS / Software', 'Fintech', 'E-commerce', 'Health Tech',
-  'Ed Tech', 'Climate Tech', 'Media / Content', 'Consulting',
-  'D2C / Consumer', 'AI / ML',
-];
-
-const LOCATIONS = [
-  'India', 'United States', 'United Kingdom',
-  'UAE / Dubai', 'Singapore', 'Europe', 'Southeast Asia', 'Global',
-];
-
-const COMPANY_SIZES = [
-  '1–10 (pre-seed/seed)',
-  '11–50 (early stage)',
-  '51–200 (Series A/B)',
-  '201–1000 (growth)',
-  '1000+ (enterprise)',
-];
-
-const ROLE_SUGGESTIONS = [
-  'Founder / Co-founder', 'Head of Marketing', 'VP Sales',
-  'Product Manager', 'CTO', 'HR Manager', 'Chief of Staff',
-];
+// Where to send students to build their candidate profile (resume upload + AI chat quiz).
+// The path is rewritten by ingress; `?return=/lkot` makes the outreach app redirect back here.
+const STUDENT_PROFILE_URL = '/outreach/onboarding/upload?return=/lkot';
 
 const NOTE_PLACEHOLDER = `Hi {{name}}, came across your work at {{company}} — really interesting what you're building. Would love to connect!`;
 const FOLLOWUP_PLACEHOLDER = `Hey {{name}}, thanks for connecting! I'm a student really interested in {{role}} and what you're doing at {{company}}. Would love to chat for 15 min if you have time.`;
@@ -70,49 +63,6 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
-
-function Chip({
-  label, selected, onClick,
-}: { label: string; selected: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-2 rounded-full text-sm border transition-all ${
-        selected
-          ? 'bg-primary text-white border-primary font-medium'
-          : 'border-border text-foreground hover:border-primary/50 bg-white'
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function StepNav({
-  onBack, onNext, nextLabel = 'Continue', disabled = false, hideBack = false,
-}: {
-  onBack?: () => void;
-  onNext: () => void;
-  nextLabel?: string;
-  disabled?: boolean;
-  hideBack?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between mt-8">
-      {!hideBack && onBack ? (
-        <button
-          onClick={onBack}
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <ChevronLeft className="w-4 h-4" /> Back
-        </button>
-      ) : <div />}
-      <Button onClick={onNext} disabled={disabled}>
-        {nextLabel} <ChevronRight className="w-4 h-4 ml-1" />
-      </Button>
-    </div>
-  );
-}
 
 function MetricTile({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
   return (
@@ -179,6 +129,12 @@ export default function LinkedInOnboardingPage() {
   const [followupMessage, setFollowupMessage] = useState('');
   const [dailyLimit, setDailyLimit] = useState(20);
 
+  // Candidate / profile state (Step 1)
+  const [candidate, setCandidate] = useState<CandidateSummary | null>(null);
+  const [candidateLoading, setCandidateLoading] = useState(true);
+  const [creatingFromProfile, setCreatingFromProfile] = useState(false);
+  const [profileError, setProfileError] = useState('');
+
   // Campaign + leads state
   const [campaignId, setCampaignId] = useState<number | null>(null);
   const [leads, setLeads] = useState<ConnectionRequest[]>([]);
@@ -198,25 +154,70 @@ export default function LinkedInOnboardingPage() {
 
   const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Toggle helpers
-  const toggleMulti = (field: 'target_industries' | 'target_locations' | 'target_company_sizes', val: string) => {
-    setQuiz(q => {
-      const arr = q[field];
-      return { ...q, [field]: arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val] };
-    });
-  };
-
   // Step validity
+  // Step 1 (Profile): user must have a candidate profile to continue
+  // Step 2 (Connect): handled by the connect handlers themselves
+  // Step 3 (Messages): always valid (templates pre-filled)
   const canNext = (): boolean => {
-    if (step === 1) return quiz.target_role.trim().length > 1;
-    if (step === 2) return quiz.target_industries.length > 0;
-    if (step === 3) return quiz.target_locations.length > 0 && quiz.target_company_sizes.length > 0 && quiz.campaign_name.trim().length > 1;
-    if (step === 4) return liEmail.length > 0 && liPassword.length > 0;
+    if (step === 1) return !!candidate;
+    if (step === 2) return liEmail.length > 0 && liPassword.length > 0;
     return true;
   };
 
-  const next = () => setStep(s => { const n = (s + 1) as Step; saveWizard(n, quiz, campaignId); return n; });
-  const back = () => setStep(s => { const n = (s - 1) as Step; saveWizard(n, quiz, campaignId); return n; });
+  // Fetch the user's candidate profile on mount
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/linkedin/automation/my-candidate')
+      .then(res => { if (!cancelled) setCandidate(res.data?.candidate || null); })
+      .catch(() => { if (!cancelled) setCandidate(null); })
+      .finally(() => { if (!cancelled) setCandidateLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Create the LKOT campaign from the candidate profile + advance to Connect step
+  const continueWithProfile = async () => {
+    if (!candidate) return;
+    setCreatingFromProfile(true);
+    setProfileError('');
+    try {
+      const res = await api.post('/linkedin/automation/campaigns/from-profile', {
+        candidate_id: candidate.id,
+        daily_limit: 5,
+      });
+      const c = res.data;
+      setCampaignId(c.id);
+      setCampaign(c);
+      // Pre-fill the message templates with the AI-generated note so user can tweak in step 3
+      if (c.connection_note) setConnectionNote(c.connection_note);
+      if (c.followup_message) setFollowupMessage(c.followup_message);
+      // Pre-fill quiz mirror so existing code paths that read quiz.* don't break
+      setQuiz(q => ({
+        ...q,
+        target_role: c.target_role || '',
+        target_industries: c.target_industries || [],
+        target_locations: c.target_locations || [],
+        target_company_sizes: c.target_company_sizes || [],
+        target_keywords: c.target_keywords || '',
+        campaign_name: c.name || '',
+      }));
+      const updatedQuiz: QuizData = {
+        target_role: c.target_role || '',
+        target_industries: c.target_industries || [],
+        target_locations: c.target_locations || [],
+        target_company_sizes: c.target_company_sizes || [],
+        target_keywords: c.target_keywords || '',
+        campaign_name: c.name || '',
+      };
+      saveWizard(2 as Step, updatedQuiz, c.id);
+      setStep(2);
+    } catch (err: any) {
+      setProfileError(err.response?.data?.detail || 'Could not create campaign from profile.');
+    } finally {
+      setCreatingFromProfile(false);
+    }
+  };
+
+  const back = () => setStep(s => { const n = Math.max(1, s - 1) as Step; saveWizard(n, quiz, campaignId); return n; });
 
   // Step 4 → connect + search leads
   const startLeadSearch = async (id: number) => {
@@ -263,27 +264,31 @@ export default function LinkedInOnboardingPage() {
       if (cData?.status === 'auth_failed') {
         await api.post(`/linkedin/automation/campaigns/${campaignId}/resume`);
         await fetchDashboard(campaignId);
-        setStep(6);
-        saveWizard(6, quiz, campaignId);
+        setStep(4);
+        saveWizard(4, quiz, campaignId);
         pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
         return;
       }
     }
 
-    const res = await api.post('/linkedin/automation/campaigns', {
-      name: quiz.campaign_name || `${quiz.target_role} outreach`,
-      target_role: quiz.target_role,
-      target_industries: quiz.target_industries,
-      target_locations: quiz.target_locations,
-      target_company_sizes: quiz.target_company_sizes,
-      target_keywords: quiz.target_keywords || null,
-      daily_limit: dailyLimit,
-    });
-    const id = res.data.id;
-    setCampaignId(id);
-    setStep(5);
-    saveWizard(5, quiz, id);
-    await startLeadSearch(id);
+    // If the campaign wasn't already created via /from-profile (legacy path), create one now.
+    let id = campaignId;
+    if (!id) {
+      const res = await api.post('/linkedin/automation/campaigns', {
+        name: quiz.campaign_name || `${quiz.target_role} outreach`,
+        target_role: quiz.target_role,
+        target_industries: quiz.target_industries,
+        target_locations: quiz.target_locations,
+        target_company_sizes: quiz.target_company_sizes,
+        target_keywords: quiz.target_keywords || null,
+        daily_limit: dailyLimit,
+      });
+      id = res.data.id;
+      setCampaignId(id);
+    }
+    setStep(3);
+    saveWizard(3, quiz, id);
+    await startLeadSearch(id!);
   };
 
   const handleConnect = async () => {
@@ -409,8 +414,8 @@ export default function LinkedInOnboardingPage() {
 
       // Load dashboard data
       await fetchDashboard(campaignId);
-      setStep(6);
-      saveWizard(6, quiz, campaignId);
+      setStep(4);
+      saveWizard(4, quiz, campaignId);
 
       // Auto-refresh every 30s
       pollRef.current = setInterval(() => fetchDashboard(campaignId), 30000);
@@ -488,14 +493,14 @@ export default function LinkedInOnboardingPage() {
       setQuiz(savedQuiz);
       setCampaignId(savedCampaignId);
 
-      if (savedStep === 6 && savedCampaignId) {
+      if (savedStep === 4 && savedCampaignId) {
         // Restore live dashboard
         fetchDashboard(savedCampaignId).then(() => {
-          setStep(6);
+          setStep(4);
           setRestored(true);
           pollRef.current = setInterval(() => fetchDashboard(savedCampaignId), 30000);
         }).catch(() => { clearWizard(); setRestored(true); });
-      } else if (savedStep === 5 && savedCampaignId) {
+      } else if (savedStep === 3 && savedCampaignId) {
         // Restore leads step — re-fetch existing leads (don't re-trigger search)
         api.get(`/linkedin/automation/campaigns/${savedCampaignId}/requests?limit=50`)
           .then(r => {
@@ -504,7 +509,7 @@ export default function LinkedInOnboardingPage() {
             } else {
               setLeadsError('No leads found. Try broadening your search criteria.');
             }
-            setStep(5);
+            setStep(3);
             setRestored(true);
           })
           .catch(() => { clearWizard(); setRestored(true); });
@@ -546,117 +551,120 @@ export default function LinkedInOnboardingPage() {
           <ProgressSteps steps={STEPS} currentStep={step} />
         </div>
 
-        {/* ── Step 1: Target role ─────────────────────────────────────── */}
+        {/* ── Step 1: Profile (driven by the outreach quiz) ──────────────── */}
         {step === 1 && (
           <div>
-            <h2 className="text-xl font-bold mb-1">Who do you want to reach?</h2>
+            <h2 className="text-xl font-bold mb-1">Start with your profile</h2>
             <p className="text-sm text-muted-foreground mb-6">
-              Enter the job title of your ideal LinkedIn connection.
+              We use your Studojo profile to find the right people to connect with —
+              and write a personal note for each one.
             </p>
-            <input
-              type="text"
-              value={quiz.target_role}
-              onChange={e => setQuiz(q => ({ ...q, target_role: e.target.value }))}
-              placeholder="e.g. Head of Marketing, Founder, VP Sales"
-              className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 mb-4"
-              autoFocus
-            />
-            <div className="flex flex-wrap gap-2">
-              {ROLE_SUGGESTIONS.map(r => (
-                <Chip
-                  key={r} label={r} selected={quiz.target_role === r}
-                  onClick={() => setQuiz(q => ({ ...q, target_role: r }))}
-                />
-              ))}
-            </div>
-            <StepNav hideBack onNext={next} disabled={!canNext()} />
+
+            {candidateLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
+                <Loader2 className="w-4 h-4 animate-spin" /> Checking your profile…
+              </div>
+            )}
+
+            {/* No candidate profile yet — send them to upload + quiz */}
+            {!candidateLoading && !candidate && (
+              <div className="rounded-2xl border border-border p-6">
+                <p className="text-sm font-medium mb-1">You haven't built your profile yet</p>
+                <p className="text-sm text-muted-foreground mb-5">
+                  Upload your resume and answer a few quick questions. Takes about 3 minutes —
+                  then we'll find LinkedIn connections matched to your goals.
+                </p>
+                <a
+                  href={STUDENT_PROFILE_URL}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
+                >
+                  Build my profile <ArrowRight className="w-4 h-4" />
+                </a>
+              </div>
+            )}
+
+            {/* Candidate exists but quiz not finished */}
+            {!candidateLoading && candidate && !candidate.quiz_complete && (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6">
+                <p className="text-sm font-medium mb-1">Almost there — finish your quiz</p>
+                <p className="text-sm text-muted-foreground mb-5">
+                  Your resume is in, but we need a few quiz answers to know what roles
+                  and industries to target.
+                </p>
+                <a
+                  href="/outreach/onboarding/chat?return=/lkot"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
+                >
+                  Finish the quiz <ArrowRight className="w-4 h-4" />
+                </a>
+              </div>
+            )}
+
+            {/* Ready — show profile summary + continue */}
+            {!candidateLoading && candidate && candidate.quiz_complete && (
+              <div>
+                <div className="rounded-2xl border border-border p-5 space-y-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Target role</p>
+                    <p className="text-sm font-medium">{candidate.primary_role || '—'}</p>
+                  </div>
+                  {candidate.target_industries?.length > 0 && (
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Industries</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {candidate.target_industries.map((ind: any, i: number) => (
+                          <span key={i} className="px-2.5 py-1 bg-primary/5 border border-primary/20 rounded-lg text-xs">
+                            {typeof ind === 'string' ? ind : ind.industry || ind.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {candidate.location && (
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Location</p>
+                      <p className="text-sm">{candidate.location}</p>
+                    </div>
+                  )}
+                  {candidate.skills?.length > 0 && (
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Skills</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {candidate.skills.slice(0, 8).map((s: string, i: number) => (
+                          <span key={i} className="px-2.5 py-1 bg-muted rounded-lg text-xs">{s}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-xs text-muted-foreground mt-3">
+                  Want to change this?{' '}
+                  <a href="/outreach/onboarding/chat?return=/lkot" className="text-primary underline">
+                    Redo the quiz
+                  </a>
+                </p>
+
+                {profileError && (
+                  <p className="text-sm text-red-600 mt-3">{profileError}</p>
+                )}
+
+                <button
+                  onClick={continueWithProfile}
+                  disabled={creatingFromProfile}
+                  className="mt-6 w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
+                >
+                  {creatingFromProfile
+                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Setting up your campaign…</>
+                    : <>Continue with this profile <ArrowRight className="w-4 h-4" /></>}
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-        {/* ── Step 2: Industries ──────────────────────────────────────── */}
+        {/* ── Step 2: Connect LinkedIn ────────────────────────────────── */}
         {step === 2 && (
-          <div>
-            <h2 className="text-xl font-bold mb-1">What industries?</h2>
-            <p className="text-sm text-muted-foreground mb-6">Select all that apply.</p>
-            <div className="flex flex-wrap gap-2">
-              {INDUSTRIES.map(ind => (
-                <Chip
-                  key={ind} label={ind}
-                  selected={quiz.target_industries.includes(ind)}
-                  onClick={() => toggleMulti('target_industries', ind)}
-                />
-              ))}
-            </div>
-            <StepNav onBack={back} onNext={next} disabled={!canNext()} />
-          </div>
-        )}
-
-        {/* ── Step 3: Location + company size + name ───────────────────── */}
-        {step === 3 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-xl font-bold mb-1">Where are they based?</h2>
-              <p className="text-sm text-muted-foreground mb-4">Pick your target markets.</p>
-              <div className="flex flex-wrap gap-2">
-                {LOCATIONS.map(loc => (
-                  <Chip
-                    key={loc} label={loc}
-                    selected={quiz.target_locations.includes(loc)}
-                    onClick={() => toggleMulti('target_locations', loc)}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <p className="text-sm font-medium mb-3">Company size</p>
-              <div className="space-y-2">
-                {COMPANY_SIZES.map(size => (
-                  <button
-                    key={size}
-                    onClick={() => toggleMulti('target_company_sizes', size)}
-                    className={`w-full text-left px-4 py-3 rounded-xl border text-sm transition-all ${
-                      quiz.target_company_sizes.includes(size)
-                        ? 'bg-primary/5 border-primary font-medium'
-                        : 'border-border hover:border-primary/40'
-                    }`}
-                  >
-                    {size}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="text-sm font-medium block mb-1.5">Campaign name</label>
-              <input
-                type="text"
-                value={quiz.campaign_name}
-                onChange={e => setQuiz(q => ({ ...q, campaign_name: e.target.value }))}
-                placeholder={`${quiz.target_role} outreach — ${new Date().toLocaleDateString('en', { month: 'short', year: 'numeric' })}`}
-                className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm font-medium block mb-1.5">
-                Extra keywords <span className="font-normal text-muted-foreground">(optional)</span>
-              </label>
-              <input
-                type="text"
-                value={quiz.target_keywords}
-                onChange={e => setQuiz(q => ({ ...q, target_keywords: e.target.value }))}
-                placeholder="e.g. Series A startup, YC, AI"
-                className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
-              />
-            </div>
-
-            <StepNav onBack={back} onNext={next} disabled={!canNext()} />
-          </div>
-        )}
-
-        {/* ── Step 4: Connect LinkedIn ────────────────────────────────── */}
-        {step === 4 && (
           <div>
             <div className="flex items-center gap-3 mb-6">
               <div className="w-10 h-10 bg-[#0077B5] rounded-xl flex items-center justify-center">
@@ -908,8 +916,8 @@ export default function LinkedInOnboardingPage() {
           </div>
         )}
 
-        {/* ── Step 5: Leads + messages ────────────────────────────────── */}
-        {step === 5 && (
+        {/* ── Step 3: Leads + messages ────────────────────────────────── */}
+        {step === 3 && (
           <div>
             {/* Leads found section */}
             <div className="mb-6">
@@ -942,8 +950,8 @@ export default function LinkedInOnboardingPage() {
                     <button
                       onClick={() => {
                         setLeadsError('');
-                        setStep(4);
-                        saveWizard(4, quiz, campaignId);
+                        setStep(2);
+                        saveWizard(2, quiz, campaignId);
                       }}
                       className="text-xs text-amber-700 hover:underline text-center"
                     >
@@ -969,12 +977,18 @@ export default function LinkedInOnboardingPage() {
                   </div>
                   <div className="divide-y divide-border max-h-48 overflow-y-auto">
                     {leads.slice(0, 10).map(lead => (
-                      <div key={lead.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                      <div key={lead.id} className="px-4 py-2.5 flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-sm font-medium truncate">{lead.name}</p>
                           {lead.headline && <p className="text-xs text-muted-foreground truncate">{lead.headline}</p>}
+                          {lead.match_reason && (
+                            <p className="text-xs text-primary/80 mt-0.5 line-clamp-2 flex items-start gap-1">
+                              <Sparkles className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                              <span>{lead.match_reason}</span>
+                            </p>
+                          )}
                         </div>
-                        <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-foreground flex-shrink-0">
+                        <a href={lead.profile_url} target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-foreground flex-shrink-0 mt-0.5">
                           <ExternalLink className="w-3 h-3" />
                         </a>
                       </div>
@@ -1066,8 +1080,8 @@ export default function LinkedInOnboardingPage() {
           </div>
         )}
 
-        {/* ── Step 6: Live dashboard ──────────────────────────────────── */}
-        {step === 6 && campaign && stats && (
+        {/* ── Step 4: Live dashboard ──────────────────────────────────── */}
+        {step === 4 && campaign && stats && (
           <div>
             <div className="flex items-center justify-between mb-6">
               <div>
@@ -1114,8 +1128,8 @@ export default function LinkedInOnboardingPage() {
                 </div>
                 <button
                   onClick={() => {
-                    setStep(4);
-                    saveWizard(4, quiz, campaignId);
+                    setStep(2);
+                    saveWizard(2, quiz, campaignId);
                   }}
                   className="flex-shrink-0 text-xs font-medium text-amber-800 underline hover:no-underline"
                 >
@@ -1166,6 +1180,12 @@ export default function LinkedInOnboardingPage() {
                             </a>
                           </div>
                           {req.headline && <p className="text-xs text-muted-foreground truncate">{req.headline}</p>}
+                          {req.match_reason && (
+                            <p className="text-xs text-primary/80 mt-1 line-clamp-2 flex items-start gap-1">
+                              <Sparkles className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                              <span>{req.match_reason}</span>
+                            </p>
+                          )}
                           {req.reply_text && (
                             <p className="text-xs text-foreground/70 italic mt-1 line-clamp-1">"{req.reply_text}"</p>
                           )}

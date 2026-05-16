@@ -417,6 +417,159 @@ async def create_campaign(
     return _campaign_to_response(campaign)
 
 
+class CreateCampaignFromProfileRequest(BaseModel):
+    candidate_id: int
+    name: Optional[str] = None              # if omitted, derived from candidate's target role
+    connection_note: Optional[str] = None   # if omitted, AI generates per-lead notes at lead-fetch time
+    followup_message: Optional[str] = None
+    daily_limit: int = Field(default=5, ge=1, le=20)
+    override_target_role: Optional[str] = None       # if student wants to override quiz output
+    override_target_locations: Optional[list[str]] = None
+
+
+@router.post("/campaigns/from-profile", response_model=CampaignResponse)
+async def create_campaign_from_profile(
+    body: CreateCampaignFromProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create an LKOT campaign whose targeting is auto-derived from a Candidate's
+    resume_profile + quiz output (target_roles, target_industries, dream_companies,
+    location, etc.). Called after the student finishes the outreach quiz.
+    """
+    from database.models import Candidate
+
+    cand = db.query(Candidate).filter(
+        Candidate.id == body.candidate_id,
+        Candidate.user_id == current_user.id,
+    ).first()
+    if not cand:
+        raise HTTPException(status_code=404, detail="Candidate profile not found")
+
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    dream_companies = cand.dream_companies if isinstance(cand.dream_companies, list) else []
+
+    # Target role — required field on the campaign schema.
+    target_role = (body.override_target_role or "").strip()
+    if not target_role and target_roles:
+        first = target_roles[0]
+        target_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not target_role:
+        target_role = (profile.get("target_role") or profile.get("current_role") or "").strip()
+    if not target_role:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not derive a target role from the profile. Complete the quiz first or pass override_target_role.",
+        )
+
+    # Locations
+    locations: list[str] = []
+    if body.override_target_locations:
+        locations = body.override_target_locations
+    else:
+        prof_locs = profile.get("preferred_locations") or profile.get("target_locations") or []
+        if isinstance(prof_locs, list):
+            locations = [str(x) for x in prof_locs if x]
+        elif isinstance(prof_locs, str):
+            locations = [prof_locs]
+        if not locations:
+            city = (profile.get("location") or profile.get("city") or "").strip()
+            if city:
+                locations = [city]
+
+    # Industries
+    industries: list[str] = []
+    for ind in target_industries:
+        if isinstance(ind, str):
+            industries.append(ind)
+        elif isinstance(ind, dict):
+            v = ind.get("industry") or ind.get("name")
+            if v:
+                industries.append(str(v))
+
+    # Keywords bias from dream_companies + top skills
+    keyword_parts: list[str] = []
+    if dream_companies:
+        keyword_parts.extend([str(c.get("name") if isinstance(c, dict) else c) for c in dream_companies if c])
+    skills = profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        keyword_parts.extend([str(s) for s in skills[:5]])
+    target_keywords = " ".join(keyword_parts).strip() or None
+
+    name = (body.name or f"{target_role} outreach").strip()
+
+    campaign = LinkedInCampaign(
+        user_id=current_user.id,
+        candidate_id=cand.id,
+        name=name,
+        target_role=target_role,
+        target_industries=industries,
+        target_locations=locations,
+        target_company_sizes=[],
+        target_keywords=target_keywords,
+        connection_note=body.connection_note,
+        followup_message=body.followup_message,
+        daily_limit=body.daily_limit,
+    )
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+    logger.info(
+        "Campaign %d created from candidate %d — role=%r industries=%s locations=%s",
+        campaign.id, cand.id, target_role, industries, locations,
+    )
+    return _campaign_to_response(campaign)
+
+
+@router.get("/my-candidate")
+async def my_candidate(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the user's most recent candidate profile (or null).
+
+    LKOT Profile step calls this to decide whether to show 'continue with your
+    profile' or send them through the outreach upload + quiz flow first.
+    """
+    from database.models import Candidate
+
+    cand = (
+        db.query(Candidate)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Candidate.created_at.desc())
+        .first()
+    )
+    if not cand:
+        return {"candidate": None}
+
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    quiz_complete = bool(target_roles or target_industries)
+    primary_role = ""
+    if target_roles:
+        first = target_roles[0]
+        primary_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not primary_role:
+        primary_role = profile.get("target_role") or profile.get("current_role") or ""
+
+    return {
+        "candidate": {
+            "id": cand.id,
+            "primary_role": primary_role,
+            "target_roles": target_roles,
+            "target_industries": target_industries,
+            "dream_companies": cand.dream_companies or [],
+            "skills": profile.get("skills") or [],
+            "location": profile.get("location") or profile.get("city"),
+            "quiz_complete": quiz_complete,
+            "created_at": cand.created_at.isoformat() if cand.created_at else None,
+        }
+    }
+
+
 @router.get("/campaigns", response_model=list[CampaignResponse])
 async def list_campaigns(
     current_user: User = Depends(get_current_user),
@@ -573,9 +726,20 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         ).all()
         req_ids = [r.id for r in reqs]
 
+        # Build a student summary from the linked candidate (if any) so match_reason
+        # references the student's real background, not just the target role.
+        student_summary = None
+        if c.candidate_id:
+            from database.models import Candidate
+            cand = db.query(Candidate).filter(Candidate.id == c.candidate_id).first()
+            if cand:
+                student_summary = _summarise_candidate(cand, c.target_role)
+
         # Fire-and-forget AI personalisation — does not block lead availability
         import asyncio as _asyncio
-        _asyncio.create_task(_personalise_leads(req_ids, people, c.target_role, user_name, c.connection_note))
+        _asyncio.create_task(
+            _personalise_leads(req_ids, people, c.target_role, user_name, c.connection_note, student_summary)
+        )
 
     except Exception as e:
         logger.error("Lead search failed for campaign %d: %s", campaign_id, e, exc_info=True)
@@ -583,31 +747,87 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         db.close()
 
 
+def _summarise_candidate(cand, target_role: str) -> str:
+    """One-paragraph factual summary of a Candidate row, used to ground the
+    per-lead match_reason prompt in the student's actual background."""
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    parts: list[str] = []
+    current = profile.get("current_role") or profile.get("headline")
+    if current:
+        parts.append(f"Currently: {current}")
+    edu = profile.get("education") or profile.get("school")
+    if isinstance(edu, list) and edu:
+        first = edu[0]
+        if isinstance(first, dict):
+            edu_str = " ".join(str(first.get(k, "")) for k in ("degree", "school", "institution") if first.get(k))
+        else:
+            edu_str = str(first)
+        if edu_str.strip():
+            parts.append(f"Education: {edu_str.strip()}")
+    elif isinstance(edu, str) and edu:
+        parts.append(f"Education: {edu}")
+    skills = profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        parts.append(f"Skills: {', '.join(str(s) for s in skills[:6])}")
+    loc = profile.get("location") or profile.get("city")
+    if loc:
+        parts.append(f"Location: {loc}")
+    parts.append(f"Looking for: {target_role}")
+    return ". ".join(parts)[:600]
+
+
 async def _personalise_leads(
-    req_ids: list[int], people: list[dict], target_role: str, user_name: str, template: str | None
+    req_ids: list[int],
+    people: list[dict],
+    target_role: str,
+    user_name: str,
+    template: str | None,
+    student_summary: str | None = None,
 ) -> None:
-    """Background task: update saved leads with AI-personalised connection notes."""
+    """Background task: update saved leads with AI-personalised connection notes AND
+    a one-line match reason. Runs after lead save so the dashboard sees leads immediately."""
+    import asyncio as _asyncio
     from database.session import SessionLocal
-    from services.linkedin_outreach.message_gen import generate_connection_message
+    from services.linkedin_outreach.message_gen import generate_connection_message, generate_match_reason
 
     db = SessionLocal()
     try:
-        for req_id, person in zip(req_ids, people):
+        # Generate note + match reason concurrently per lead, batched to respect OpenAI rate limits
+        async def enrich_one(req_id: int, person: dict) -> tuple[int, str, str]:
             try:
-                note = await generate_connection_message(
+                note_task = generate_connection_message(
                     person_name=person.get("name", ""),
                     person_headline=person.get("headline", ""),
                     person_company=person.get("company", ""),
                     target_role=target_role,
                     student_name=user_name,
                 )
-                req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
-                if req and req.status == "pending":
-                    req.connection_note = note
+                reason_task = generate_match_reason(
+                    person_name=person.get("name", ""),
+                    person_headline=person.get("headline", ""),
+                    person_company=person.get("company", ""),
+                    target_role=target_role,
+                    student_summary=student_summary,
+                )
+                note, reason = await _asyncio.gather(note_task, reason_task)
+                return req_id, note, reason
             except Exception:
-                pass
-        db.commit()
-        logger.info("Personalised %d connection notes in background", len(req_ids))
+                return req_id, "", ""
+
+        batch_size = 5
+        for i in range(0, len(req_ids), batch_size):
+            batch = list(zip(req_ids, people))[i : i + batch_size]
+            results = await _asyncio.gather(*[enrich_one(rid, p) for rid, p in batch])
+            for req_id, note, reason in results:
+                req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
+                if not req or req.status != "pending":
+                    continue
+                if note:
+                    req.connection_note = note
+                if reason:
+                    req.match_reason = reason
+            db.commit()
+        logger.info("Personalised %d leads (note + match_reason) in background", len(req_ids))
     except Exception as e:
         logger.error("Background personalisation failed: %s", e)
     finally:
@@ -872,6 +1092,7 @@ class ConnectionRequestResponse(BaseModel):
     profile_url: str
     connection_note: Optional[str]
     followup_message: Optional[str]
+    match_reason: Optional[str]
     status: str
     sent_at: Optional[str]
     accepted_at: Optional[str]
@@ -944,6 +1165,7 @@ async def list_requests(
             profile_url=r.profile_url,
             connection_note=r.connection_note,
             followup_message=r.followup_message,
+            match_reason=r.match_reason,
             status=r.status,
             sent_at=r.sent_at.isoformat() if r.sent_at else None,
             accepted_at=r.accepted_at.isoformat() if r.accepted_at else None,
