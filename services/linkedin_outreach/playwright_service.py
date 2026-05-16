@@ -380,14 +380,19 @@ async def playwright_send_invitation(
                         logger.info("Playwright: API %s %s → %s body=%s", method, url, response.status, body[:200])
                     except Exception:
                         pass
-                if "normInvitations" in url or (
-                    "relationships/invitations" in url
-                    and method == "POST"
-                ) or (
-                    "custom-invite" in url and method == "POST"
-                ) or (
-                    "invite" in url.lower() and method == "POST"
-                ):
+                is_invite_url = (
+                    "normInvitations" in url
+                    or ("relationships/invitations" in url and method == "POST")
+                    or ("custom-invite" in url and method == "POST")
+                    or ("invite" in url.lower() and method == "POST")
+                    # LinkedIn sometimes uses a short opaque path like /djxfEtYTn-SPc8l7aJp
+                    # as the actual invite-submit endpoint — capture any POST to a path
+                    # that looks like a short hash (no slashes after the first segment).
+                    or (method == "POST" and bool(
+                        re.search(r'linkedin\.com/[A-Za-z0-9_-]{8,35}$', url)
+                    ))
+                )
+                if is_invite_url:
                     try:
                         invitation_result["status"] = response.status
                         invitation_result["body"] = await response.text()
@@ -582,20 +587,32 @@ async def playwright_send_invitation(
                 elif inv_status is not None:
                     return {"ok": False, "error": f"Invitation API returned {inv_status}: {inv_body}", "profile_urn": existing_urn}
                 else:
-                    # No network interception — check if the Connect button changed to
-                    # Pending in the profile action bar (a real UI-level success signal).
-                    # Use a specific button selector, NOT a full-page text scan, to avoid
-                    # false-positives from "X pending invitations" in LinkedIn's nav.
+                    # No network interception — check DOM state via JS to avoid
+                    # is_visible(timeout=) which is not a valid Playwright Python kwarg.
                     await page.wait_for_timeout(1500)
-                    try:
-                        pending_btn = page.locator(
-                            'button[aria-label*="Pending"], button:has-text("Pending")'
-                        ).first
-                        if await pending_btn.is_visible(timeout=2000):
-                            logger.info("Playwright: %s — Connect button changed to Pending (UI success)", slug)
-                            return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
-                    except Exception:
-                        pass
+                    dom_state = await page.evaluate("""
+                        () => {
+                            // Modal gone = invite was submitted
+                            const sendBtn = document.querySelector(
+                                'button[aria-label="Send without a note"]'
+                            );
+                            const modalGone = !sendBtn || sendBtn.offsetParent === null;
+                            // Pending button in profile action bar
+                            const pendingBtn = [...document.querySelectorAll('button')].find(
+                                b => (b.getAttribute('aria-label') || '').toLowerCase().includes('pending')
+                                  || (b.innerText || '').trim().toLowerCase() === 'pending'
+                            );
+                            return {
+                                modalGone: modalGone,
+                                hasPending: !!pendingBtn,
+                            };
+                        }
+                    """)
+                    logger.info("Playwright: %s — post-click DOM state: %s", slug, dom_state)
+                    if dom_state.get("modalGone") or dom_state.get("hasPending"):
+                        logger.info("Playwright: %s — invite confirmed via DOM (modal gone=%s pending=%s)",
+                                    slug, dom_state.get("modalGone"), dom_state.get("hasPending"))
+                        return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
                     logger.warning("Playwright: %s — send clicked but no API call intercepted and no Pending button", slug)
                     return {"ok": False, "error": "Invitation sent click fired but could not confirm delivery", "profile_urn": existing_urn}
 
