@@ -487,30 +487,19 @@ async def playwright_send_invitation(
                 # Strictly limit to invite-specific labels — never "Send" alone which
                 # is LinkedIn's messaging-overlay compose button.
                 send_result = await page.evaluate("""
-                    (noteText) => {
+                    () => {
                         const all = [...document.querySelectorAll('button')];
                         const visible = b => b.offsetParent !== null;
 
-                        // Debug: capture all visible buttons for logging
                         const dump = all.filter(visible).map(b => ({
                             label: b.getAttribute('aria-label') || '',
                             text: b.innerText.trim().slice(0, 40),
                         }));
 
-                        if (noteText) {
-                            // Click "Add a note" to open the textarea
-                            const addNote = all.find(b => visible(b) && (
-                                (b.getAttribute('aria-label') || '').trim() === 'Add a note' ||
-                                (b.innerText || '').trim().toLowerCase() === 'add a note'
-                            ));
-                            if (addNote) {
-                                addNote.click();
-                                return { action: 'add_note_clicked', dump };
-                            }
-                        }
-
-                        // Find and click the invite-specific send button.
-                        // "Send without a note" and "Send now" are invite modal buttons.
+                        // Always try "Send without a note" / "Send now" FIRST.
+                        // Sending without a note is better than not sending at all.
+                        // The note feature can be improved separately once the basic
+                        // send flow is reliable.
                         const inviteLabels = ['Send without a note', 'Send now'];
                         for (const lbl of inviteLabels) {
                             const btn = all.find(b => visible(b) && (
@@ -525,7 +514,7 @@ async def playwright_send_invitation(
 
                         return { action: 'not_found', dump };
                     }
-                """, note or "")
+                """)
                 logger.info("Playwright: %s — send_result: action=%s dump=%s",
                             slug, send_result.get("action"), send_result.get("dump"))
 
@@ -534,32 +523,6 @@ async def playwright_send_invitation(
                     logger.info("Playwright: %s — JS click fired for invite button: %s",
                                 slug, send_result.get("button"))
                     send_clicked = True
-                elif send_result.get("action") == "add_note_clicked":
-                    await page.wait_for_timeout(800)
-                    for ta_selector in [
-                        'textarea[name="message"]',
-                        'textarea.connect-button-send-invite__custom-message',
-                        'textarea',
-                    ]:
-                        try:
-                            await page.fill(ta_selector, note[:300], timeout=2000)
-                            break
-                        except Exception:
-                            pass
-                    # Now submit — "Send" aria-label is safe here (textarea is open)
-                    js_send_note = await page.evaluate("""
-                        () => {
-                            const all = [...document.querySelectorAll('button')];
-                            const btn = all.find(b => b.offsetParent !== null && (
-                                (b.getAttribute('aria-label')||'').trim() === 'Send' ||
-                                (b.getAttribute('aria-label')||'').trim() === 'Done'
-                            ));
-                            if (btn) { btn.click(); return btn.getAttribute('aria-label'); }
-                            return null;
-                        }
-                    """)
-                    if js_send_note:
-                        send_clicked = True
 
                 if not send_clicked:
                     logger.warning("Playwright: %s — could not find Send button. Dump: %s",
