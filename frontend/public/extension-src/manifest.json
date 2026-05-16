@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Studojo LinkedIn Connect",
+  "version": "2.0.0",
+  "description": "Sends LinkedIn connection requests for Studojo campaigns from your browser. No passwords stored.",
+  "permissions": ["cookies", "tabs", "scripting", "alarms", "storage"],
+  "host_permissions": [
+    "*://*.linkedin.com/*",
+    "*://studojo.pro/*",
+    "*://studojo.com/*",
+    "*://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://studojo.pro/lkot*",
+        "*://studojo.pro/outreach*",
+        "*://studojo.com/lkot*",
+        "*://studojo.com/outreach*",
+        "*://localhost/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -367,7 +367,7 @@ export default function LinkedInOnboardingPage() {
         setExtLoading(false);
         return;
       }
-      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '' })
+      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '', is_extension: true })
         .then(() => proceedAfterLogin())
         .catch((err: any) => {
           setConnectError(err.response?.data?.detail || 'LinkedIn session invalid. Please re-login to LinkedIn and try again.');

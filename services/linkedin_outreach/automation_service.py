@@ -900,6 +900,12 @@ class LinkedInAutomationDaemon:
                     if not token_row:
                         continue
 
+                    # Extension-mode tokens: cookies are bound to the user's home IP,
+                    # so server-side sends via proxy will hit a redirect loop. The
+                    # extension polls /extension/next-task and runs sends in the browser.
+                    if getattr(token_row, "connection_mode", "proxy") == "extension":
+                        continue
+
                     try:
                         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
                         jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)

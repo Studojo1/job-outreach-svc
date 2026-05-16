@@ -41,7 +41,10 @@ class LinkedInCheckPhoneTapRequest(BaseModel):
     session_key: str
 
 
-def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: str | None):
+def _store_token(
+    db, user_id: str, li_at: str, jsessionid: str, display_name: str | None,
+    connection_mode: str = "proxy",
+):
     import secrets as _secrets
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
     proxy_session_id = _secrets.token_hex(8)
@@ -53,6 +56,7 @@ def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: st
         existing.nonce = nonce
         existing.linkedin_name = display_name
         existing.proxy_session_id = proxy_session_id
+        existing.connection_mode = connection_mode
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
@@ -62,6 +66,7 @@ def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: st
             nonce=nonce,
             linkedin_name=display_name,
             proxy_session_id=proxy_session_id,
+            connection_mode=connection_mode,
         ))
     db.commit()
     return display_name
@@ -137,6 +142,7 @@ async def check_phone_tap(
 class LinkedInCookieLoginRequest(BaseModel):
     li_at: str
     jsessionid: str
+    is_extension: bool = False  # True when called from the Studojo browser extension
 
 
 @router.post("/login/cookies")
@@ -145,7 +151,13 @@ async def login_with_cookies(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Store LinkedIn session cookies directly (bypasses email+password challenge)."""
+    """Store LinkedIn session cookies directly (bypasses email+password challenge).
+
+    If is_extension=True the token is flagged 'extension' connection_mode — the daemon
+    skips it (server-side proxy sends fail with redirect loops because the cookies are
+    bound to the user's home IP). The extension polls /extension/next-task and runs
+    sends from inside the user's browser.
+    """
     if not body.li_at or not body.jsessionid:
         raise HTTPException(status_code=400, detail="li_at and jsessionid are required")
 
@@ -174,8 +186,113 @@ async def login_with_cookies(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}")
 
-    _store_token(db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name)
-    return {"ok": True, "linkedin_name": display_name}
+    _store_token(
+        db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name,
+        connection_mode="extension" if body.is_extension else "proxy",
+    )
+    return {"ok": True, "linkedin_name": display_name, "connection_mode": "extension" if body.is_extension else "proxy"}
+
+
+# ── Extension-driven send pipeline ─────────────────────────────────────────────
+# For users who connected via the browser extension, cookies are bound to their
+# home IP — server-side sends via our proxy fail with redirect loops. Instead, the
+# extension polls these endpoints from the user's browser (their IP, their cookies)
+# and runs the actual LinkedIn connect click via background-tab automation.
+
+@router.get("/extension/next-task")
+async def extension_next_task(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the next pending lead to send for this user's active campaigns.
+
+    Only returns work if the user's token is connection_mode='extension'. Respects
+    each campaign's daily_limit and the IST sending window (9am–6pm IST).
+    """
+    from services.linkedin_outreach.automation_service import _is_ist_sending_window
+
+    token = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token or token.connection_mode != "extension":
+        return {"task": None, "reason": "not_extension_mode"}
+
+    if not _is_ist_sending_window():
+        return {"task": None, "reason": "outside_sending_window"}
+
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    camps = (
+        db.query(LinkedInCampaign)
+        .filter(LinkedInCampaign.user_id == current_user.id, LinkedInCampaign.status == "running")
+        .all()
+    )
+    for c in camps:
+        sent_today = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == c.id,
+                LinkedInConnectionRequest.sent_at >= today_start,
+                LinkedInConnectionRequest.status.in_(["sent", "accepted", "followup_sent", "replied"]),
+            )
+            .count()
+        )
+        if sent_today >= (c.daily_limit or 0):
+            continue
+        req = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == c.id,
+                LinkedInConnectionRequest.status == "pending",
+            )
+            .first()
+        )
+        if req:
+            # Mark in_progress so a second poll (or another tab) doesn't pick it up.
+            req.status = "in_progress"
+            req.updated_at = datetime.utcnow()
+            db.commit()
+            return {
+                "task": {
+                    "task_id": req.id,
+                    "campaign_id": c.id,
+                    "profile_url": req.profile_url,
+                    "note": (c.connection_note or "")[:280],
+                    "lead_name": req.name or "",
+                }
+            }
+    return {"task": None, "reason": "no_pending"}
+
+
+class ExtensionTaskResultRequest(BaseModel):
+    task_id: int
+    success: bool
+    error: str | None = None
+
+
+@router.post("/extension/task-result")
+async def extension_task_result(
+    body: ExtensionTaskResultRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Record the outcome of an extension-executed send."""
+    req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == body.task_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="task not found")
+    camp = db.query(LinkedInCampaign).filter(LinkedInCampaign.id == req.campaign_id).first()
+    if not camp or camp.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="not your task")
+
+    if body.success:
+        req.status = "sent"
+        req.sent_at = datetime.utcnow()
+        camp.total_sent = (camp.total_sent or 0) + 1
+        camp.updated_at = datetime.utcnow()
+    else:
+        req.status = "error"
+        req.error = (body.error or "Extension send failed")[:500]
+    req.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 # ── Campaign CRUD ──────────────────────────────────────────────────────────────

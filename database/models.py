@@ -327,6 +327,10 @@ class LinkedInToken(Base):
     nonce = Column(Text, nullable=False)           # base64 GCM nonce (12 bytes)
     linkedin_name = Column(Text)
     proxy_session_id = Column(Text)               # sticky residential proxy session ID per account
+    # 'proxy' = cookies created via our Playwright login through proxy (works server-side).
+    # 'extension' = cookies from browser extension bound to user's home IP — only the
+    # extension itself can use them; server-side sends will hit a redirect loop.
+    connection_mode = Column(Text, nullable=False, default="proxy")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
