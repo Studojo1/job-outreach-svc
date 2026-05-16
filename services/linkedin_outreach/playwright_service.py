@@ -284,6 +284,7 @@ async def playwright_send_invitation(
     note: str = "",
     proxy_url: str | None = None,
     existing_urn: str | None = None,
+    cookies_blob: str | None = None,
 ) -> dict:
     """Send a LinkedIn connection request by clicking the Connect button in a headless browser.
 
@@ -341,29 +342,63 @@ async def playwright_send_invitation(
                 java_script_enabled=True,
             )
 
-            # Inject cookies before any navigation. These are proxy-bound fresh cookies
-            # (obtained by logging in through this same proxy), so no identity warmup needed.
-            await context.add_cookies([
-                {
-                    "name": "li_at",
-                    "value": li_at,
-                    "domain": ".linkedin.com",
-                    "path": "/",
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                },
-            ])
-            if fresh_jsessionid:
-                await context.add_cookies([{
-                    "name": "JSESSIONID",
-                    "value": jsessionid_val,
-                    "domain": "www.linkedin.com",
-                    "path": "/",
-                    "httpOnly": False,
-                    "secure": True,
-                    "sameSite": "None",
-                }])
+            # Inject cookies before any navigation.
+            # If the extension captured the full cookie jar, inject ALL of them so
+            # LinkedIn sees a complete authentic session (passes anti-fraud checks).
+            injected_full_jar = False
+            if cookies_blob:
+                try:
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        domain = c.get("domain") or ".linkedin.com"
+                        ss_raw = (c.get("sameSite") or "no_restriction").lower()
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": domain,
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(ss_raw, "Lax"),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                        logger.info("Playwright: %s — injected full cookie jar (%d cookies)", slug, len(pw_cookies))
+                except Exception as e:
+                    logger.warning("Playwright: could not inject cookie jar: %s", e)
+
+            if not injected_full_jar:
+                # Fallback: proxy-bound fresh cookies (li_at + JSESSIONID only)
+                await context.add_cookies([
+                    {
+                        "name": "li_at",
+                        "value": li_at,
+                        "domain": ".linkedin.com",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                        "sameSite": "None",
+                    },
+                ])
+                if fresh_jsessionid:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID",
+                        "value": jsessionid_val,
+                        "domain": "www.linkedin.com",
+                        "path": "/",
+                        "httpOnly": False,
+                        "secure": True,
+                        "sameSite": "None",
+                    }])
 
             page = await context.new_page()
 

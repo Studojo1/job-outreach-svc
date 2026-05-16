@@ -331,6 +331,11 @@ class LinkedInToken(Base):
     # 'extension' = cookies from browser extension bound to user's home IP — only the
     # extension itself can use them; server-side sends will hit a redirect loop.
     connection_mode = Column(Text, nullable=False, default="proxy")
+    # Encrypted JSON of the full LinkedIn cookie jar captured by the extension
+    # (bcookie, bscookie, lidc, li_mc, lang, etc.). When set, replayed verbatim
+    # to satisfy LinkedIn's anti-fraud cookie completeness check on the proxy IP.
+    cookies_blob_enc = Column(Text, nullable=True)
+    cookies_blob_nonce = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

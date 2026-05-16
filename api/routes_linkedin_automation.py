@@ -44,10 +44,17 @@ class LinkedInCheckPhoneTapRequest(BaseModel):
 def _store_token(
     db, user_id: str, li_at: str, jsessionid: str, display_name: str | None,
     connection_mode: str = "proxy",
+    cookies_blob: str | None = None,
 ):
     import secrets as _secrets
+    from services.linkedin_outreach.crypto import encrypt as encrypt_single
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
     proxy_session_id = _secrets.token_hex(8)
+
+    cookies_blob_enc = None
+    cookies_blob_nonce = None
+    if cookies_blob:
+        cookies_blob_enc, cookies_blob_nonce = encrypt_single(cookies_blob)
 
     existing = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
     if existing:
@@ -57,6 +64,8 @@ def _store_token(
         existing.linkedin_name = display_name
         existing.proxy_session_id = proxy_session_id
         existing.connection_mode = connection_mode
+        existing.cookies_blob_enc = cookies_blob_enc
+        existing.cookies_blob_nonce = cookies_blob_nonce
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
@@ -67,6 +76,8 @@ def _store_token(
             linkedin_name=display_name,
             proxy_session_id=proxy_session_id,
             connection_mode=connection_mode,
+            cookies_blob_enc=cookies_blob_enc,
+            cookies_blob_nonce=cookies_blob_nonce,
         ))
     db.commit()
     return display_name
@@ -139,10 +150,21 @@ async def check_phone_tap(
     return {"ok": True, "linkedin_name": display_name}
 
 
+class LinkedInExtensionCookie(BaseModel):
+    name: str
+    value: str
+    domain: str | None = None
+    path: str | None = None
+    secure: bool | None = None
+    httpOnly: bool | None = None
+    sameSite: str | None = None
+
+
 class LinkedInCookieLoginRequest(BaseModel):
     li_at: str
     jsessionid: str
     is_extension: bool = False  # True when called from the Studojo browser extension
+    cookies: list[LinkedInExtensionCookie] | None = None  # Full LinkedIn cookie jar (extension only)
 
 
 @router.post("/login/cookies")
@@ -186,11 +208,29 @@ async def login_with_cookies(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}")
 
+    # When the extension sends the full cookie jar, we can use server-side proxy sending.
+    # Without the full jar (paste-cookies tab or older extension), extension-login cookies
+    # would fail through the proxy — fall back to extension-runs-the-sends mode.
+    import json as _json
+    cookies_blob = None
+    if body.cookies:
+        cookies_blob = _json.dumps([c.dict() for c in body.cookies])
+        # Full cookie jar present: proxy mode works
+        connection_mode = "proxy"
+    else:
+        connection_mode = "extension" if body.is_extension else "proxy"
+
     _store_token(
         db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name,
-        connection_mode="extension" if body.is_extension else "proxy",
+        connection_mode=connection_mode,
+        cookies_blob=cookies_blob,
     )
-    return {"ok": True, "linkedin_name": display_name, "connection_mode": "extension" if body.is_extension else "proxy"}
+    return {
+        "ok": True,
+        "linkedin_name": display_name,
+        "connection_mode": connection_mode,
+        "cookies_count": len(body.cookies) if body.cookies else 0,
+    }
 
 
 # ── Extension-driven send pipeline ─────────────────────────────────────────────
@@ -684,10 +724,13 @@ async def send_one_now(
     if not req:
         raise HTTPException(status_code=404, detail="No pending leads to send")
 
+    from services.linkedin_outreach.automation_service import _decrypt_cookies_blob
+    cookies_blob = _decrypt_cookies_blob(token_row)
+
     # Resolve URN (best-effort — Playwright fallback works without it)
     if not req.profile_urn:
         try:
-            urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id)
+            urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id, cookies_blob)
         except LinkedInAuthError:
             c.status = "auth_failed"
             c.updated_at = datetime.utcnow()
@@ -704,6 +747,7 @@ async def send_one_now(
             req.connection_note or "",
             token_row.proxy_session_id,
             profile_url=req.profile_url,
+            cookies_blob=cookies_blob,
         )
     except LinkedInAuthError:
         c.status = "auth_failed"

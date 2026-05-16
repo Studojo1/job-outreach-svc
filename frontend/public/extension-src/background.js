@@ -32,18 +32,46 @@ chrome.alarms.create('studojo-poll', { periodInMinutes: POLL_PERIOD_MIN });
 // ── Messaging ────────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'GET_LI_COOKIES') {
-    Promise.all([
-      chrome.cookies.get({ url: 'https://www.linkedin.com', name: 'li_at' }),
-      chrome.cookies.get({ url: 'https://www.linkedin.com', name: 'JSESSIONID' }),
-    ])
-      .then(([liAt, jsessionid]) => {
+    // Grab the FULL LinkedIn cookie jar — LinkedIn binds session validity to
+    // cookie completeness (bcookie, bscookie, lidc, li_mc, lang, liap, etc.).
+    // Returning only li_at + JSESSIONID triggers a "stolen cookies" risk flag
+    // that bounces every server-side request to the auth wall. With the full
+    // jar replayed, the proxy session passes LinkedIn's anti-fraud checks.
+    chrome.cookies.getAll({ domain: '.linkedin.com' })
+      .then(async (rootCookies) => {
+        // Also pull cookies set on the www subdomain (some only live there)
+        const wwwCookies = await chrome.cookies.getAll({ domain: 'www.linkedin.com' });
+        // De-duplicate by (name, domain, path)
+        const seen = new Set();
+        const merged = [];
+        for (const c of [...rootCookies, ...wwwCookies]) {
+          const k = `${c.name}|${c.domain}|${c.path}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          merged.push({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: !!c.secure,
+            httpOnly: !!c.httpOnly,
+            sameSite: c.sameSite || 'no_restriction',
+          });
+        }
+
+        const liAt = merged.find((c) => c.name === 'li_at');
+        const jsessionid = merged.find((c) => c.name === 'JSESSIONID');
         if (!liAt?.value) {
           sendResponse({
             error: 'Not logged in to LinkedIn. Please visit linkedin.com and log in first, then try again.',
           });
           return;
         }
-        sendResponse({ li_at: liAt.value, jsessionid: jsessionid?.value || '' });
+        sendResponse({
+          li_at: liAt.value,
+          jsessionid: jsessionid?.value || '',
+          cookies: merged,
+        });
       })
       .catch((err) => sendResponse({ error: 'Could not read LinkedIn cookies: ' + err.message }));
     return true;

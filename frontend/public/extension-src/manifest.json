@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Studojo LinkedIn Connect",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Sends LinkedIn connection requests for Studojo campaigns from your browser. No passwords stored.",
   "permissions": ["cookies", "tabs", "scripting", "alarms", "storage"],
   "host_permissions": [

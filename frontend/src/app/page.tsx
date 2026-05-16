@@ -360,14 +360,14 @@ export default function LinkedInOnboardingPage() {
     let timeoutId: ReturnType<typeof setTimeout>;
     const onCookies = (e: Event) => {
       clearTimeout(timeoutId);
-      const { li_at, jsessionid, error } = (e as CustomEvent).detail || {};
+      const { li_at, jsessionid, cookies, error } = (e as CustomEvent).detail || {};
       window.removeEventListener('STUDOJO_LI_COOKIES', onCookies);
       if (error || !li_at) {
         setConnectError(error || 'Extension could not read LinkedIn cookies. Make sure you\'re logged in to LinkedIn.');
         setExtLoading(false);
         return;
       }
-      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '', is_extension: true })
+      api.post('/linkedin/automation/login/cookies', { li_at, jsessionid: jsessionid || '', is_extension: true, cookies })
         .then(() => proceedAfterLogin())
         .catch((err: any) => {
           setConnectError(err.response?.data?.detail || 'LinkedIn session invalid. Please re-login to LinkedIn and try again.');

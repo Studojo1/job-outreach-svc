@@ -51,9 +51,33 @@ _REPLY_INTERVAL = 7200    # 2 hours
 
 # ── Voyager helpers ────────────────────────────────────────────────────────────
 
-def _headers(li_at: str, jsessionid: str) -> dict:
+def _build_cookie_header(li_at: str, jsessionid: str, cookies_blob: str | None = None) -> str:
+    """Build the Cookie header string. If cookies_blob is provided (full jar from
+    the extension), use it verbatim — LinkedIn's anti-fraud check passes only
+    with a complete cookie set. Otherwise fall back to li_at+JSESSIONID only."""
+    if cookies_blob:
+        try:
+            import json as _json
+            cookies = _json.loads(cookies_blob)
+            # Preserve order; LinkedIn doesn't care, but readability helps debugging
+            parts = []
+            for c in cookies:
+                name = c.get("name")
+                value = c.get("value")
+                if not name or value is None:
+                    continue
+                parts.append(f"{name}={value}")
+            if parts:
+                return "; ".join(parts)
+        except Exception:
+            pass
+    # Fallback — partial set
+    return f"li_at={li_at}; JSESSIONID={jsessionid}"
+
+
+def _headers(li_at: str, jsessionid: str, cookies_blob: str | None = None) -> dict:
     return {
-        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
+        "Cookie": _build_cookie_header(li_at, jsessionid, cookies_blob),
         "csrf-token": jsessionid,
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
@@ -67,7 +91,23 @@ def _headers(li_at: str, jsessionid: str) -> dict:
     }
 
 
-async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, session_id: str | None = None) -> Optional[str]:
+def _decrypt_cookies_blob(token_row) -> str | None:
+    """Decrypt the full cookie jar JSON from a LinkedInToken row, if present."""
+    if not getattr(token_row, "cookies_blob_enc", None) or not getattr(token_row, "cookies_blob_nonce", None):
+        return None
+    try:
+        from services.linkedin_outreach.crypto import decrypt as _dec
+        return _dec(token_row.cookies_blob_enc, token_row.cookies_blob_nonce)
+    except Exception as e:
+        logger.warning("Could not decrypt cookies_blob: %s", e)
+        return None
+
+
+async def resolve_profile_urn(
+    li_at: str, jsessionid: str, profile_url: str,
+    session_id: str | None = None,
+    cookies_blob: str | None = None,
+) -> Optional[str]:
     """Extract fsd_profile URN from a LinkedIn profile URL via Voyager API (~20 KB, not HTML).
 
     Raises LinkedInAuthError if the session is expired.
@@ -78,7 +118,7 @@ async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, ses
         async with httpx.AsyncClient(timeout=15, follow_redirects=False, **_proxy(session_id)) as client:
             res = await client.get(
                 f"https://www.linkedin.com/voyager/api/identity/profiles/{slug}",
-                headers=_headers(li_at, jsessionid),
+                headers=_headers(li_at, jsessionid, cookies_blob),
             )
         if res.status_code in (401, 403):
             raise LinkedInAuthError(f"Session expired (status {res.status_code}) resolving {profile_url}")
@@ -97,7 +137,7 @@ async def resolve_profile_urn(li_at: str, jsessionid: str, profile_url: str, ses
         async with httpx.AsyncClient(timeout=15, follow_redirects=True, **_proxy(session_id)) as client:
             res2 = await client.get(
                 f"https://www.linkedin.com/in/{slug}/",
-                headers={**_headers(li_at, jsessionid), "Accept": "text/html"},
+                headers={**_headers(li_at, jsessionid, cookies_blob), "Accept": "text/html"},
             )
         if "/login" in str(res2.url):
             raise LinkedInAuthError("Session expired (redirected to login page)")
@@ -123,6 +163,7 @@ async def send_connection_request(
     note: str = "",
     session_id: str | None = None,
     profile_url: str | None = None,
+    cookies_blob: str | None = None,
 ) -> bool:
     """Send a LinkedIn connection request via Voyager. Returns True on success.
 
@@ -140,7 +181,7 @@ async def send_connection_request(
     """
     # If we have no URN, skip Voyager attempts — they require profileId.
     if not profile_urn and profile_url:
-        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None)
+        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -170,13 +211,17 @@ async def send_connection_request(
         "message": note[:300] if note else "",
     }
 
+    # If a full cookie jar from the extension is available, use it for the seed GET.
+    # That way LinkedIn sees a complete authentic session (bcookie, bscookie, lidc,
+    # li_mc, lang, liap, etc.) rather than a bare li_at-only "stolen cookies" request.
+    seed_cookie_header = _build_cookie_header(li_at, jsessionid, cookies_blob)
+
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed GET: pass li_at manually so httpx jar picks up all session cookies
-            # (JSESSIONID, bcookie, lidc, etc.) that LinkedIn sets for this proxy IP.
+            # Seed GET — the response Set-Cookies will refresh JSESSIONID/lidc for this proxy IP.
             seed = await client.get(
                 "https://www.linkedin.com/",
-                headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
+                headers={"Cookie": seed_cookie_header, "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
                 follow_redirects=True,
             )
             raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
@@ -186,13 +231,27 @@ async def send_connection_request(
             csrf_source = "fresh" if client.cookies.get("JSESSIONID") else "stored"
 
             # Build Cookie header manually so we know exactly what's sent.
-            # JSESSIONID uses raw value (preserves LinkedIn's original quoting).
-            cookie_parts = [f"li_at={li_at}"]
-            for name in ("JSESSIONID", "bcookie", "bscookie", "lidc", "li_mc", "sdui_ver", "lang"):
+            # Start from the full extension jar (if provided) so every cookie LinkedIn
+            # expects is present, then layer in any fresher values from the seed response
+            # (JSESSIONID, lidc, bcookie) so the proxy IP gets recognised as a valid session.
+            cookie_map: dict[str, str] = {}
+            if cookies_blob:
+                try:
+                    import json as _json
+                    for c in _json.loads(cookies_blob):
+                        n, v = c.get("name"), c.get("value")
+                        if n and v is not None:
+                            cookie_map[n] = v
+                except Exception:
+                    pass
+            # Always ensure li_at is present and authoritative from the stored decrypt
+            cookie_map["li_at"] = li_at
+            # Overlay fresher values from the seed response
+            for name in ("JSESSIONID", "bcookie", "bscookie", "lidc", "li_mc", "sdui_ver", "lang", "liap"):
                 v = client.cookies.get(name)
                 if v:
-                    cookie_parts.append(f"{name}={v}")
-            cookie_str = "; ".join(cookie_parts)
+                    cookie_map[name] = v
+            cookie_str = "; ".join(f"{n}={v}" for n, v in cookie_map.items())
 
             logger.info(
                 "send_connection_request profileId=%s csrf_source=%s csrf=%s cookie=%s",
@@ -246,7 +305,7 @@ async def send_connection_request(
     # Playwright fallback: click the Connect button in a real browser
     # Prefer the real profile_url if caller passed it, else reconstruct from URN.
     target_url = profile_url or f"https://www.linkedin.com/in/{profile_urn}/"
-    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn)
+    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob)
 
 
 async def _send_via_playwright(
@@ -255,6 +314,7 @@ async def _send_via_playwright(
     profile_url: str,
     note: str,
     existing_urn: str | None,
+    cookies_blob: str | None = None,
 ) -> bool:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
@@ -267,6 +327,7 @@ async def _send_via_playwright(
             note=note,
             proxy_url=proxy_url,
             existing_urn=existing_urn,
+            cookies_blob=cookies_blob,
         )
         if result.get("ok"):
             logger.info("Playwright send succeeded for %s", profile_url)
@@ -921,8 +982,9 @@ class LinkedInAutomationDaemon:
                         continue
 
                     session_id = token_row.proxy_session_id
+                    cookies_blob = _decrypt_cookies_blob(token_row)
 
-                    await self._process_campaign(db, campaign, li_at, jsessionid, session_id)
+                    await self._process_campaign(db, campaign, li_at, jsessionid, session_id, cookies_blob)
 
                 except Exception as e:
                     logger.error("Campaign %d processing error: %s", campaign.id, e)
@@ -931,7 +993,7 @@ class LinkedInAutomationDaemon:
         finally:
             db.close()
 
-    async def _process_campaign(self, db, campaign, li_at: str, jsessionid: str, session_id: str | None = None):
+    async def _process_campaign(self, db, campaign, li_at: str, jsessionid: str, session_id: str | None = None, cookies_blob: str | None = None):
         from database.models import LinkedInConnectionRequest
 
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -972,7 +1034,7 @@ class LinkedInAutomationDaemon:
                 # Resolve URN best-effort (Playwright fallback works without it).
                 if not req.profile_urn:
                     try:
-                        urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
+                        urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id, cookies_blob)
                     except LinkedInAuthError:
                         logger.warning("Campaign %d: auth failed during URN resolve, marking auth_failed", campaign.id)
                         campaign.status = "auth_failed"
@@ -990,6 +1052,7 @@ class LinkedInAutomationDaemon:
                         req.connection_note or "",
                         session_id,
                         profile_url=req.profile_url,
+                        cookies_blob=cookies_blob,
                     )
                 except LinkedInAuthError:
                     logger.warning("Campaign %d: LinkedIn session expired, marking auth_failed", campaign.id)
