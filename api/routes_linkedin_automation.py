@@ -451,35 +451,34 @@ async def create_campaign_from_profile(
     target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
     dream_companies = cand.dream_companies if isinstance(cand.dream_companies, list) else []
 
+    # likely_roles is the resume_profile's own role guesses (fallback if quiz roles absent)
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+
     # Target role — required field on the campaign schema.
     target_role = (body.override_target_role or "").strip()
     if not target_role and target_roles:
         first = target_roles[0]
         target_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
-    if not target_role:
-        target_role = (profile.get("target_role") or profile.get("current_role") or "").strip()
+    if not target_role and likely_roles:
+        target_role = str(likely_roles[0])
     if not target_role:
         raise HTTPException(
             status_code=400,
             detail="Could not derive a target role from the profile. Complete the quiz first or pass override_target_role.",
         )
 
-    # Locations
+    # Locations — resume_profile.geography is {city, country, country_code}
     locations: list[str] = []
     if body.override_target_locations:
         locations = body.override_target_locations
     else:
-        prof_locs = profile.get("preferred_locations") or profile.get("target_locations") or []
-        if isinstance(prof_locs, list):
-            locations = [str(x) for x in prof_locs if x]
-        elif isinstance(prof_locs, str):
-            locations = [prof_locs]
-        if not locations:
-            city = (profile.get("location") or profile.get("city") or "").strip()
-            if city:
-                locations = [city]
+        geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+        for key in ("city", "country"):
+            v = (geo.get(key) or "").strip()
+            if v and v not in locations:
+                locations.append(v)
 
-    # Industries
+    # Industries — target_industries is a flat list of strings
     industries: list[str] = []
     for ind in target_industries:
         if isinstance(ind, str):
@@ -489,11 +488,11 @@ async def create_campaign_from_profile(
             if v:
                 industries.append(str(v))
 
-    # Keywords bias from dream_companies + top skills
+    # Keyword bias — dream companies + the candidate's top skills
     keyword_parts: list[str] = []
     if dream_companies:
         keyword_parts.extend([str(c.get("name") if isinstance(c, dict) else c) for c in dream_companies if c])
-    skills = profile.get("skills") or []
+    skills = profile.get("top_skills") or profile.get("skills") or []
     if isinstance(skills, list) and skills:
         keyword_parts.extend([str(s) for s in skills[:5]])
     target_keywords = " ".join(keyword_parts).strip() or None
@@ -547,13 +546,19 @@ async def my_candidate(
     profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
     target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
     target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+    # Quiz is "complete" once the student has confirmed target roles/industries.
     quiz_complete = bool(target_roles or target_industries)
+
     primary_role = ""
     if target_roles:
         first = target_roles[0]
         primary_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
-    if not primary_role:
-        primary_role = profile.get("target_role") or profile.get("current_role") or ""
+    if not primary_role and likely_roles:
+        primary_role = str(likely_roles[0])
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    location = " ".join(str(geo.get(k, "")) for k in ("city", "country") if geo.get(k)).strip() or None
 
     return {
         "candidate": {
@@ -562,8 +567,8 @@ async def my_candidate(
             "target_roles": target_roles,
             "target_industries": target_industries,
             "dream_companies": cand.dream_companies or [],
-            "skills": profile.get("skills") or [],
-            "location": profile.get("location") or profile.get("city"),
+            "skills": profile.get("top_skills") or profile.get("skills") or [],
+            "location": location,
             "quiz_complete": quiz_complete,
             "created_at": cand.created_at.isoformat() if cand.created_at else None,
         }
@@ -749,31 +754,37 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
 
 def _summarise_candidate(cand, target_role: str) -> str:
     """One-paragraph factual summary of a Candidate row, used to ground the
-    per-lead match_reason prompt in the student's actual background."""
+    per-lead match_reason prompt in the student's actual background.
+
+    Reads the resume_profile schema produced by resume_intelligence:
+    {domain, subdomain, seniority, geography:{city,country}, top_skills,
+     likely_roles, archetype_label, strongest_hook, candidate_pitch}.
+    """
     profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
     parts: list[str] = []
-    current = profile.get("current_role") or profile.get("headline")
-    if current:
-        parts.append(f"Currently: {current}")
-    edu = profile.get("education") or profile.get("school")
-    if isinstance(edu, list) and edu:
-        first = edu[0]
-        if isinstance(first, dict):
-            edu_str = " ".join(str(first.get(k, "")) for k in ("degree", "school", "institution") if first.get(k))
-        else:
-            edu_str = str(first)
-        if edu_str.strip():
-            parts.append(f"Education: {edu_str.strip()}")
-    elif isinstance(edu, str) and edu:
-        parts.append(f"Education: {edu}")
-    skills = profile.get("skills") or []
+
+    archetype = profile.get("archetype_label")
+    if archetype:
+        parts.append(str(archetype))
+
+    seniority = profile.get("seniority")
+    domain = profile.get("domain")
+    subdomain = profile.get("subdomain")
+    field = " / ".join(str(x).replace("_", " ") for x in (domain, subdomain) if x)
+    if seniority or field:
+        parts.append(f"{(seniority or '').strip().capitalize()} in {field}".strip())
+
+    skills = profile.get("top_skills") or profile.get("skills") or []
     if isinstance(skills, list) and skills:
         parts.append(f"Skills: {', '.join(str(s) for s in skills[:6])}")
-    loc = profile.get("location") or profile.get("city")
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    loc = " ".join(str(geo.get(k, "")) for k in ("city", "country") if geo.get(k)).strip()
     if loc:
-        parts.append(f"Location: {loc}")
+        parts.append(f"Based in {loc}")
+
     parts.append(f"Looking for: {target_role}")
-    return ". ".join(parts)[:600]
+    return ". ".join(p for p in parts if p)[:600]
 
 
 async def _personalise_leads(
