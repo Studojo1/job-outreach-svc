@@ -482,90 +482,88 @@ async def playwright_send_invitation(
                 except Exception:
                     logger.info("Playwright: %s — modal not detected after 20s (url=%s)", slug, page.url)
 
-                # Dump modal state for debugging
-                modal_buttons = await page.evaluate("""() =>
-                    [...document.querySelectorAll('button')].map(b => ({
-                        label: b.getAttribute('aria-label') || '',
-                        text: b.innerText.trim(),
-                        visible: b.offsetParent !== null,
-                    })).filter(b => b.visible && (b.label || b.text))
-                """)
-                logger.info("Playwright: %s — modal buttons after Connect click: %s", slug, modal_buttons)
+                # Dump modal state AND click in a single evaluate so LinkedIn's React SPA
+                # cannot re-render the DOM between the find and the click.
+                # Strictly limit to invite-specific labels — never "Send" alone which
+                # is LinkedIn's messaging-overlay compose button.
+                send_result = await page.evaluate("""
+                    (noteText) => {
+                        const all = [...document.querySelectorAll('button')];
+                        const visible = b => b.offsetParent !== null;
 
-                # Handle the "Add a note / Send without a note" modal.
-                # page.click() always times out here because LinkedIn's invite modal
-                # blocks Playwright's pointer-event hit-test in headless Chromium.
-                # Jump straight to JS click — but ONLY target invite-specific buttons
-                # ("Send without a note" / "Send now"). Never click a generic "Send"
-                # button which may be LinkedIn's messaging overlay compose button.
-                send_clicked = False
+                        // Debug: capture all visible buttons for logging
+                        const dump = all.filter(visible).map(b => ({
+                            label: b.getAttribute('aria-label') || '',
+                            text: b.innerText.trim().slice(0, 40),
+                        }));
 
-                if note:
-                    js_note = await page.evaluate("""
-                        () => {
-                            const addNote = document.querySelector('button[aria-label="Add a note"]');
-                            if (addNote) { addNote.click(); return true; }
-                            const all = [...document.querySelectorAll('button')];
-                            const btn = all.find(b => (b.innerText||'').trim().toLowerCase() === 'add a note');
-                            if (btn) { btn.click(); return true; }
-                            return false;
+                        if (noteText) {
+                            // Click "Add a note" to open the textarea
+                            const addNote = all.find(b => visible(b) && (
+                                (b.getAttribute('aria-label') || '').trim() === 'Add a note' ||
+                                (b.innerText || '').trim().toLowerCase() === 'add a note'
+                            ));
+                            if (addNote) {
+                                addNote.click();
+                                return { action: 'add_note_clicked', dump };
+                            }
                         }
-                    """)
-                    if js_note:
-                        await page.wait_for_timeout(800)
-                        for ta_selector in [
-                            'textarea[name="message"]',
-                            'textarea.connect-button-send-invite__custom-message',
-                            'textarea',
-                        ]:
-                            try:
-                                await page.fill(ta_selector, note[:300], timeout=2000)
-                                break
-                            except Exception:
-                                pass
-                        # After filling the note, click the submit button (aria-label="Send"
-                        # is safe here because the note textarea is open, not messaging overlay)
-                        js_send_note = await page.evaluate("""
-                            () => {
-                                for (const sel of ['button[aria-label="Send"]', 'button[aria-label="Done"]']) {
-                                    const btn = document.querySelector(sel);
-                                    if (btn) { btn.click(); return sel; }
-                                }
-                                return null;
-                            }
-                        """)
-                        if js_send_note:
-                            send_clicked = True
 
-                if not send_clicked:
-                    # Use JS click — only accept invite-specific button labels.
-                    js_clicked = await page.evaluate("""
+                        // Find and click the invite-specific send button.
+                        // "Send without a note" and "Send now" are invite modal buttons.
+                        const inviteLabels = ['Send without a note', 'Send now'];
+                        for (const lbl of inviteLabels) {
+                            const btn = all.find(b => visible(b) && (
+                                (b.getAttribute('aria-label') || '').trim() === lbl ||
+                                (b.innerText || '').trim() === lbl
+                            ));
+                            if (btn) {
+                                btn.click();
+                                return { action: 'send_clicked', button: lbl, dump };
+                            }
+                        }
+
+                        return { action: 'not_found', dump };
+                    }
+                """, note or "")
+                logger.info("Playwright: %s — send_result: action=%s dump=%s",
+                            slug, send_result.get("action"), send_result.get("dump"))
+
+                send_clicked = False
+                if send_result.get("action") == "send_clicked":
+                    logger.info("Playwright: %s — JS click fired for invite button: %s",
+                                slug, send_result.get("button"))
+                    send_clicked = True
+                elif send_result.get("action") == "add_note_clicked":
+                    await page.wait_for_timeout(800)
+                    for ta_selector in [
+                        'textarea[name="message"]',
+                        'textarea.connect-button-send-invite__custom-message',
+                        'textarea',
+                    ]:
+                        try:
+                            await page.fill(ta_selector, note[:300], timeout=2000)
+                            break
+                        except Exception:
+                            pass
+                    # Now submit — "Send" aria-label is safe here (textarea is open)
+                    js_send_note = await page.evaluate("""
                         () => {
-                            // Strict invite-only labels — never match generic "Send"
-                            // which is LinkedIn's messaging compose button.
-                            const inviteLabels = ['Send without a note', 'Send now'];
-                            for (const lbl of inviteLabels) {
-                                const byAttr = document.querySelector(`button[aria-label="${lbl}"]`);
-                                if (byAttr) { byAttr.click(); return lbl; }
-                            }
                             const all = [...document.querySelectorAll('button')];
-                            for (const lbl of inviteLabels) {
-                                const byText = all.find(
-                                    b => (b.innerText || '').trim().toLowerCase() === lbl.toLowerCase()
-                                );
-                                if (byText) { byText.click(); return lbl; }
-                            }
+                            const btn = all.find(b => b.offsetParent !== null && (
+                                (b.getAttribute('aria-label')||'').trim() === 'Send' ||
+                                (b.getAttribute('aria-label')||'').trim() === 'Done'
+                            ));
+                            if (btn) { btn.click(); return btn.getAttribute('aria-label'); }
                             return null;
                         }
                     """)
-                    if js_clicked:
-                        logger.info("Playwright: %s — JS click fired for invite button: %s", slug, js_clicked)
+                    if js_send_note:
                         send_clicked = True
-                    else:
-                        logger.info("Playwright: %s — JS click found no invite button (modal may have changed)", slug)
 
                 if not send_clicked:
-                    logger.warning("Playwright: %s — could not find Send button. Modal buttons were: %s", slug, modal_buttons)
+                    logger.warning("Playwright: %s — could not find Send button. Dump: %s",
+                                   slug, send_result.get("dump"))
                     return {"ok": False, "error": "Send button not found after clicking Connect", "profile_urn": existing_urn}
 
                 # Wait for the invitation network request to complete
