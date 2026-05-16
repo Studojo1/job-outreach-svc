@@ -567,7 +567,7 @@ async def send_one_now(
     if not req:
         raise HTTPException(status_code=404, detail="No pending leads to send")
 
-    # Resolve URN
+    # Resolve URN (best-effort — Playwright fallback works without it)
     if not req.profile_urn:
         try:
             urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id)
@@ -576,18 +576,17 @@ async def send_one_now(
             c.updated_at = datetime.utcnow()
             db.commit()
             raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
-        if not urn:
-            req.status = "error"
-            req.error = "Could not resolve profile URN"
-            req.updated_at = datetime.utcnow()
-            db.commit()
-            raise HTTPException(status_code=422, detail=f"Could not resolve URN for {req.profile_url}")
-        req.profile_urn = urn
+        if urn:
+            req.profile_urn = urn
 
-    # Send
+    # Send — passes profile_url so Playwright fallback works even with no URN
     try:
         ok = await send_connection_request(
-            li_at, jsessionid, req.profile_urn, req.connection_note or "", token_row.proxy_session_id
+            li_at, jsessionid,
+            req.profile_urn or "",
+            req.connection_note or "",
+            token_row.proxy_session_id,
+            profile_url=req.profile_url,
         )
     except LinkedInAuthError:
         c.status = "auth_failed"

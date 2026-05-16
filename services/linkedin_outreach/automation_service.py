@@ -122,6 +122,7 @@ async def send_connection_request(
     profile_urn: str,
     note: str = "",
     session_id: str | None = None,
+    profile_url: str | None = None,
 ) -> bool:
     """Send a LinkedIn connection request via Voyager. Returns True on success.
 
@@ -130,8 +131,16 @@ async def send_connection_request(
     through the same proxy connection. LinkedIn's JSESSIONID is IP-bound for
     CSRF, so the seed and the POST must come from the same IP.
 
+    If profile_urn is empty, skips the Voyager API attempts and goes straight
+    to the Playwright fallback using profile_url. This handles extension-login
+    sessions where Voyager API auth fails due to IP binding but a browser-driven
+    UI click still works.
+
     Raises LinkedInAuthError when the session is expired (401/403).
     """
+    # If we have no URN, skip Voyager attempts — they require profileId.
+    if not profile_urn and profile_url:
+        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -235,25 +244,35 @@ async def send_connection_request(
         logger.warning("Voyager API threw exception — falling back to Playwright: %s", voyager_exc)
 
     # Playwright fallback: click the Connect button in a real browser
+    # Prefer the real profile_url if caller passed it, else reconstruct from URN.
+    target_url = profile_url or f"https://www.linkedin.com/in/{profile_urn}/"
+    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn)
+
+
+async def _send_via_playwright(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    note: str,
+    existing_urn: str | None,
+) -> bool:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
         from core.config import settings
         proxy_url = (settings.LINKEDIN_PROXY_URL or "").strip() or None
-        # profile_url is not passed into this function — reconstruct from URN via /in/ lookup is not
-        # possible here, so we pass the URN directly as existing_urn and use a placeholder URL.
         result = await playwright_send_invitation(
             li_at=li_at,
             jsessionid=jsessionid,
-            profile_url=f"https://www.linkedin.com/in/{profile_urn}/",
+            profile_url=profile_url,
             note=note,
             proxy_url=proxy_url,
-            existing_urn=profile_urn,
+            existing_urn=existing_urn,
         )
         if result.get("ok"):
-            logger.info("Playwright send succeeded for urn=%s", profile_urn)
+            logger.info("Playwright send succeeded for %s", profile_url)
             return True
         err = result.get("error", "unknown")
-        logger.warning("Playwright send failed for urn=%s: %s", profile_urn, err)
+        logger.warning("Playwright send failed for %s: %s", profile_url, err)
         return False
     except LinkedInAuthError:
         raise
@@ -944,7 +963,7 @@ class LinkedInAutomationDaemon:
                     await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
                 first_in_batch = False
 
-                # Resolve URN via Voyager (~20 KB) before sending
+                # Resolve URN best-effort (Playwright fallback works without it).
                 if not req.profile_urn:
                     try:
                         urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id)
@@ -956,17 +975,15 @@ class LinkedInAutomationDaemon:
                         return
                     if urn:
                         req.profile_urn = urn
-                    else:
-                        req.status = "error"
-                        req.error = "Could not resolve profile URN"
-                        req.updated_at = datetime.utcnow()
-                        db.commit()
-                        continue
 
-                # Send via Voyager HTTP — no Playwright browser overhead
+                # Send — pass profile_url so Playwright works even if URN is empty
                 try:
                     ok = await send_connection_request(
-                        li_at, jsessionid, req.profile_urn, req.connection_note or "", session_id
+                        li_at, jsessionid,
+                        req.profile_urn or "",
+                        req.connection_note or "",
+                        session_id,
+                        profile_url=req.profile_url,
                     )
                 except LinkedInAuthError:
                     logger.warning("Campaign %d: LinkedIn session expired, marking auth_failed", campaign.id)
