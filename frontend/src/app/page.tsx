@@ -486,21 +486,21 @@ export default function LinkedInOnboardingPage() {
     if (!raw) { setRestored(true); return; }
     try {
       const saved = JSON.parse(raw);
-      const savedStep: Step = saved.step ?? 1;
+      const savedStepRaw: number = saved.step ?? 1;
       const savedQuiz: QuizData = saved.quiz ?? quiz;
       const savedCampaignId: number | null = saved.campaignId ?? null;
 
       setQuiz(savedQuiz);
       setCampaignId(savedCampaignId);
 
-      if (savedStep === 4 && savedCampaignId) {
-        // Restore live dashboard
+      // Any step >= 4 (including legacy step 5/6 from old wizard) → restore live dashboard
+      if (savedStepRaw >= 4 && savedCampaignId) {
         fetchDashboard(savedCampaignId).then(() => {
           setStep(4);
           setRestored(true);
           pollRef.current = setInterval(() => fetchDashboard(savedCampaignId), 30000);
         }).catch(() => { clearWizard(); setRestored(true); });
-      } else if (savedStep === 3 && savedCampaignId) {
+      } else if (savedStepRaw === 3 && savedCampaignId) {
         // Restore leads step — re-fetch existing leads (don't re-trigger search)
         api.get(`/linkedin/automation/campaigns/${savedCampaignId}/requests?limit=50`)
           .then(r => {
@@ -513,8 +513,12 @@ export default function LinkedInOnboardingPage() {
             setRestored(true);
           })
           .catch(() => { clearWizard(); setRestored(true); });
+      } else if (savedStepRaw >= 1 && savedStepRaw <= 3) {
+        setStep(savedStepRaw as Step);
+        setRestored(true);
       } else {
-        setStep(savedStep);
+        // Invalid or out-of-range step → start fresh
+        clearWizard();
         setRestored(true);
       }
     } catch {
