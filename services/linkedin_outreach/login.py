@@ -24,16 +24,27 @@ async def linkedin_login_start(
     On challenge: li_at/jsessionid are None, session_key is set.
     Raises ValueError on bad credentials or unrecoverable error.
     """
+    import asyncio as _asyncio
     from services.linkedin_outreach.playwright_service import _parse_proxy
 
     proxy = _parse_proxy(proxy_url) if proxy_url else None
 
-    try:
-        return await _linkedin_login_attempt(email, password, proxy)
-    except ValueError as e:
-        if "Timeout" in str(e):
-            raise ValueError("Connection timed out. The proxy may be slow — please try again in a few seconds.")
-        raise
+    # Retry up to 2 times on proxy timeout — transient Evomi hiccups are common
+    last_err: Exception = RuntimeError("unknown")
+    for attempt in range(2):
+        try:
+            return await _linkedin_login_attempt(email, password, proxy)
+        except ValueError as e:
+            last_err = e
+            if "Timeout" in str(e) and attempt == 0:
+                logger.warning("LinkedIn login timed out (attempt 1), retrying...")
+                await _asyncio.sleep(2)
+                continue
+            # Bad credentials or second timeout — surface immediately
+            if "Timeout" in str(e):
+                raise ValueError("Connection timed out after 2 attempts. The proxy is slow right now — please try again in a moment.")
+            raise
+    raise last_err
 
 
 async def _linkedin_login_attempt(

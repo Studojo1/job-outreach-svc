@@ -105,6 +105,9 @@ export default function LinkedInOnboardingPage() {
     campaign_name: '',
   });
 
+  // Inline quick-setup state (for users without a completed profile)
+  const [quickRole, setQuickRole] = useState('');
+
   // LinkedIn connect state
   const [liEmail, setLiEmail] = useState('');
   const [liPassword, setLiPassword] = useState('');
@@ -570,37 +573,85 @@ export default function LinkedInOnboardingPage() {
               </div>
             )}
 
-            {/* No candidate profile yet — send them to upload + quiz */}
+            {/* No candidate profile — inline quick setup (no redirect) */}
             {!candidateLoading && !candidate && (
-              <div className="rounded-2xl border border-border p-6">
-                <p className="text-sm font-medium mb-1">You haven't built your profile yet</p>
-                <p className="text-sm text-muted-foreground mb-5">
-                  Upload your resume and answer a few quick questions. Takes about 3 minutes —
-                  then we'll find LinkedIn connections matched to your goals.
-                </p>
-                <a
-                  href={STUDENT_PROFILE_URL}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
+              <div className="rounded-2xl border border-border p-6 space-y-4">
+                <div>
+                  <p className="text-sm font-medium mb-1">What role are you targeting?</p>
+                  <p className="text-xs text-muted-foreground mb-3">We'll use this to find the right people to connect with on LinkedIn.</p>
+                  <input
+                    type="text"
+                    value={quickRole}
+                    onChange={e => setQuickRole(e.target.value)}
+                    placeholder="e.g. Product Manager, Software Engineer, Marketing..."
+                    className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && quickRole.trim()) {
+                        const role = quickRole.trim();
+                        const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                        setQuiz(updatedQuiz);
+                        saveWizard(2 as Step, updatedQuiz, campaignId);
+                        setStep(2);
+                      }
+                    }}
+                  />
+                </div>
+                {profileError && <p className="text-sm text-red-600">{profileError}</p>}
+                <button
+                  onClick={() => {
+                    const role = quickRole.trim();
+                    if (!role) return;
+                    const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                    setQuiz(updatedQuiz);
+                    saveWizard(2 as Step, updatedQuiz, campaignId);
+                    setStep(2);
+                  }}
+                  disabled={!quickRole.trim()}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
                 >
-                  Build my profile <ArrowRight className="w-4 h-4" />
-                </a>
+                  Get started <ArrowRight className="w-4 h-4" />
+                </button>
               </div>
             )}
 
-            {/* Candidate exists but quiz not finished */}
+            {/* Candidate exists but quiz not finished — same inline form */}
             {!candidateLoading && candidate && !candidate.quiz_complete && (
-              <div className="rounded-2xl border border-amber-300 bg-amber-50 p-6">
-                <p className="text-sm font-medium mb-1">Almost there — finish your quiz</p>
-                <p className="text-sm text-muted-foreground mb-5">
-                  Your resume is in, but we need a few quiz answers to know what roles
-                  and industries to target.
-                </p>
-                <a
-                  href="/outreach/onboarding/chat?return=/lkot"
-                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors"
+              <div className="rounded-2xl border border-border p-6 space-y-4">
+                <div>
+                  <p className="text-sm font-medium mb-1">What role are you targeting?</p>
+                  <p className="text-xs text-muted-foreground mb-3">Tell us your target role and we'll find the right LinkedIn connections for you.</p>
+                  <input
+                    type="text"
+                    value={quickRole}
+                    onChange={e => setQuickRole(e.target.value)}
+                    placeholder="e.g. Product Manager, Software Engineer, Marketing..."
+                    className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && quickRole.trim()) {
+                        const role = quickRole.trim();
+                        const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                        setQuiz(updatedQuiz);
+                        saveWizard(2 as Step, updatedQuiz, campaignId);
+                        setStep(2);
+                      }
+                    }}
+                  />
+                </div>
+                {profileError && <p className="text-sm text-red-600">{profileError}</p>}
+                <button
+                  onClick={() => {
+                    const role = quickRole.trim();
+                    if (!role) return;
+                    const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                    setQuiz(updatedQuiz);
+                    saveWizard(2 as Step, updatedQuiz, campaignId);
+                    setStep(2);
+                  }}
+                  disabled={!quickRole.trim()}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
                 >
-                  Finish the quiz <ArrowRight className="w-4 h-4" />
-                </a>
+                  Get started <ArrowRight className="w-4 h-4" />
+                </button>
               </div>
             )}
 
