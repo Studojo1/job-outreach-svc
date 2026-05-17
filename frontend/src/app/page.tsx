@@ -105,8 +105,9 @@ export default function LinkedInOnboardingPage() {
     campaign_name: '',
   });
 
-  // Inline quick-setup state (for users without a completed profile)
+  // Inline quick-setup state (for users without a completed profile, or to override role)
   const [quickRole, setQuickRole] = useState('');
+  const [showRoleEdit, setShowRoleEdit] = useState(false);
 
   // LinkedIn connect state
   const [liEmail, setLiEmail] = useState('');
@@ -658,61 +659,114 @@ export default function LinkedInOnboardingPage() {
             {/* Ready — show profile summary + continue */}
             {!candidateLoading && candidate && candidate.quiz_complete && (
               <div>
-                <div className="rounded-2xl border border-border p-5 space-y-4">
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Target role</p>
-                    <p className="text-sm font-medium">{candidate.primary_role || '—'}</p>
+                {!showRoleEdit ? (
+                  <>
+                    <div className="rounded-2xl border border-border p-5 space-y-4">
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Target role</p>
+                        <p className="text-sm font-medium">{candidate.primary_role || '—'}</p>
+                      </div>
+                      {candidate.target_industries?.length > 0 && (
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Industries</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {candidate.target_industries.map((ind: any, i: number) => (
+                              <span key={i} className="px-2.5 py-1 bg-primary/5 border border-primary/20 rounded-lg text-xs">
+                                {typeof ind === 'string' ? ind : ind.industry || ind.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {candidate.location && (
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Location</p>
+                          <p className="text-sm">{candidate.location}</p>
+                        </div>
+                      )}
+                      {candidate.skills?.length > 0 && (
+                        <div>
+                          <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Skills</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {candidate.skills.slice(0, 8).map((s: string, i: number) => (
+                              <span key={i} className="px-2.5 py-1 bg-muted rounded-lg text-xs">{s}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-muted-foreground mt-3">
+                      Want to target a different role?{' '}
+                      <button
+                        onClick={() => { setQuickRole(candidate.primary_role || ''); setShowRoleEdit(true); }}
+                        className="text-primary underline"
+                      >
+                        Change it here
+                      </button>
+                    </p>
+
+                    {profileError && (
+                      <p className="text-sm text-red-600 mt-3">{profileError}</p>
+                    )}
+
+                    <button
+                      onClick={continueWithProfile}
+                      disabled={creatingFromProfile}
+                      className="mt-6 w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
+                    >
+                      {creatingFromProfile
+                        ? <><Loader2 className="w-4 h-4 animate-spin" /> Setting up your campaign…</>
+                        : <>Continue with this profile <ArrowRight className="w-4 h-4" /></>}
+                    </button>
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-border p-6 space-y-4">
+                    <div>
+                      <p className="text-sm font-medium mb-1">What role are you targeting?</p>
+                      <p className="text-xs text-muted-foreground mb-3">We'll find LinkedIn connections matched to this role.</p>
+                      <input
+                        type="text"
+                        value={quickRole}
+                        onChange={e => setQuickRole(e.target.value)}
+                        placeholder="e.g. Product Manager, Software Engineer..."
+                        autoFocus
+                        className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && quickRole.trim()) {
+                            const role = quickRole.trim();
+                            const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                            setQuiz(updatedQuiz);
+                            saveWizard(2 as Step, updatedQuiz, campaignId);
+                            setStep(2);
+                          }
+                        }}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setShowRoleEdit(false)}
+                        className="flex-1 px-4 py-2.5 border border-border rounded-xl text-sm text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          const role = quickRole.trim();
+                          if (!role) return;
+                          const updatedQuiz = { ...quiz, target_role: role, campaign_name: role + ' outreach' };
+                          setQuiz(updatedQuiz);
+                          saveWizard(2 as Step, updatedQuiz, campaignId);
+                          setStep(2);
+                        }}
+                        disabled={!quickRole.trim()}
+                        className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
+                      >
+                        Use this role <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
-                  {candidate.target_industries?.length > 0 && (
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Industries</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {candidate.target_industries.map((ind: any, i: number) => (
-                          <span key={i} className="px-2.5 py-1 bg-primary/5 border border-primary/20 rounded-lg text-xs">
-                            {typeof ind === 'string' ? ind : ind.industry || ind.name}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {candidate.location && (
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Location</p>
-                      <p className="text-sm">{candidate.location}</p>
-                    </div>
-                  )}
-                  {candidate.skills?.length > 0 && (
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">Skills</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {candidate.skills.slice(0, 8).map((s: string, i: number) => (
-                          <span key={i} className="px-2.5 py-1 bg-muted rounded-lg text-xs">{s}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <p className="text-xs text-muted-foreground mt-3">
-                  Want to change this?{' '}
-                  <a href="/outreach/onboarding/chat?return=/lkot" className="text-primary underline">
-                    Redo the quiz
-                  </a>
-                </p>
-
-                {profileError && (
-                  <p className="text-sm text-red-600 mt-3">{profileError}</p>
                 )}
-
-                <button
-                  onClick={continueWithProfile}
-                  disabled={creatingFromProfile}
-                  className="mt-6 w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
-                >
-                  {creatingFromProfile
-                    ? <><Loader2 className="w-4 h-4 animate-spin" /> Setting up your campaign…</>
-                    : <>Continue with this profile <ArrowRight className="w-4 h-4" /></>}
-                </button>
               </div>
             )}
           </div>
