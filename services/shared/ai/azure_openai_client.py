@@ -20,6 +20,12 @@ MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
 
 
+class ContentFilterError(ValueError):
+    """Raised when Azure OpenAI's responsible-AI content filter rejects a prompt.
+    Non-retryable: the filter decision won't change on a second attempt."""
+    pass
+
+
 def generate_json(prompt: str, schema: Dict[str, Any], temperature: float = 0.0) -> Dict[str, Any]:
     """Send a prompt to Azure OpenAI and return parsed, validated JSON.
     
@@ -65,10 +71,21 @@ def generate_json(prompt: str, schema: Dict[str, Any], temperature: float = 0.0)
         try:
             logger.info("[AI] Sending request to Azure OpenAI (attempt %d/%d)", attempt, MAX_RETRIES)
             resp = requests.post(url, headers=headers, json=payload, timeout=90)
-            
+
             if not resp.ok:
                 logger.error("[AI] HTTP Error %d: %s", resp.status_code, resp.text)
-                
+                # Azure content filter / responsible-AI rejections won't change
+                # on retry. Fail fast so we don't keep three slow round-trips
+                # per blocked prompt, which was pinning the event loop and
+                # killing the liveness probe.
+                if resp.status_code == 400 and "content_filter" in resp.text:
+                    logger.error(
+                        "[AI] Content filter rejected the prompt; skipping retries."
+                    )
+                    raise ContentFilterError(
+                        "AI generation rejected by Azure content filter (non-retryable)."
+                    )
+
             resp.raise_for_status()
             
             data = resp.json()
@@ -105,6 +122,11 @@ def generate_json(prompt: str, schema: Dict[str, Any], temperature: float = 0.0)
                 logger.warning("[AI] Schema validation failed: %s", e.message)
                 raise ValueError(f"Schema validation failed: {e.message}")
                 
+        except ContentFilterError:
+            # Already logged above; bubble up immediately — retries are
+            # pointless for responsible-AI rejections and they pin the
+            # event loop on the API pod.
+            raise
         except Exception as e:
             logger.error("[AI] Attempt %d failed: %s", attempt, str(e))
             if attempt < MAX_RETRIES:
