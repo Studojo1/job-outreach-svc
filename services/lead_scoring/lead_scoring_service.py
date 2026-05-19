@@ -421,11 +421,14 @@ def score_and_select_leads(
             elif wants_enterprise and is_tiny:
                 size_penalty = -10  # user wants large company, lead is at tiny startup
 
-        # --- 10. LLM company intelligence rating (1-10 scale, default 5 = neutral) ---
-        llm_rating = 5
+        # --- 10. LLM company intelligence rating (1-10 scale, default 2.7 = unverified) ---
+        # Default is intentionally low: unverified companies must earn their rank via the
+        # heuristic, not float up on a neutral baseline. Only LLM-evaluated companies get
+        # the full 60% LLM weight working in their favour.
+        llm_rating = 2.7
         if not is_dream:
             lead_company_lower = (lead.get("company") or "").lower().strip()
-            llm_rating = (company_fit_scores or {}).get(lead_company_lower, 5)
+            llm_rating = (company_fit_scores or {}).get(lead_company_lower, 2.7)
 
         # Heuristic score: all dimension scores without LLM contribution
         heuristic_raw = (
