@@ -1113,6 +1113,7 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     # domain key → (ontology cluster, preferred spec keywords)
     DOMAIN_TO_CLUSTER: dict[str, tuple[str, list[str]]] = {
         "software_engineering": ("Technology & Engineering", ["software", "development"]),
+        "machine_learning": ("Data & Analytics", ["data science", "ml"]),
         "ml_engineering": ("Data & Analytics", ["data science", "ml"]),
         "data": ("Data & Analytics", ["data science", "analysis"]),
         "data_analytics": ("Data & Analytics", ["data analysis", "bi"]),

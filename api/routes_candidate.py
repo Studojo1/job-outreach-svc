@@ -255,13 +255,21 @@ async def candidate_chat_stream(
     # Q8 reads "zero-to-one gtm generalist" after the extraction overwrites it).
     # Fix: on the first call that has a non-empty profile, store a snapshot in
     # parsed_json["_qps"] and use it exclusively for all subsequent questions.
-    _QPS = "_qps"  # quiz profile snapshot key
-    if isinstance(parsed_json.get(_QPS), dict) and parsed_json[_QPS]:
-        resume_profile = parsed_json[_QPS]
+    # IMPORTANT: only trust the snapshot if it has real data (likely_roles or domain).
+    # A snapshot taken before background LLM completed will have these as None —
+    # in that case, re-read resume_profile and re-freeze if it's now ready.
+    _QPS = "_qps"
+    _qps_candidate = parsed_json.get(_QPS)
+    _qps_useful = (
+        isinstance(_qps_candidate, dict)
+        and (_qps_candidate.get("likely_roles") or _qps_candidate.get("domain"))
+    )
+    if _qps_useful:
+        resume_profile = _qps_candidate
     else:
         resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
-        if resume_profile:
-            # Lock in this profile for all future quiz calls on this candidate.
+        if resume_profile.get("likely_roles") or resume_profile.get("domain"):
+            # LLM extraction is done — lock this in for all future quiz calls.
             try:
                 candidate.parsed_json = {**parsed_json, _QPS: resume_profile}
                 db.commit()
