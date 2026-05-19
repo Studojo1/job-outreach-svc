@@ -492,16 +492,21 @@ async def get_candidate_profile(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    from services.candidate_intelligence.payload_builder import compute_hiring_manager_titles
     psych = candidate.psychometric_profile or {}
+    resume_profile = candidate.resume_profile or {}
+    target_roles = candidate.target_roles or []
+    hiring_manager_titles = compute_hiring_manager_titles(target_roles, resume_profile)
     return {
         "candidate_id": candidate.id,
         "parsed_json": candidate.parsed_json,
-        "resume_profile": candidate.resume_profile or {},
-        "target_roles": candidate.target_roles,
+        "resume_profile": resume_profile,
+        "target_roles": target_roles,
         "target_industries": candidate.target_industries,
         "dream_companies": candidate.dream_companies,
         "psychometric": psych.get("result") if psych else None,
         "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
+        "hiring_manager_titles": hiring_manager_titles,
     }
 
 

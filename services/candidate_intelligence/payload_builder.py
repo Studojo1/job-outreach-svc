@@ -595,3 +595,118 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
         f"niche_keywords={niche_keywords}, tech_stack={tech_stack}, work_mode={work_mode}"
     )
     return payload
+
+
+# ── Hiring manager title computation ───────────────────────────────────────────
+
+# Maps substrings of a candidate's target role title to the manager titles
+# they should reach out to. Evaluated in order — first match wins.
+# Each entry: (substring_to_match_in_role_lower, [manager_titles])
+_ROLE_MANAGER_MAP: list[tuple[str, list[str]]] = [
+    # AI / ML engineering
+    ("speech",           ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("asr",              ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("computer vision",  ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("nlp",              ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("llm",              ["Head of AI", "Director of AI", "ML Engineering Manager", "VP of Engineering", "CTO"]),
+    ("genai",            ["Head of AI", "Director of AI", "ML Engineering Manager", "VP of Engineering", "CTO"]),
+    ("ai agent",         ["Head of AI", "Director of AI", "ML Engineering Manager", "VP of Engineering", "CTO"]),
+    ("applied ai",       ["Head of AI", "Director of AI/ML", "ML Engineering Manager", "VP of Engineering", "CTO"]),
+    ("ml engineer",      ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("machine learning", ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("deep learning",    ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"]),
+    ("ai engineer",      ["Head of AI", "Director of AI/ML", "ML Engineering Manager", "VP of Engineering", "CTO"]),
+    ("research scientist",["Research Director", "Head of Research", "VP of Engineering", "Director of AI/ML", "CTO"]),
+    ("data scientist",   ["Head of Data Science", "Director of Data Science", "ML Engineering Manager", "VP of Data", "CTO"]),
+    # Software engineering
+    ("devops",           ["Head of Platform", "Head of Infrastructure", "Engineering Manager", "Director of Engineering", "VP Engineering"]),
+    ("platform",         ["Head of Platform", "Head of Infrastructure", "Engineering Manager", "Director of Engineering", "VP Engineering"]),
+    ("infrastructure",   ["Head of Infrastructure", "Engineering Manager", "Director of Engineering", "VP Engineering"]),
+    ("mobile",           ["Head of Mobile", "Engineering Manager", "Director of Engineering", "VP Engineering"]),
+    ("frontend",         ["Head of Frontend", "Engineering Manager", "Director of Engineering", "VP Engineering"]),
+    ("backend",          ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering"]),
+    ("full-stack",       ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering"]),
+    ("full stack",       ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering"]),
+    ("software engineer",["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering", "CTO"]),
+    ("developer",        ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering"]),
+    # Data analytics (pure analytics, not ML)
+    ("analytics engineer",["Head of Analytics", "Analytics Manager", "Director of Data Engineering", "VP of Data"]),
+    ("data analyst",     ["Head of Analytics", "Analytics Manager", "Director of Data Analytics", "VP of Data"]),
+    ("bi analyst",       ["Head of Analytics", "Analytics Manager", "Director of Data Analytics", "VP of Data"]),
+    ("data engineer",    ["Head of Data Engineering", "Analytics Manager", "Director of Data", "VP of Data"]),
+    # Product
+    ("product manager",  ["Head of Product", "Director of Product", "VP Product", "Chief Product Officer"]),
+    ("associate pm",     ["Head of Product", "Director of Product", "VP Product"]),
+    ("founding pm",      ["Head of Product", "CEO", "Founder", "VP Product"]),
+    # Design
+    ("ux",               ["Head of Design", "Design Lead", "Director of Design", "VP Design"]),
+    ("product designer", ["Head of Design", "Design Lead", "Director of Design", "VP Design"]),
+    ("designer",         ["Head of Design", "Design Lead", "Director of Design", "VP Design"]),
+    # Marketing / Growth
+    ("growth",           ["Head of Growth", "Director of Marketing", "VP Marketing", "CMO"]),
+    ("marketing",        ["Head of Marketing", "Director of Marketing", "VP Marketing", "CMO"]),
+    # Sales / BD
+    ("account executive",["Head of Sales", "Sales Manager", "Director of Sales", "VP Sales"]),
+    ("bdr",              ["Head of Sales", "Sales Manager", "Director of Sales", "VP Sales"]),
+    ("sdr",              ["Head of Sales", "Sales Manager", "Director of Sales", "VP Sales"]),
+    ("sales",            ["Head of Sales", "Sales Manager", "Director of Sales", "VP Sales"]),
+    ("business development",["Head of BD", "Director of Business Development", "VP Sales", "CRO"]),
+    # Finance
+    ("financial analyst",["Finance Manager", "Head of Finance", "Director of Finance", "CFO"]),
+    ("investment banking",["Managing Director", "Director", "VP", "Head of Finance"]),
+    ("fp&a",             ["Finance Manager", "Head of Finance", "Director of Finance", "CFO"]),
+    # Consulting / Strategy
+    ("consultant",       ["Engagement Manager", "Project Lead", "Principal Consultant", "Director of Strategy"]),
+    ("strategy",         ["Head of Strategy", "Chief of Staff", "Director of Strategy", "COO"]),
+    # Operations
+    ("chief of staff",   ["CEO", "COO", "Founder", "Managing Director"]),
+    ("operations",       ["Head of Operations", "Chief of Staff", "Director of Operations", "COO"]),
+    # Domain-level fallbacks (coarse)
+    ("engineer",         ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering", "CTO"]),
+    ("product",          ["Head of Product", "Director of Product", "VP Product"]),
+    ("data",             ["Head of Analytics", "Analytics Manager", "Director of Data", "VP of Data"]),
+    ("design",           ["Head of Design", "Design Lead", "Director of Design"]),
+]
+
+# Domain-level final fallbacks when no role keyword matches at all
+_DOMAIN_FALLBACK_MANAGERS: dict[str, list[str]] = {
+    "machine_learning": ["Head of ML Engineering", "ML Engineering Manager", "Director of AI/ML", "VP of Engineering", "CTO"],
+    "software_engineering": ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering", "CTO"],
+    "data": ["Head of Analytics", "Analytics Manager", "Director of Data Analytics", "VP of Data"],
+    "product": ["Head of Product", "Director of Product", "VP Product", "Chief Product Officer"],
+    "design": ["Head of Design", "Design Lead", "Director of Design", "VP Design"],
+    "marketing": ["Head of Growth", "Marketing Manager", "Director of Marketing", "VP Marketing", "CMO"],
+    "sales": ["Sales Manager", "Head of Sales", "Director of Sales", "VP Sales", "CRO"],
+    "finance": ["Finance Manager", "Head of Finance", "Director of Finance", "VP Finance", "CFO"],
+    "consulting": ["Engagement Manager", "Project Lead", "Principal Consultant", "Director of Strategy"],
+    "operations": ["Chief of Staff", "Head of Operations", "VP Operations", "Director of Operations", "COO"],
+    "hr": ["Head of People", "VP of People", "Director of HR", "Chief People Officer"],
+}
+
+
+def compute_hiring_manager_titles(target_roles: list[str], resume_profile: dict) -> list[str]:
+    """Compute manager titles to display on the profile page.
+
+    Looks at target_roles first (most specific), then falls back to
+    resume_profile.domain. Never returns an empty list.
+    """
+    roles_lower = [(r or "").lower() for r in (target_roles or [])]
+
+    for role_lower in roles_lower:
+        for keyword, titles in _ROLE_MANAGER_MAP:
+            if keyword in role_lower:
+                return titles
+
+    # No role keyword matched — fall back to domain
+    domain = (resume_profile.get("domain") or "").lower().strip()
+    if domain in _DOMAIN_FALLBACK_MANAGERS:
+        return _DOMAIN_FALLBACK_MANAGERS[domain]
+
+    # Subdomain fallback (e.g. domain="data" + subdomain="machine_learning")
+    subdomain = (resume_profile.get("subdomain") or "").lower().strip()
+    ml_sub_signals = ("machine_learn", "deep_learn", "data_scien", "nlp", "computer_vision", "ai_engin")
+    if any(s in subdomain for s in ml_sub_signals):
+        return _DOMAIN_FALLBACK_MANAGERS["machine_learning"]
+
+    # Last resort: generic engineering — better than showing nothing
+    return ["Engineering Manager", "Head of Engineering", "Director of Engineering", "VP Engineering", "CTO"]
