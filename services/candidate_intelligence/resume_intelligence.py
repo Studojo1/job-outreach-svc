@@ -16,8 +16,8 @@ Output ONLY valid JSON — no markdown, no prose, no code fences.
 
 Required JSON schema:
 {
-  "domain": "<primary field: software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
-  "subdomain": "<specific niche, e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design>",
+  "domain": "<primary field: software_engineering | machine_learning | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
+  "subdomain": "<specific niche, e.g. backend | frontend | growth_marketing | investment_banking | data_science | machine_learning | nlp | computer_vision | product_management | ux_design>",
   "seniority": "<student | junior | mid | senior>",
   "experience_years": <number or null>,
   "top_skills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
@@ -45,6 +45,7 @@ Use these career clusters to pick likely_roles — choose specific role titles t
 - Cross-functional / Compound (use when resume shows 2+ distinct skill areas working together): Founding Product Engineer, AI Product Strategist, Founder's Office (AI + Growth), GTM Automation Engineer, AI Automation Consultant, Product-Led Growth Operator, Zero-to-One Builder, Applied AI Generalist
 
 Rules:
+- domain: use "machine_learning" (not "data") when the candidate's primary work involves training models, ML pipelines, deep learning, NLP, computer vision, or ML infrastructure. Use "data" only for candidates focused on analytics, SQL, dashboards, and BI — not engineers who build ML systems.
 - likely_roles: 4-6 realistic roles for THIS candidate based on their actual experience and skills.
 - CRITICAL: If the resume shows cross-functional signals — e.g. someone who builds AI systems AND owns growth/GTM/distribution, OR an engineer who ships products AND talks to clients/users — ALWAYS include compound titles from the Cross-functional cluster. These describe who the person actually is better than single-function titles.
 - Pick the MOST SPECIFIC titles — e.g. for an ASR engineer prefer "Speech / ASR Engineer" over "ML Engineer". For an AI builder who also owns GTM, prefer "Founding Product Engineer" or "AI Product Strategist" over just "AI Engineer".
@@ -125,8 +126,8 @@ Output ONLY valid JSON — no markdown, no prose, no code fences.
 
 Required JSON schema:
 {
-  "domain": "<primary field: software_engineering | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
-  "subdomain": "<specific niche: e.g. backend | frontend | growth_marketing | investment_banking | data_science | product_management | ux_design | ai_engineering | gtm_strategy | revenue_operations>",
+  "domain": "<primary field: software_engineering | machine_learning | marketing | finance | data | product | design | sales | operations | hr | legal | consulting | healthcare | media | education | manufacturing | other>",
+  "subdomain": "<specific niche: e.g. backend | frontend | machine_learning | nlp | computer_vision | growth_marketing | investment_banking | data_science | product_management | ux_design | ai_engineering | gtm_strategy | revenue_operations>",
   "seniority": "<student | junior | mid | senior>",
   "experience_years": <number or null>,
   "top_skills": ["<skill1>", "<skill2>", "<skill3>", "<skill4>", "<skill5>"],
