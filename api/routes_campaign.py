@@ -952,11 +952,19 @@ async def cancel_campaign(
 # ── Internal Worker Endpoints (no auth — cluster-only) ─────────────────────
 
 @router.post("/worker/send-ready")
-async def worker_send_ready():
+def worker_send_ready():
     """Internal endpoint called by job-outreach-worker goroutine every 30s.
 
     Runs the 3-phase JIT cycle: enrich upcoming → generate content → send ready.
     No auth required because this is only accessible within the k8s cluster.
+
+    NOTE: this MUST be `def`, not `async def`. The cycle does blocking HTTP
+    calls (Azure OpenAI takes 5-15s) and synchronous DB queries. As an
+    `async def` it ran the cycle on the FastAPI event loop, starving every
+    other request including /health — which caused 58 liveness-probe
+    failures and CrashLoopBackOff on 2026-05-18. FastAPI runs sync handlers
+    on its threadpool, leaving the event loop free for /health and other
+    endpoints.
     """
     from services.email_campaign.campaign_worker import _process_cycle
 

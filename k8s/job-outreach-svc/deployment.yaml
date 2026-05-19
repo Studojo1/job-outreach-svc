@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-outreach-svc
+  namespace: studojo
+  labels:
+    app: job-outreach-svc
+spec:
+  # NOTE: replicas is managed by the HorizontalPodAutoscaler in hpa.yaml.
+  # The value here is the initial replica count when the deployment is
+  # first created. HPA takes over from there. Don't reduce it below the
+  # HPA's minReplicas (2) or HPA will immediately scale back up.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: job-outreach-svc
+  template:
+    metadata:
+      labels:
+        app: job-outreach-svc
+    spec:
+      imagePullSecrets:
+        - name: acr-secret
+      containers:
+        - name: job-outreach-svc
+          image: acrstudojo-dhfsdrfhf6a6bbg2.azurecr.io/job-outreach-svc:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: database-url
+            - name: APOLLO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: apollo-api-key
+            - name: GMAIL_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: gmail-client-id
+            - name: GMAIL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: gmail-client-secret
+            - name: AZURE_OPENAI_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: azure-openai-api-key
+            - name: AZURE_OPENAI_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: azure-openai-endpoint
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: jwt-secret-key
+            - name: GMAIL_REDIRECT_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: INTERNREACH_GMAIL_REDIRECT_URI
+            - name: AZURE_OPENAI_DEPLOYMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: INTERNREACH_AZURE_OPENAI_DEPLOYMENT
+            - name: FRONTEND_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: INTERNREACH_FRONTEND_URL
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          # Probe values are intentionally generous. The API event loop also
+          # runs the campaign worker, whose Azure OpenAI calls can take 5-15s
+          # each, so /health can be briefly slow. Tighter values caused the
+          # May 18 outage: 58 restarts in 6.5h on the prod pod.
+          # If/when campaign work moves into the worker pod, these can tighten.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 15
+            failureThreshold: 10
