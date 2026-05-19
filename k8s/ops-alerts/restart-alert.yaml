@@ -1,0 +1,141 @@
+---
+# RBAC: read-only access to pods across studojo + staging namespaces, so the
+# alert script can see restart counts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ops-alerter
+  namespace: studojo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ops-alerter-read-pods
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ops-alerter-read-pods
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ops-alerter-read-pods
+subjects:
+  - kind: ServiceAccount
+    name: ops-alerter
+    namespace: studojo
+---
+# Secret with the alert webhook URL. Populate via:
+#   kubectl create secret generic ops-alert-webhook -n studojo \
+#     --from-literal=url='https://hooks.slack.com/services/...'
+# The CronJob will run without alerting (logs only) until the secret exists,
+# so it's safe to deploy this manifest before configuring the webhook.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ops-alert-webhook
+  namespace: studojo
+type: Opaque
+stringData:
+  url: ""
+---
+# CronJob: every 5 minutes, scan all pods cluster-wide. For any pod whose
+# container has restarted >= RESTART_THRESHOLD times AND has restarted in
+# the last RECENT_WINDOW_MIN minutes, fire a webhook alert.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pod-restart-alerter
+  namespace: studojo
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: ops-alerter
+          restartPolicy: Never
+          containers:
+            - name: alerter
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: RESTART_THRESHOLD
+                  value: "5"
+                - name: RECENT_WINDOW_MIN
+                  value: "30"
+                - name: ALERT_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: ops-alert-webhook
+                      key: url
+                      optional: true
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -uo pipefail
+                  now=$(date +%s)
+                  window_seconds=$((RECENT_WINDOW_MIN * 60))
+                  alerts=""
+                  # Walk every container in every pod across all namespaces.
+                  # Output rows: namespace name restartCount lastRestartedAt
+                  rows=$(kubectl get pods --all-namespaces -o json | \
+                    jq -r '
+                      .items[] |
+                      .metadata.namespace as $ns |
+                      .metadata.name as $pod |
+                      .status.containerStatuses[]? |
+                      [
+                        $ns,
+                        $pod,
+                        .name,
+                        (.restartCount // 0),
+                        (.lastState.terminated.finishedAt // .state.running.startedAt // "1970-01-01T00:00:00Z")
+                      ] | @tsv')
+                  while IFS=$'\t' read -r ns pod ctr count finished_at; do
+                    [ -z "$ns" ] && continue
+                    if [ "$count" -lt "$RESTART_THRESHOLD" ]; then continue; fi
+                    finished_ts=$(date -d "$finished_at" +%s 2>/dev/null || echo 0)
+                    age=$((now - finished_ts))
+                    if [ "$age" -gt "$window_seconds" ]; then continue; fi
+                    line="$ns/$pod[$ctr] restarts=$count age=${age}s"
+                    echo "ALERT: $line"
+                    alerts="${alerts}- ${line}\n"
+                  done <<< "$rows"
+
+                  if [ -z "$alerts" ]; then
+                    echo "OK: no pods over $RESTART_THRESHOLD restarts in last ${RECENT_WINDOW_MIN}min"
+                    exit 0
+                  fi
+
+                  # Fire webhook if configured. Empty URL = log-only mode.
+                  if [ -n "${ALERT_WEBHOOK_URL:-}" ]; then
+                    payload=$(printf '{"text":"🚨 Studojo pod restart alert\n%b"}' "$alerts")
+                    code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
+                      -X POST "$ALERT_WEBHOOK_URL" \
+                      -H "Content-Type: application/json" \
+                      -d "$payload" || echo "000")
+                    echo "webhook -> HTTP $code"
+                    cat /tmp/resp.txt || true
+                  else
+                    echo "ALERT_WEBHOOK_URL empty; logged above. Configure secret ops-alert-webhook to enable notifications."
+                  fi
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
