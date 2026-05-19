@@ -198,6 +198,32 @@ Return a JSON object keyed by lead_id (string). Each value: headline (≤80 char
 """
 
 
+def _build_company_snapshot(lead: dict, company: Optional[dict]) -> str:
+    """Build a deterministic one-liner: what they build · city · stage or headcount."""
+    parts = []
+    if company:
+        facts = company.get("facts") or {}
+        what = facts.get("what_they_build") or company.get("short_description") or ""
+        if what:
+            parts.append(what[:80])
+        city = facts.get("headquarters_city") or company.get("headquarters_city") or lead.get("location") or ""
+        if city:
+            parts.append(city)
+        stage = facts.get("stage_signal") or ""
+        headcount = company.get("employee_count") or ""
+        size_label = stage or (f"~{headcount} employees" if headcount else "")
+        if size_label:
+            parts.append(size_label)
+    else:
+        company_name = lead.get("company") or ""
+        location = lead.get("location") or ""
+        if company_name:
+            parts.append(company_name)
+        if location:
+            parts.append(location)
+    return " · ".join(parts) if parts else ""
+
+
 def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str, dict]) -> Dict[int, dict]:
     if not batch_leads:
         return {}
@@ -218,7 +244,11 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
         if _has_banned_phrase(item):
             logger.info("[JUSTIFY] dropped lead %s — banned phrase in output", lid)
             continue
-        out[lead["id"]] = _strip_em_dashes(item)
+        item = _strip_em_dashes(item)
+        snapshot = _build_company_snapshot(lead, _resolve_company(lead, companies))
+        if snapshot and len(item.get("bullets") or []) >= 2:
+            item["bullets"] = [snapshot] + item["bullets"][:2]
+        out[lead["id"]] = item
     return out
 
 

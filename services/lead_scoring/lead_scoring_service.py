@@ -421,41 +421,39 @@ def score_and_select_leads(
             elif wants_enterprise and is_tiny:
                 size_penalty = -10  # user wants large company, lead is at tiny startup
 
-        # --- 10. Company Intelligence score (0-15 pts from LLM 1-10 rating) ---
-        # LLM evaluated each unique company against the candidate profile post-collection.
-        # 10/10 → +15, 5/10 → +7.5, 1/10 → +1.5. Default 5 (neutral) if not evaluated.
-        ci_score = 0
+        # --- 10. LLM company intelligence rating (1-10 scale, default 5 = neutral) ---
+        llm_rating = 5
         if not is_dream:
             lead_company_lower = (lead.get("company") or "").lower().strip()
             llm_rating = (company_fit_scores or {}).get(lead_company_lower, 5)
-            ci_score = round((llm_rating / 10) * 15)
-            # Low-rated companies (1-3/10) get an extra penalty so they fall below scoring floor
-            if llm_rating <= 3:
-                ci_score -= 10
 
-        # Total Calculation
-        total_score = (
+        # Heuristic score: all dimension scores without LLM contribution
+        heuristic_raw = (
             t_score + d_score + i_score + sen_score + l_score
-            + dc_score + niche_penalty + denylist_penalty + size_penalty + ci_score
+            + dc_score + niche_penalty + denylist_penalty + size_penalty
         )
 
-        # Tie-breaker (only when total_score is positive — don't randomly rescue penalized leads)
-        if total_score > 0:
+        # Tie-breaker on heuristic (only when positive — don't randomly rescue penalized leads)
+        if heuristic_raw > 0:
             unique_str = str(lead.get("apollo_person_id") or lead.get("name") or "")
             tie_breaker = hash(unique_str) % 5
-            total_score += tie_breaker
+            heuristic_raw += tie_breaker
 
-        # Clamp to [-60, 100] then normalize linearly to [0, 100].
-        # A perfect lead → ~100. A clear-mismatch lead → near 0 (well below
-        # the score floor so it's hidden from the user).
-        clamped = max(-60, min(total_score, 100))
-        normalized_score = round((clamped + 60) * (100 / 160), 1)
+        # Normalize heuristic to [0, 100] (raw range [-60, 100])
+        heuristic_clamped = max(-60, min(heuristic_raw, 100))
+        heuristic_normalized = (heuristic_clamped + 60) * (100 / 160)
 
-        # Dream-company override: any dream match is ALWAYS visible regardless
-        # of penalties. Floor their normalized score at 65 (well above the cutoff).
+        # Normalize LLM rating to [0, 100]
+        llm_normalized = (llm_rating / 10) * 100
+
+        # 40% heuristic, 60% LLM company intelligence
+        normalized_score = round(0.4 * heuristic_normalized + 0.6 * llm_normalized, 1)
+
+        # Dream-company override: floor at 65 so dream matches are always visible
         if is_dream and normalized_score < 65:
             normalized_score = 65.0
 
+        ci_score = round(llm_normalized)  # kept for DB storage compatibility
         lead["score"] = round(normalized_score, 1)
         # Attach raw component scores for DB storage
         lead["_title_score"] = t_score
@@ -477,7 +475,7 @@ def score_and_select_leads(
             "industry_score": i_score,
             "seniority_score": sen_score,
             "location_score": l_score,
-            "total_raw": total_score,
+            "total_raw": heuristic_raw,
             "score_normalized": lead["score"],
         })
 
