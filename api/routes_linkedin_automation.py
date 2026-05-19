@@ -41,10 +41,20 @@ class LinkedInCheckPhoneTapRequest(BaseModel):
     session_key: str
 
 
-def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: str | None):
+def _store_token(
+    db, user_id: str, li_at: str, jsessionid: str, display_name: str | None,
+    connection_mode: str = "proxy",
+    cookies_blob: str | None = None,
+):
     import secrets as _secrets
+    from services.linkedin_outreach.crypto import encrypt as encrypt_single
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
     proxy_session_id = _secrets.token_hex(8)
+
+    cookies_blob_enc = None
+    cookies_blob_nonce = None
+    if cookies_blob:
+        cookies_blob_enc, cookies_blob_nonce = encrypt_single(cookies_blob)
 
     existing = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
     if existing:
@@ -53,6 +63,9 @@ def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: st
         existing.nonce = nonce
         existing.linkedin_name = display_name
         existing.proxy_session_id = proxy_session_id
+        existing.connection_mode = connection_mode
+        existing.cookies_blob_enc = cookies_blob_enc
+        existing.cookies_blob_nonce = cookies_blob_nonce
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
@@ -62,6 +75,9 @@ def _store_token(db, user_id: str, li_at: str, jsessionid: str, display_name: st
             nonce=nonce,
             linkedin_name=display_name,
             proxy_session_id=proxy_session_id,
+            connection_mode=connection_mode,
+            cookies_blob_enc=cookies_blob_enc,
+            cookies_blob_nonce=cookies_blob_nonce,
         ))
     db.commit()
     return display_name
@@ -134,9 +150,21 @@ async def check_phone_tap(
     return {"ok": True, "linkedin_name": display_name}
 
 
+class LinkedInExtensionCookie(BaseModel):
+    name: str
+    value: str
+    domain: str | None = None
+    path: str | None = None
+    secure: bool | None = None
+    httpOnly: bool | None = None
+    sameSite: str | None = None
+
+
 class LinkedInCookieLoginRequest(BaseModel):
     li_at: str
     jsessionid: str
+    is_extension: bool = False  # True when called from the Studojo browser extension
+    cookies: list[LinkedInExtensionCookie] | None = None  # Full LinkedIn cookie jar (extension only)
 
 
 @router.post("/login/cookies")
@@ -145,7 +173,13 @@ async def login_with_cookies(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Store LinkedIn session cookies directly (bypasses email+password challenge)."""
+    """Store LinkedIn session cookies directly (bypasses email+password challenge).
+
+    If is_extension=True the token is flagged 'extension' connection_mode — the daemon
+    skips it (server-side proxy sends fail with redirect loops because the cookies are
+    bound to the user's home IP). The extension polls /extension/next-task and runs
+    sends from inside the user's browser.
+    """
     if not body.li_at or not body.jsessionid:
         raise HTTPException(status_code=400, detail="li_at and jsessionid are required")
 
@@ -174,8 +208,131 @@ async def login_with_cookies(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}")
 
-    _store_token(db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name)
-    return {"ok": True, "linkedin_name": display_name}
+    # When the extension sends the full cookie jar, we can use server-side proxy sending.
+    # Without the full jar (paste-cookies tab or older extension), extension-login cookies
+    # would fail through the proxy — fall back to extension-runs-the-sends mode.
+    import json as _json
+    cookies_blob = None
+    if body.cookies:
+        cookies_blob = _json.dumps([c.dict() for c in body.cookies])
+        # Full cookie jar present: proxy mode works
+        connection_mode = "proxy"
+    else:
+        connection_mode = "extension" if body.is_extension else "proxy"
+
+    _store_token(
+        db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name,
+        connection_mode=connection_mode,
+        cookies_blob=cookies_blob,
+    )
+    return {
+        "ok": True,
+        "linkedin_name": display_name,
+        "connection_mode": connection_mode,
+        "cookies_count": len(body.cookies) if body.cookies else 0,
+    }
+
+
+# ── Extension-driven send pipeline ─────────────────────────────────────────────
+# For users who connected via the browser extension, cookies are bound to their
+# home IP — server-side sends via our proxy fail with redirect loops. Instead, the
+# extension polls these endpoints from the user's browser (their IP, their cookies)
+# and runs the actual LinkedIn connect click via background-tab automation.
+
+@router.get("/extension/next-task")
+async def extension_next_task(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the next pending lead to send for this user's active campaigns.
+
+    Only returns work if the user's token is connection_mode='extension'. Respects
+    each campaign's daily_limit and the IST sending window (9am–6pm IST).
+    """
+    from services.linkedin_outreach.automation_service import _is_ist_sending_window
+
+    token = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token or token.connection_mode != "extension":
+        return {"task": None, "reason": "not_extension_mode"}
+
+    if not _is_ist_sending_window():
+        return {"task": None, "reason": "outside_sending_window"}
+
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    camps = (
+        db.query(LinkedInCampaign)
+        .filter(LinkedInCampaign.user_id == current_user.id, LinkedInCampaign.status == "running")
+        .all()
+    )
+    for c in camps:
+        sent_today = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == c.id,
+                LinkedInConnectionRequest.sent_at >= today_start,
+                LinkedInConnectionRequest.status.in_(["sent", "accepted", "followup_sent", "replied"]),
+            )
+            .count()
+        )
+        if sent_today >= (c.daily_limit or 0):
+            continue
+        req = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == c.id,
+                LinkedInConnectionRequest.status == "pending",
+            )
+            .first()
+        )
+        if req:
+            # Mark in_progress so a second poll (or another tab) doesn't pick it up.
+            req.status = "in_progress"
+            req.updated_at = datetime.utcnow()
+            db.commit()
+            return {
+                "task": {
+                    "task_id": req.id,
+                    "campaign_id": c.id,
+                    "profile_url": req.profile_url,
+                    "note": (c.connection_note or "")[:280],
+                    "lead_name": req.name or "",
+                }
+            }
+    return {"task": None, "reason": "no_pending"}
+
+
+class ExtensionTaskResultRequest(BaseModel):
+    task_id: int
+    success: bool
+    error: str | None = None
+
+
+@router.post("/extension/task-result")
+async def extension_task_result(
+    body: ExtensionTaskResultRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Record the outcome of an extension-executed send."""
+    req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == body.task_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="task not found")
+    camp = db.query(LinkedInCampaign).filter(LinkedInCampaign.id == req.campaign_id).first()
+    if not camp or camp.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="not your task")
+
+    if body.success:
+        req.status = "sent"
+        req.sent_at = datetime.utcnow()
+        camp.total_sent = (camp.total_sent or 0) + 1
+        camp.updated_at = datetime.utcnow()
+    else:
+        req.status = "error"
+        req.error = (body.error or "Extension send failed")[:500]
+    req.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 # ── Campaign CRUD ──────────────────────────────────────────────────────────────
@@ -258,6 +415,164 @@ async def create_campaign(
     db.commit()
     db.refresh(campaign)
     return _campaign_to_response(campaign)
+
+
+class CreateCampaignFromProfileRequest(BaseModel):
+    candidate_id: int
+    name: Optional[str] = None              # if omitted, derived from candidate's target role
+    connection_note: Optional[str] = None   # if omitted, AI generates per-lead notes at lead-fetch time
+    followup_message: Optional[str] = None
+    daily_limit: int = Field(default=5, ge=1, le=20)
+    override_target_role: Optional[str] = None       # if student wants to override quiz output
+    override_target_locations: Optional[list[str]] = None
+
+
+@router.post("/campaigns/from-profile", response_model=CampaignResponse)
+async def create_campaign_from_profile(
+    body: CreateCampaignFromProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create an LKOT campaign whose targeting is auto-derived from a Candidate's
+    resume_profile + quiz output (target_roles, target_industries, dream_companies,
+    location, etc.). Called after the student finishes the outreach quiz.
+    """
+    from database.models import Candidate
+
+    cand = db.query(Candidate).filter(
+        Candidate.id == body.candidate_id,
+        Candidate.user_id == current_user.id,
+    ).first()
+    if not cand:
+        raise HTTPException(status_code=404, detail="Candidate profile not found")
+
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    dream_companies = cand.dream_companies if isinstance(cand.dream_companies, list) else []
+
+    # likely_roles is the resume_profile's own role guesses (fallback if quiz roles absent)
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+
+    # Target role — required field on the campaign schema.
+    target_role = (body.override_target_role or "").strip()
+    if not target_role and target_roles:
+        first = target_roles[0]
+        target_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not target_role and likely_roles:
+        target_role = str(likely_roles[0])
+    if not target_role:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not derive a target role from the profile. Complete the quiz first or pass override_target_role.",
+        )
+
+    # Locations — resume_profile.geography is {city, country, country_code}
+    locations: list[str] = []
+    if body.override_target_locations:
+        locations = body.override_target_locations
+    else:
+        geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+        for key in ("city", "country"):
+            v = (geo.get(key) or "").strip()
+            if v and v not in locations:
+                locations.append(v)
+
+    # Industries — target_industries is a flat list of strings
+    industries: list[str] = []
+    for ind in target_industries:
+        if isinstance(ind, str):
+            industries.append(ind)
+        elif isinstance(ind, dict):
+            v = ind.get("industry") or ind.get("name")
+            if v:
+                industries.append(str(v))
+
+    # Keyword bias — dream companies + the candidate's top skills
+    keyword_parts: list[str] = []
+    if dream_companies:
+        keyword_parts.extend([str(c.get("name") if isinstance(c, dict) else c) for c in dream_companies if c])
+    skills = profile.get("top_skills") or profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        keyword_parts.extend([str(s) for s in skills[:5]])
+    target_keywords = " ".join(keyword_parts).strip() or None
+
+    name = (body.name or f"{target_role} outreach").strip()
+
+    campaign = LinkedInCampaign(
+        user_id=current_user.id,
+        candidate_id=cand.id,
+        name=name,
+        target_role=target_role,
+        target_industries=industries,
+        target_locations=locations,
+        target_company_sizes=[],
+        target_keywords=target_keywords,
+        connection_note=body.connection_note,
+        followup_message=body.followup_message,
+        daily_limit=body.daily_limit,
+    )
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+    logger.info(
+        "Campaign %d created from candidate %d — role=%r industries=%s locations=%s",
+        campaign.id, cand.id, target_role, industries, locations,
+    )
+    return _campaign_to_response(campaign)
+
+
+@router.get("/my-candidate")
+async def my_candidate(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the user's most recent candidate profile (or null).
+
+    LKOT Profile step calls this to decide whether to show 'continue with your
+    profile' or send them through the outreach upload + quiz flow first.
+    """
+    from database.models import Candidate
+
+    cand = (
+        db.query(Candidate)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Candidate.created_at.desc())
+        .first()
+    )
+    if not cand:
+        return {"candidate": None}
+
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+    # Quiz is "complete" once the student has confirmed target roles/industries.
+    quiz_complete = bool(target_roles or target_industries)
+
+    primary_role = ""
+    if target_roles:
+        first = target_roles[0]
+        primary_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not primary_role and likely_roles:
+        primary_role = str(likely_roles[0])
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    location = " ".join(str(geo.get(k, "")) for k in ("city", "country") if geo.get(k)).strip() or None
+
+    return {
+        "candidate": {
+            "id": cand.id,
+            "primary_role": primary_role,
+            "target_roles": target_roles,
+            "target_industries": target_industries,
+            "dream_companies": cand.dream_companies or [],
+            "skills": profile.get("top_skills") or profile.get("skills") or [],
+            "location": location,
+            "quiz_complete": quiz_complete,
+            "created_at": cand.created_at.isoformat() if cand.created_at else None,
+        }
+    }
 
 
 @router.get("/campaigns", response_model=list[CampaignResponse])
@@ -416,9 +731,20 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         ).all()
         req_ids = [r.id for r in reqs]
 
+        # Build a student summary from the linked candidate (if any) so match_reason
+        # references the student's real background, not just the target role.
+        student_summary = None
+        if c.candidate_id:
+            from database.models import Candidate
+            cand = db.query(Candidate).filter(Candidate.id == c.candidate_id).first()
+            if cand:
+                student_summary = _summarise_candidate(cand, c.target_role)
+
         # Fire-and-forget AI personalisation — does not block lead availability
         import asyncio as _asyncio
-        _asyncio.create_task(_personalise_leads(req_ids, people, c.target_role, user_name, c.connection_note))
+        _asyncio.create_task(
+            _personalise_leads(req_ids, people, c.target_role, user_name, c.connection_note, student_summary)
+        )
 
     except Exception as e:
         logger.error("Lead search failed for campaign %d: %s", campaign_id, e, exc_info=True)
@@ -426,31 +752,93 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         db.close()
 
 
+def _summarise_candidate(cand, target_role: str) -> str:
+    """One-paragraph factual summary of a Candidate row, used to ground the
+    per-lead match_reason prompt in the student's actual background.
+
+    Reads the resume_profile schema produced by resume_intelligence:
+    {domain, subdomain, seniority, geography:{city,country}, top_skills,
+     likely_roles, archetype_label, strongest_hook, candidate_pitch}.
+    """
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    parts: list[str] = []
+
+    archetype = profile.get("archetype_label")
+    if archetype:
+        parts.append(str(archetype))
+
+    seniority = profile.get("seniority")
+    domain = profile.get("domain")
+    subdomain = profile.get("subdomain")
+    field = " / ".join(str(x).replace("_", " ") for x in (domain, subdomain) if x)
+    if seniority or field:
+        parts.append(f"{(seniority or '').strip().capitalize()} in {field}".strip())
+
+    skills = profile.get("top_skills") or profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        parts.append(f"Skills: {', '.join(str(s) for s in skills[:6])}")
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    loc = " ".join(str(geo.get(k, "")) for k in ("city", "country") if geo.get(k)).strip()
+    if loc:
+        parts.append(f"Based in {loc}")
+
+    parts.append(f"Looking for: {target_role}")
+    return ". ".join(p for p in parts if p)[:600]
+
+
 async def _personalise_leads(
-    req_ids: list[int], people: list[dict], target_role: str, user_name: str, template: str | None
+    req_ids: list[int],
+    people: list[dict],
+    target_role: str,
+    user_name: str,
+    template: str | None,
+    student_summary: str | None = None,
 ) -> None:
-    """Background task: update saved leads with AI-personalised connection notes."""
+    """Background task: update saved leads with AI-personalised connection notes AND
+    a one-line match reason. Runs after lead save so the dashboard sees leads immediately."""
+    import asyncio as _asyncio
     from database.session import SessionLocal
-    from services.linkedin_outreach.message_gen import generate_connection_message
+    from services.linkedin_outreach.message_gen import generate_connection_message, generate_match_reason
 
     db = SessionLocal()
     try:
-        for req_id, person in zip(req_ids, people):
+        # Generate note + match reason concurrently per lead, batched to respect OpenAI rate limits
+        async def enrich_one(req_id: int, person: dict) -> tuple[int, str, str]:
             try:
-                note = await generate_connection_message(
+                note_task = generate_connection_message(
                     person_name=person.get("name", ""),
                     person_headline=person.get("headline", ""),
                     person_company=person.get("company", ""),
                     target_role=target_role,
                     student_name=user_name,
                 )
-                req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
-                if req and req.status == "pending":
-                    req.connection_note = note
+                reason_task = generate_match_reason(
+                    person_name=person.get("name", ""),
+                    person_headline=person.get("headline", ""),
+                    person_company=person.get("company", ""),
+                    target_role=target_role,
+                    student_summary=student_summary,
+                )
+                note, reason = await _asyncio.gather(note_task, reason_task)
+                return req_id, note, reason
             except Exception:
-                pass
-        db.commit()
-        logger.info("Personalised %d connection notes in background", len(req_ids))
+                return req_id, "", ""
+
+        batch_size = 5
+        for i in range(0, len(req_ids), batch_size):
+            batch = list(zip(req_ids, people))[i : i + batch_size]
+            results = await _asyncio.gather(*[enrich_one(rid, p) for rid, p in batch])
+            for req_id, note, reason in results:
+                req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
+                if not req or req.status != "pending":
+                    continue
+                if note:
+                    req.connection_note = note
+                if reason:
+                    req.match_reason = reason
+            db.commit()
+        logger.info("Personalised %d leads (note + match_reason) in background", len(req_ids))
     except Exception as e:
         logger.error("Background personalisation failed: %s", e)
     finally:
@@ -567,27 +955,30 @@ async def send_one_now(
     if not req:
         raise HTTPException(status_code=404, detail="No pending leads to send")
 
-    # Resolve URN
+    from services.linkedin_outreach.automation_service import _decrypt_cookies_blob
+    cookies_blob = _decrypt_cookies_blob(token_row)
+
+    # Resolve URN (best-effort — Playwright fallback works without it)
     if not req.profile_urn:
         try:
-            urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id)
+            urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id, cookies_blob)
         except LinkedInAuthError:
             c.status = "auth_failed"
             c.updated_at = datetime.utcnow()
             db.commit()
             raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
-        if not urn:
-            req.status = "error"
-            req.error = "Could not resolve profile URN"
-            req.updated_at = datetime.utcnow()
-            db.commit()
-            raise HTTPException(status_code=422, detail=f"Could not resolve URN for {req.profile_url}")
-        req.profile_urn = urn
+        if urn:
+            req.profile_urn = urn
 
-    # Send
+    # Send — passes profile_url so Playwright fallback works even with no URN
     try:
         ok = await send_connection_request(
-            li_at, jsessionid, req.profile_urn, req.connection_note or "", token_row.proxy_session_id
+            li_at, jsessionid,
+            req.profile_urn or "",
+            req.connection_note or "",
+            token_row.proxy_session_id,
+            profile_url=req.profile_url,
+            cookies_blob=cookies_blob,
         )
     except LinkedInAuthError:
         c.status = "auth_failed"
@@ -712,6 +1103,7 @@ class ConnectionRequestResponse(BaseModel):
     profile_url: str
     connection_note: Optional[str]
     followup_message: Optional[str]
+    match_reason: Optional[str]
     status: str
     sent_at: Optional[str]
     accepted_at: Optional[str]
@@ -784,6 +1176,7 @@ async def list_requests(
             profile_url=r.profile_url,
             connection_note=r.connection_note,
             followup_message=r.followup_message,
+            match_reason=r.match_reason,
             status=r.status,
             sent_at=r.sent_at.isoformat() if r.sent_at else None,
             accepted_at=r.accepted_at.isoformat() if r.accepted_at else None,

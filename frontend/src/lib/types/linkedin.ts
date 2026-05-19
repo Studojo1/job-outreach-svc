@@ -39,6 +39,7 @@ export interface ConnectionRequest {
   profile_url: string;
   connection_note: string | null;
   followup_message: string | null;
+  match_reason: string | null;
   status: string;
   sent_at: string | null;
   accepted_at: string | null;

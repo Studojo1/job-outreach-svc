@@ -327,6 +327,15 @@ class LinkedInToken(Base):
     nonce = Column(Text, nullable=False)           # base64 GCM nonce (12 bytes)
     linkedin_name = Column(Text)
     proxy_session_id = Column(Text)               # sticky residential proxy session ID per account
+    # 'proxy' = cookies created via our Playwright login through proxy (works server-side).
+    # 'extension' = cookies from browser extension bound to user's home IP — only the
+    # extension itself can use them; server-side sends will hit a redirect loop.
+    connection_mode = Column(Text, nullable=False, default="proxy")
+    # Encrypted JSON of the full LinkedIn cookie jar captured by the extension
+    # (bcookie, bscookie, lidc, li_mc, lang, etc.). When set, replayed verbatim
+    # to satisfy LinkedIn's anti-fraud cookie completeness check on the proxy IP.
+    cookies_blob_enc = Column(Text, nullable=True)
+    cookies_blob_nonce = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -376,6 +385,10 @@ class LinkedInCampaign(Base):
     __tablename__ = "linkedin_campaigns"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    # Optional link to a candidate (student) profile — when present, the campaign
+    # targeting is auto-derived from resume_profile + quiz output, and per-lead
+    # message + match-reason use the student's context.
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
     name = Column(Text, nullable=False)
     status = Column(String(20), default="draft", nullable=False)  # draft|running|paused|completed
     # Quiz / ICP config
@@ -419,6 +432,7 @@ class LinkedInConnectionRequest(Base):
     # Outreach content
     connection_note = Column(Text)     # personalised note sent with request
     followup_message = Column(Text)    # personalised follow-up
+    match_reason = Column(Text)        # one-line "why this lead is a match" for the student
     # Status tracking
     status = Column(String(30), default="pending", nullable=False)
     # pending | sent | accepted | declined | ignored | followup_sent | replied

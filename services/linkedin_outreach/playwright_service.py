@@ -284,6 +284,7 @@ async def playwright_send_invitation(
     note: str = "",
     proxy_url: str | None = None,
     existing_urn: str | None = None,
+    cookies_blob: str | None = None,
 ) -> dict:
     """Send a LinkedIn connection request by clicking the Connect button in a headless browser.
 
@@ -341,29 +342,63 @@ async def playwright_send_invitation(
                 java_script_enabled=True,
             )
 
-            # Inject cookies before any navigation. These are proxy-bound fresh cookies
-            # (obtained by logging in through this same proxy), so no identity warmup needed.
-            await context.add_cookies([
-                {
-                    "name": "li_at",
-                    "value": li_at,
-                    "domain": ".linkedin.com",
-                    "path": "/",
-                    "httpOnly": True,
-                    "secure": True,
-                    "sameSite": "None",
-                },
-            ])
-            if fresh_jsessionid:
-                await context.add_cookies([{
-                    "name": "JSESSIONID",
-                    "value": jsessionid_val,
-                    "domain": "www.linkedin.com",
-                    "path": "/",
-                    "httpOnly": False,
-                    "secure": True,
-                    "sameSite": "None",
-                }])
+            # Inject cookies before any navigation.
+            # If the extension captured the full cookie jar, inject ALL of them so
+            # LinkedIn sees a complete authentic session (passes anti-fraud checks).
+            injected_full_jar = False
+            if cookies_blob:
+                try:
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        domain = c.get("domain") or ".linkedin.com"
+                        ss_raw = (c.get("sameSite") or "no_restriction").lower()
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": domain,
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(ss_raw, "Lax"),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                        logger.info("Playwright: %s — injected full cookie jar (%d cookies)", slug, len(pw_cookies))
+                except Exception as e:
+                    logger.warning("Playwright: could not inject cookie jar: %s", e)
+
+            if not injected_full_jar:
+                # Fallback: proxy-bound fresh cookies (li_at + JSESSIONID only)
+                await context.add_cookies([
+                    {
+                        "name": "li_at",
+                        "value": li_at,
+                        "domain": ".linkedin.com",
+                        "path": "/",
+                        "httpOnly": True,
+                        "secure": True,
+                        "sameSite": "None",
+                    },
+                ])
+                if fresh_jsessionid:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID",
+                        "value": jsessionid_val,
+                        "domain": "www.linkedin.com",
+                        "path": "/",
+                        "httpOnly": False,
+                        "secure": True,
+                        "sameSite": "None",
+                    }])
 
             page = await context.new_page()
 
@@ -380,14 +415,13 @@ async def playwright_send_invitation(
                         logger.info("Playwright: API %s %s → %s body=%s", method, url, response.status, body[:200])
                     except Exception:
                         pass
-                if "normInvitations" in url or (
-                    "relationships/invitations" in url
-                    and method == "POST"
-                ) or (
-                    "custom-invite" in url and method == "POST"
-                ) or (
-                    "invite" in url.lower() and method == "POST"
-                ):
+                is_invite_url = (
+                    "normInvitations" in url
+                    or ("relationships/invitations" in url and method == "POST")
+                    or ("custom-invite" in url and method == "POST")
+                    or ("invite" in url.lower() and method == "POST")
+                )
+                if is_invite_url:
                     try:
                         invitation_result["status"] = response.status
                         invitation_result["body"] = await response.text()
@@ -402,10 +436,26 @@ async def playwright_send_invitation(
                 # localStorage / Redux store). Without this, cookie-injected contexts
                 # silently skip modal rendering on the profile page.
                 logger.info("Playwright: bootstrapping session via /feed")
-                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
+                except Exception as goto_err:
+                    msg = str(goto_err)
+                    # Extension-login sessions are bound to the user's home IP — when routed
+                    # through our proxy, LinkedIn bounces every request to auth wall, causing
+                    # ERR_TOO_MANY_REDIRECTS. Surface this as auth-failed so the UI can prompt
+                    # the user to reconnect via Email & Password (which creates proxy-bound cookies).
+                    if "ERR_TOO_MANY_REDIRECTS" in msg or "ERR_HTTP_RESPONSE_CODE_FAILURE" in msg:
+                        raise LinkedInAuthError(
+                            "LinkedIn rejected the session — please reconnect using Email & Password. "
+                            "(Extension cookies don't work through our network proxy.)"
+                        )
+                    raise
                 feed_url = page.url
-                if "/login" in feed_url or "/uas/login" in feed_url:
-                    raise LinkedInAuthError("Session expired — browser redirected to login on /feed")
+                if "/login" in feed_url or "/uas/login" in feed_url or "/authwall" in feed_url:
+                    raise LinkedInAuthError(
+                        "LinkedIn rejected the session — please reconnect using Email & Password. "
+                        "(Extension cookies don't work through our network proxy.)"
+                    )
                 await page.wait_for_timeout(2000)
 
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
@@ -483,78 +533,51 @@ async def playwright_send_invitation(
                 except Exception:
                     logger.info("Playwright: %s — modal not detected after 20s (url=%s)", slug, page.url)
 
-                # Dump modal state for debugging
-                modal_buttons = await page.evaluate("""() =>
-                    [...document.querySelectorAll('button')].map(b => ({
-                        label: b.getAttribute('aria-label') || '',
-                        text: b.innerText.trim(),
-                        visible: b.offsetParent !== null,
-                    })).filter(b => b.visible && (b.label || b.text))
+                # Dump modal state AND click in a single evaluate so LinkedIn's React SPA
+                # cannot re-render the DOM between the find and the click.
+                # Strictly limit to invite-specific labels — never "Send" alone which
+                # is LinkedIn's messaging-overlay compose button.
+                send_result = await page.evaluate("""
+                    () => {
+                        const all = [...document.querySelectorAll('button')];
+                        const visible = b => b.offsetParent !== null;
+
+                        const dump = all.filter(visible).map(b => ({
+                            label: b.getAttribute('aria-label') || '',
+                            text: b.innerText.trim().slice(0, 40),
+                        }));
+
+                        // Always try "Send without a note" / "Send now" FIRST.
+                        // Sending without a note is better than not sending at all.
+                        // The note feature can be improved separately once the basic
+                        // send flow is reliable.
+                        const inviteLabels = ['Send without a note', 'Send now'];
+                        for (const lbl of inviteLabels) {
+                            const btn = all.find(b => visible(b) && (
+                                (b.getAttribute('aria-label') || '').trim() === lbl ||
+                                (b.innerText || '').trim() === lbl
+                            ));
+                            if (btn) {
+                                btn.click();
+                                return { action: 'send_clicked', button: lbl, dump };
+                            }
+                        }
+
+                        return { action: 'not_found', dump };
+                    }
                 """)
-                logger.info("Playwright: %s — modal buttons after Connect click: %s", slug, modal_buttons)
+                logger.info("Playwright: %s — send_result: action=%s dump=%s",
+                            slug, send_result.get("action"), send_result.get("dump"))
 
-                # Handle the "Add a note / Send without a note" modal
                 send_clicked = False
-
-                if note:
-                    # Try to click "Add a note" first
-                    try:
-                        add_note_btn = page.locator('button[aria-label="Add a note"]').first
-                        if await add_note_btn.is_visible(timeout=2000):
-                            await add_note_btn.click()
-                            await page.wait_for_timeout(800)
-                            for ta_selector in [
-                                'textarea[name="message"]',
-                                'textarea.connect-button-send-invite__custom-message',
-                                'textarea',
-                            ]:
-                                try:
-                                    ta = page.locator(ta_selector).first
-                                    if await ta.is_visible(timeout=1000):
-                                        await ta.fill(note[:300])
-                                        break
-                                except Exception:
-                                    pass
-                            for send_sel in [
-                                'button[aria-label="Send"]',
-                                'button[aria-label="Done"]',
-                                'button:has-text("Send")',
-                            ]:
-                                try:
-                                    send_btn = page.locator(send_sel).first
-                                    if await send_btn.is_visible(timeout=1500):
-                                        await send_btn.click()
-                                        send_clicked = True
-                                        break
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                if send_result.get("action") == "send_clicked":
+                    logger.info("Playwright: %s — JS click fired for invite button: %s",
+                                slug, send_result.get("button"))
+                    send_clicked = True
 
                 if not send_clicked:
-                    # Try every likely "Send" selector — LinkedIn varies the text/aria-label
-                    for sel in [
-                        'button[aria-label="Send without a note"]',
-                        'button[aria-label="Send now"]',
-                        'button[aria-label="Send"]',
-                        'button[aria-label="Done"]',
-                        'button:has-text("Send without a note")',
-                        'button:has-text("Send now")',
-                        'button:has-text("Send")',
-                        'button:has-text("Done")',
-                    ]:
-                        try:
-                            btn = page.locator(sel).first
-                            if await btn.is_visible(timeout=1500):
-                                logger.info("Playwright: %s — clicking send via selector: %s", slug, sel)
-                                await btn.click(timeout=10000)
-                                send_clicked = True
-                                break
-                        except Exception as send_err:
-                            logger.info("Playwright: %s — send click failed for %r: %s", slug, sel, send_err)
-
-                if not send_clicked:
-                    logger.warning("Playwright: %s — could not find Send button. Modal buttons were: %s", slug, modal_buttons)
+                    logger.warning("Playwright: %s — could not find Send button. Dump: %s",
+                                   slug, send_result.get("dump"))
                     return {"ok": False, "error": "Send button not found after clicking Connect", "profile_urn": existing_urn}
 
                 # Wait for the invitation network request to complete
@@ -577,20 +600,32 @@ async def playwright_send_invitation(
                 elif inv_status is not None:
                     return {"ok": False, "error": f"Invitation API returned {inv_status}: {inv_body}", "profile_urn": existing_urn}
                 else:
-                    # No network interception — check if the Connect button changed to
-                    # Pending in the profile action bar (a real UI-level success signal).
-                    # Use a specific button selector, NOT a full-page text scan, to avoid
-                    # false-positives from "X pending invitations" in LinkedIn's nav.
+                    # No network interception — check DOM state via JS to avoid
+                    # is_visible(timeout=) which is not a valid Playwright Python kwarg.
                     await page.wait_for_timeout(1500)
-                    try:
-                        pending_btn = page.locator(
-                            'button[aria-label*="Pending"], button:has-text("Pending")'
-                        ).first
-                        if await pending_btn.is_visible(timeout=2000):
-                            logger.info("Playwright: %s — Connect button changed to Pending (UI success)", slug)
-                            return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
-                    except Exception:
-                        pass
+                    dom_state = await page.evaluate("""
+                        () => {
+                            // Modal gone = invite was submitted
+                            const sendBtn = document.querySelector(
+                                'button[aria-label="Send without a note"]'
+                            );
+                            const modalGone = !sendBtn || sendBtn.offsetParent === null;
+                            // Pending button in profile action bar
+                            const pendingBtn = [...document.querySelectorAll('button')].find(
+                                b => (b.getAttribute('aria-label') || '').toLowerCase().includes('pending')
+                                  || (b.innerText || '').trim().toLowerCase() === 'pending'
+                            );
+                            return {
+                                modalGone: modalGone,
+                                hasPending: !!pendingBtn,
+                            };
+                        }
+                    """)
+                    logger.info("Playwright: %s — post-click DOM state: %s", slug, dom_state)
+                    if dom_state.get("modalGone") or dom_state.get("hasPending"):
+                        logger.info("Playwright: %s — invite confirmed via DOM (modal gone=%s pending=%s)",
+                                    slug, dom_state.get("modalGone"), dom_state.get("hasPending"))
+                        return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
                     logger.warning("Playwright: %s — send clicked but no API call intercepted and no Pending button", slug)
                     return {"ok": False, "error": "Invitation sent click fired but could not confirm delivery", "profile_urn": existing_urn}
 
