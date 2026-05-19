@@ -39,6 +39,7 @@ from services.email_campaign.gmail_inbox_service import (
     extract_bounce_reason,
 )
 from services.email_campaign.reply_classifier_service import classify_reply_sentiment
+from services.shared.ai.azure_openai_client import ContentFilterError
 
 logger = get_logger(__name__)
 
@@ -352,6 +353,14 @@ def _generate_pending(db) -> int:
             generated_count += 1
             logger.info("[JIT-GENERATE] Generated email %d for lead %d (%s), style=%s",
                         email.id, lead.id, lead.name, style)
+
+        except ContentFilterError as e:
+            # Permanent block — retrying the same prompt will never succeed.
+            logger.warning("[JIT-GENERATE] Content filter blocked email %d for lead %d (%s). Marking generation_failed.",
+                           email.id, lead.id, lead.name)
+            email.status = "generation_failed"
+            email.error_message = str(e)
+            db.commit()
 
         except Exception as e:
             logger.error("[JIT-GENERATE] Failed to generate email %d for lead %d: %s",

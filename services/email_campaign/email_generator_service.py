@@ -13,7 +13,7 @@ import re
 from typing import Tuple, Dict
 
 from database.models import Lead, Candidate
-from services.shared.ai.azure_openai_client import generate_json
+from services.shared.ai.azure_openai_client import generate_json, ContentFilterError
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -122,6 +122,28 @@ SIGNOFFS = [
     "Thanks,\n{name}",
     "{name}",
 ]
+
+# ── System prompt (sent as system role to avoid Azure jailbreak false positives) ─
+
+_EMAIL_SYSTEM_PROMPT = (
+    "You are a ghostwriter writing short cold outreach emails for early-career job seekers.\n\n"
+    "HARD RULES:\n"
+    "- Use simple, casual language. Write like a real person typing quickly, not a template.\n"
+    "- Subject line: lowercase, casual, under 40 chars. Like a text message subject.\n"
+    "- Use \\n\\n between paragraphs. 2-3 short paragraphs max.\n"
+    "- SENDER SIGNAL is something the sender BUILT or ACHIEVED — never interpret it as their job title.\n"
+    "- SENDER CITY is optional context. ONLY weave it in if it feels natural (e.g. lead's company is in "
+    "same city). Never force it. If unsure, omit it entirely.\n\n"
+    "ABSOLUTELY FORBIDDEN:\n"
+    "- Em dashes (-- or —)\n"
+    '- "I hope this email finds you well"\n'
+    '- "I am passionate about" / "excited to apply" / "I believe my skills align"\n'
+    "- Corporate phrasing, flattery, praising the company\n"
+    '- Starting any sentence with "As a..." or "With my experience in..."\n'
+    '- "I would be honored" / "contribute to your team" / "make a meaningful impact"\n'
+    "- Bullet points or numbered lists\n"
+    '- "I am a [thing from the signal]" — the signal is a project, not an identity'
+)
 
 # ── Forbidden patterns ─────────────────────────────────────────────────────────
 
@@ -641,7 +663,7 @@ def _build_generation_prompt(
             facts_block.append(f"ACTIVE JOB POSTINGS: {', '.join(titles)}")
     facts_section = ("\n\n" + "\n".join(facts_block)) if facts_block else ""
 
-    prompt = f"""Write a short cold outreach email. Follow EVERY rule below exactly.
+    prompt = f"""Write a short cold outreach email. Follow the STRUCTURE exactly.
 
 SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
@@ -657,27 +679,7 @@ WHY THIS PERSON: {lead_profile['why_this_person']}{facts_section}
 
 {structure}
 
-{synthesis}
-
-HARD RULES:
-- Use simple, casual language. Write like a real person typing quickly, not a template.
-- Subject line: lowercase, casual, under 40 chars. Like a text message subject.
-- Use \\n\\n between paragraphs. 2-3 short paragraphs max.
-- SENDER SIGNAL is something the sender BUILT or ACHIEVED — never interpret it as their job title.
-- SENDER CITY is optional context. ONLY weave it in if it feels natural (e.g. lead's company is in same city). Never force it. If unsure, omit it entirely.
-
-ABSOLUTELY FORBIDDEN:
-- Em dashes (-- or \u2014)
-- "I hope this email finds you well"
-- "I am passionate about" / "excited to apply" / "I believe my skills align"
-- Corporate phrasing, flattery, praising the company
-- Starting any sentence with "As a..." or "With my experience in..."
-- "I would be honored" / "contribute to your team" / "make a meaningful impact"
-- Bullet points or numbered lists
-- "I am a [thing from the signal]" — the signal is a project, not an identity
-
-Return valid JSON only: {{"subject": "...", "body": "..."}}
-Body must use \\n\\n between paragraphs."""
+{synthesis}"""
 
     return prompt
 
@@ -784,7 +786,7 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         logger.info("[EmailGen] Generating for %s (%s) at %s, style=%s",
                     lead.name, lead.title, lead.company, style)
 
-        result = generate_json(prompt, schema, temperature=0.85)
+        result = generate_json(prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT)
         body = result.get("body", "").strip()
 
         # Subject: always "quick question {first name}" — ignore LLM output
@@ -811,6 +813,8 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
                     lead.name, subject[:50], word_count)
         return subject, body
 
+    except ContentFilterError:
+        raise  # let campaign_worker handle content filter blocks specifically
     except Exception as e:
         logger.error("[EmailGen] Failed for %s: %s", lead.name, e, exc_info=True)
         raise ValueError(f"Email generation failed for {lead.name}: {e}")
@@ -903,10 +907,7 @@ Sentence 2: Introduce the project above in one punchy sentence. State what it wa
 
 Sentence 3: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"
 
-Hard rules:
-- ABSOLUTELY NO em dashes. Use commas or periods instead.
-- No filler: no "I hope", "I wanted to", "as mentioned", "circling back"
-- Sound like a student, not a sales rep
+Format:
 - Start with "Hi {lead_first},"
 - Sign off: "{first_name_candidate}" on its own line, nothing else
 - Body total under 55 words"""
@@ -922,8 +923,7 @@ Sentence 1: Say this is your last note. Be brief and direct. Do NOT say "I under
 
 Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door open simply. Do NOT use "perhaps", "hopefully", "someday".
 
-Hard rules:
-- ABSOLUTELY NO em dashes at all.
+Format:
 - Start with "Hi {lead_first},"
 - Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
 - Body total under 30 words
@@ -936,7 +936,7 @@ Bad examples (do NOT write like this):
 "perhaps there's an opportunity to connect"
 "hopefully our paths align someday" """
 
-    result = generate_json(prompt, schema, temperature=0.85)
+    result = generate_json(prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT)
     body = (result.get("body") or "").strip()
     body = clean_tone(body)
 
