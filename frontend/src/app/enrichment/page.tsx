@@ -82,17 +82,26 @@ export default function EnrichmentPage() {
   const [result, setResult] = useState<{ enriched: number; failed: number; planType: PlanType } | null>(null);
   const [error, setError] = useState('');
 
-  // Load pricing + credits on mount
+  // Load pricing + credits on mount; auto-advance if enrichment already done
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [pricingRes, creditsRes] = await Promise.all([
+        const [pricingRes, creditsRes, orderRes] = await Promise.all([
           api.get('/payment/pricing'),
           api.get('/payment/credits'),
+          api.get('/orders/active'),
         ]);
         setAllPlans(pricingRes.data.plans || []);
         setCurrency(pricingRes.data.currency || 'USD');
         setCredits(creditsRes.data);
+
+        // If enrichment already finished (e.g. polling dropped), skip ahead
+        const order = orderRes.data?.order;
+        if (order && ['enrichment_complete', 'campaign_setup', 'email_connected', 'campaign_running', 'completed'].includes(order.status)) {
+          const pt = order.plan_type || 'email';
+          setPlanType(pt as PlanType);
+          router.push(pt === 'linkedin' ? '/connect/linkedin' : '/connect/gmail');
+        }
       } catch { /* fallback prices will show */ }
     };
     loadData();
