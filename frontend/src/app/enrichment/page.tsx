@@ -76,10 +76,7 @@ export default function EnrichmentPage() {
   const [paying, setPaying] = useState(false);
   const [redirectUrl, setRedirectUrl] = useState('');
 
-  // Enrichment (email path)
   const [enriching, setEnriching] = useState(false);
-  const [enrichProgress, setEnrichProgress] = useState<{ enriched: number; failed: number; total: number; progress: string }>({ enriched: 0, failed: 0, total: 0, progress: '' });
-  const [result, setResult] = useState<{ enriched: number; failed: number; planType: PlanType } | null>(null);
   const [error, setError] = useState('');
 
   // Load pricing + credits on mount; auto-advance if enrichment already done
@@ -134,30 +131,6 @@ export default function EnrichmentPage() {
     setCouponError('');
   };
 
-  const pollEnrichmentJob = async (jobId: string, total: number) => {
-    const poll = async () => {
-      try {
-        const res = await api.get(`/enrichment/${jobId}/status`);
-        const data = res.data;
-        setEnrichProgress({ enriched: data.enriched, failed: data.failed, total, progress: data.progress });
-        if (data.status === 'completed') {
-          setResult({ enriched: data.enriched, failed: data.failed, planType: channelTab });
-          setEnriching(false);
-          updateOrder({ status: 'enrichment_complete', log_entry: `Enriched ${data.enriched} leads` });
-          try { const cr = await api.get('/payment/credits'); setCredits(cr.data); } catch { }
-          return;
-        }
-        if (data.status === 'failed') {
-          setError(data.error || 'Enrichment failed');
-          setEnriching(false);
-          return;
-        }
-        setTimeout(poll, 3000);
-      } catch { setError('Lost connection to enrichment job'); setEnriching(false); }
-    };
-    setTimeout(poll, 2000);
-  };
-
   const validateCoupon = async () => {
     if (!couponCode.trim()) return;
     setCouponLoading(true);
@@ -175,24 +148,19 @@ export default function EnrichmentPage() {
     } finally { setCouponLoading(false); }
   };
 
-  const handleEnrich = async (limit: number) => {
+  const handleEnrich = async (_limit: number) => {
     if (!candidateId) return;
+    // JIT: skip bulk Apollo enrichment upfront.
+    // The campaign worker enriches leads just-in-time (3hr lookahead, max 3/cycle)
+    // so Apollo credits are only spent just before each scheduled send.
+    // Credits are reserved at campaign creation, not here.
     setEnriching(true);
-    setEnrichProgress({ enriched: 0, failed: 0, total: limit, progress: 'Starting enrichment...' });
     setError('');
     try {
-      const res = await api.post('/enrichment/enrich', { candidate_id: candidateId, limit, order_id: orderId });
-      if (res.data.job_id) {
-        pollEnrichmentJob(res.data.job_id, res.data.total || limit);
-      } else {
-        setResult({ enriched: res.data.enriched, failed: res.data.failed, planType: channelTab });
-        setEnriching(false);
-        updateOrder({ status: 'enrichment_complete', log_entry: `Enriched ${res.data.enriched} leads` });
-      }
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Enrichment failed');
-      setEnriching(false);
-    }
+      await updateOrder({ status: 'enrichment_complete', log_entry: 'JIT: enrichment deferred to campaign worker' });
+    } catch { /* non-fatal — navigate regardless */ }
+    const dest = channelTab === 'linkedin' ? '/connect/linkedin' : '/connect/gmail';
+    router.push(dest);
   };
 
   const handlePayAndProceed = async () => {
@@ -370,10 +338,11 @@ export default function EnrichmentPage() {
             <p className="text-base font-bold font-satoshi mt-4">Redirecting to payment...</p>
             <a href={redirectUrl} className="text-sm text-primary underline font-satoshi mt-2 block">Click here if not redirected automatically</a>
           </div>
-        ) : result ? (
-          <ResultCard result={result} router={router} />
         ) : enriching ? (
-          <EnrichProgress progress={enrichProgress} />
+          <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center">
+            <Spinner />
+            <p className="text-base font-bold font-satoshi mt-4">Preparing your leads...</p>
+          </div>
         ) : (
           <>
             {/* Channel tabs */}
@@ -513,65 +482,6 @@ function ChannelDescription({ tab }: { tab: ChannelTab }) {
     <div className="flex items-start gap-3 p-4 rounded-xl bg-surface-muted border border-ink/10 text-sm font-satoshi text-muted">
       <span className="mt-0.5">{d.icon}</span>
       <span>{d.text}</span>
-    </div>
-  );
-}
-
-function ResultCard({ result, router }: { result: { enriched: number; failed: number; planType: PlanType }; router: any }) {
-  const nextPath = result.planType === 'linkedin' ? '/connect/linkedin' : '/connect/gmail';
-  const nextLabel = result.planType === 'linkedin' ? 'Connect LinkedIn to Send Requests'
-    : result.planType === 'both' ? 'Connect Gmail to Continue'
-    : 'Connect Gmail to Send Emails';
-  return (
-    <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center animate-fade-in">
-      <div className="w-12 h-12 rounded-full bg-studojo-green-bg border-2 border-ink flex items-center justify-center mx-auto mb-6">
-        <CheckCircle className="w-6 h-6 text-secondary" />
-      </div>
-      <h2 className="font-clash text-2xl font-bold mb-2">Enrichment Complete</h2>
-      <p className="text-base text-muted font-satoshi">
-        <span className="text-secondary font-bold">{result.enriched}</span> emails verified
-        {result.failed > 0 && <span className="text-muted"> ({result.failed} not found)</span>}
-      </p>
-      <Button onClick={() => router.push(nextPath)} className="mt-8">{nextLabel}</Button>
-    </div>
-  );
-}
-
-function EnrichProgress({ progress }: { progress: { enriched: number; failed: number; total: number; progress: string } }) {
-  return (
-    <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8">
-      <div className="text-center mb-6">
-        <p className="text-base text-ink font-bold font-satoshi">Enriching leads...</p>
-        <p className="text-sm text-muted font-satoshi mt-1">{progress.progress}</p>
-      </div>
-      <div className="max-w-md mx-auto space-y-6">
-        <div>
-          <div className="flex justify-between text-xs text-muted font-satoshi mb-2">
-            <span>{progress.enriched} enriched{progress.failed > 0 ? `, ${progress.failed} failed` : ''}</span>
-            <span>{progress.total} total</span>
-          </div>
-          <div className="h-3 rounded-full bg-surface-muted border-2 border-ink/20 overflow-hidden">
-            <div
-              className="h-full rounded-full bg-primary transition-all duration-500"
-              style={{ width: `${progress.total > 0 ? ((progress.enriched + progress.failed) / progress.total) * 100 : 0}%` }}
-            />
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="p-4 rounded-2xl border-2 border-ink bg-studojo-green-bg text-center">
-            <p className="text-2xl font-bold font-clash text-secondary">{progress.enriched}</p>
-            <p className="text-xs text-muted font-satoshi mt-1">Emails Found</p>
-          </div>
-          <div className="p-4 rounded-2xl border-2 border-ink/30 bg-white text-center">
-            <p className="text-2xl font-bold font-clash text-muted">{progress.failed}</p>
-            <p className="text-xs text-muted font-satoshi mt-1">Not Found</p>
-          </div>
-        </div>
-        <div className="flex items-center justify-center gap-3">
-          <Spinner size="sm" />
-          <span className="text-sm text-muted font-satoshi">This may take a few minutes for large batches</span>
-        </div>
-      </div>
     </div>
   );
 }
