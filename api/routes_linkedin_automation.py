@@ -522,6 +522,192 @@ async def create_campaign_from_profile(
     return _campaign_to_response(campaign)
 
 
+class CreateCampaignFromOrderRequest(BaseModel):
+    order_id: int
+    daily_limit: int = Field(default=10, ge=1, le=25)
+
+
+@router.post("/campaigns/from-order", response_model=CampaignResponse)
+async def create_campaign_from_order(
+    body: CreateCampaignFromOrderRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a LinkedIn campaign from an OutreachOrder, using Apollo leads that have linkedin_url.
+
+    Pulls leads from the candidate's existing Lead records (no new Apollo calls).
+    Generates per-lead connection notes in the background using message_gen.
+    Updates the OutreachOrder with the new linkedin_campaign_id.
+    """
+    from database.models import Candidate, Lead, LeadScore, OutreachOrder
+
+    order = db.query(OutreachOrder).filter_by(
+        id=body.order_id, user_id=current_user.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    candidate_id = order.candidate_id
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="Order has no candidate profile linked")
+
+    linkedin_limit = getattr(order, "linkedin_credits_reserved", 0) or 0
+    if linkedin_limit == 0:
+        raise HTTPException(status_code=400, detail="No LinkedIn credits reserved for this order")
+
+    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token_row:
+        raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first via the LinkedIn tab.")
+
+    cand = db.query(Candidate).filter(Candidate.id == candidate_id, Candidate.user_id == current_user.id).first()
+    if not cand:
+        raise HTTPException(status_code=404, detail="Candidate profile not found")
+
+    # Pull leads with linkedin_url, ordered best-score first
+    leads_query = (
+        db.query(Lead)
+        .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
+        .filter(
+            Lead.candidate_id == candidate_id,
+            Lead.linkedin_url.isnot(None),
+            Lead.linkedin_url != "",
+        )
+        .order_by(LeadScore.overall_score.desc().nullslast())
+        .limit(linkedin_limit)
+        .all()
+    )
+
+    if not leads_query:
+        raise HTTPException(
+            status_code=400,
+            detail="No leads with LinkedIn profiles found. The lead discovery step must complete first.",
+        )
+
+    # Derive campaign targeting from candidate profile (same logic as from-profile)
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+
+    target_role = ""
+    if target_roles:
+        first = target_roles[0]
+        target_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not target_role and likely_roles:
+        target_role = str(likely_roles[0])
+    if not target_role:
+        target_role = "professional"
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    locations: list[str] = []
+    for key in ("city", "country"):
+        v = (geo.get(key) or "").strip()
+        if v and v not in locations:
+            locations.append(v)
+
+    industries: list[str] = []
+    for ind in target_industries:
+        if isinstance(ind, str):
+            industries.append(ind)
+        elif isinstance(ind, dict):
+            v = ind.get("industry") or ind.get("name")
+            if v:
+                industries.append(str(v))
+
+    dream_companies = cand.dream_companies if isinstance(cand.dream_companies, list) else []
+    keyword_parts: list[str] = []
+    if dream_companies:
+        keyword_parts.extend([str(c.get("name") if isinstance(c, dict) else c) for c in dream_companies if c])
+    skills = profile.get("top_skills") or profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        keyword_parts.extend([str(s) for s in skills[:5]])
+    target_keywords = " ".join(keyword_parts).strip() or None
+
+    campaign = LinkedInCampaign(
+        user_id=current_user.id,
+        candidate_id=cand.id,
+        name=f"{target_role} outreach",
+        status="running",
+        target_role=target_role,
+        target_industries=industries,
+        target_locations=locations,
+        target_company_sizes=[],
+        target_keywords=target_keywords,
+        daily_limit=body.daily_limit,
+        total_leads=len(leads_query),
+        launched_at=datetime.utcnow(),
+    )
+    db.add(campaign)
+    db.flush()  # get campaign.id before creating requests
+
+    # Create connection requests from Apollo leads
+    request_ids: list[int] = []
+    for lead in leads_query:
+        req = LinkedInConnectionRequest(
+            campaign_id=campaign.id,
+            user_id=current_user.id,
+            name=lead.name or "",
+            headline=lead.title or "",
+            company=lead.company or "",
+            location=lead.location or "",
+            profile_url=lead.linkedin_url,
+            status="pending",
+        )
+        db.add(req)
+        db.flush()
+        request_ids.append(req.id)
+
+    # Link campaign back to the order
+    order.linkedin_campaign_id = campaign.id
+    order.linkedin_connected_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(campaign)
+
+    # Generate per-lead connection notes in the background
+    def _gen_notes(camp_id: int, req_ids: list[int]) -> None:
+        from database.session import SessionLocal
+        from services.linkedin_outreach.message_gen import generate_connection_message
+        bg_db = SessionLocal()
+        try:
+            for req_id in req_ids:
+                req = bg_db.query(LinkedInConnectionRequest).filter_by(id=req_id).first()
+                if not req:
+                    continue
+                camp = bg_db.query(LinkedInCampaign).filter_by(id=camp_id).first()
+                if not camp:
+                    continue
+                try:
+                    msg = generate_connection_message(
+                        target_role=camp.target_role,
+                        lead_name=req.name or "",
+                        lead_headline=req.headline or "",
+                        lead_company=req.company or "",
+                        candidate_profile={},
+                    )
+                    req.connection_note = msg
+                    req.updated_at = datetime.utcnow()
+                    bg_db.commit()
+                except Exception:
+                    pass
+        finally:
+            bg_db.close()
+
+    import threading
+    threading.Thread(
+        target=_gen_notes,
+        args=(campaign.id, request_ids),
+        daemon=True,
+    ).start()
+
+    logger.info(
+        "Campaign %d created from order %d — %d leads, role=%r",
+        campaign.id, body.order_id, len(leads_query), target_role,
+    )
+    return _campaign_to_response(campaign)
+
+
 @router.get("/my-candidate")
 async def my_candidate(
     current_user: User = Depends(get_current_user),

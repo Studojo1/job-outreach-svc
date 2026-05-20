@@ -10,10 +10,20 @@ import { MetricCard } from '@/components/features/MetricCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
-import { Send, AlertCircle, BarChart3, Pause, Play, Users, CheckCircle, XCircle, Clock, FlaskConical } from 'lucide-react';
+import { Send, AlertCircle, BarChart3, Pause, Play, Users, CheckCircle, XCircle, Clock, FlaskConical, Mail, Linkedin } from 'lucide-react';
 import api from '@/lib/api';
 import { formatTimestamp } from '@/lib/formatTime';
 import type { CampaignMetrics } from '@/lib/types/campaign';
+
+const LI_STATUS: Record<string, { label: string; className: string }> = {
+  pending:       { label: 'Queued',       className: 'bg-gray-100 text-gray-500' },
+  in_progress:   { label: 'Sending…',     className: 'bg-amber-100 text-amber-700' },
+  sent:          { label: 'Sent',         className: 'bg-blue-100 text-blue-700' },
+  accepted:      { label: 'Accepted',     className: 'bg-green-100 text-green-700' },
+  followup_sent: { label: 'Follow-up',    className: 'bg-violet-100 text-violet-700' },
+  replied:       { label: 'Replied',      className: 'bg-emerald-100 text-emerald-700' },
+  error:         { label: 'Error',        className: 'bg-red-100 text-red-600' },
+};
 
 interface TestLead {
   lead_name: string;
@@ -101,7 +111,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function DashboardPage() {
   const router = useRouter();
   const { loading: authLoading } = useAuth();
-  const { campaignId, setCampaignId, user } = useAppStore();
+  const { campaignId, setCampaignId, user, linkedInCampaignId, planType } = useAppStore();
   const tz = user?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   // Test mode state
@@ -116,6 +126,14 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // LinkedIn tab state
+  const [dashTab, setDashTab] = useState<'email' | 'linkedin'>('email');
+  const [liStats, setLiStats] = useState<any>(null);
+  const [liRequests, setLiRequests] = useState<any[]>([]);
+  const [liCampaign, setLiCampaign] = useState<any>(null);
+  const [liToggling, setLiToggling] = useState(false);
+  const liPollRef = useRef<NodeJS.Timeout | null>(null);
 
   // On mount: check for test job or campaign, recover campaignId if missing
   useEffect(() => {
@@ -188,6 +206,27 @@ export default function DashboardPage() {
     const interval = setInterval(fetchCampaignData, 10000);
     return () => clearInterval(interval);
   }, [campaignId, testJobId, fetchCampaignData]);
+
+  const fetchLinkedInData = useCallback(async () => {
+    if (!linkedInCampaignId) return;
+    try {
+      const [cRes, sRes, rRes] = await Promise.all([
+        api.get(`/linkedin/automation/campaigns/${linkedInCampaignId}`),
+        api.get(`/linkedin/automation/campaigns/${linkedInCampaignId}/stats`),
+        api.get(`/linkedin/automation/campaigns/${linkedInCampaignId}/requests?limit=200`),
+      ]);
+      setLiCampaign(cRes.data);
+      setLiStats(sRes.data);
+      setLiRequests(rRes.data);
+    } catch { /* non-fatal */ }
+  }, [linkedInCampaignId]);
+
+  useEffect(() => {
+    if (!linkedInCampaignId) return;
+    fetchLinkedInData();
+    liPollRef.current = setInterval(fetchLinkedInData, 30000);
+    return () => { if (liPollRef.current) clearInterval(liPollRef.current); };
+  }, [linkedInCampaignId, fetchLinkedInData]);
 
   const handleTransition = async (status: string) => {
     if (!campaignId) return;
@@ -330,6 +369,46 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-white">
       <Navbar />
       <Container className="py-8">
+        {/* Channel tab switcher — only shown when user has both channels */}
+        {planType === 'both' && (
+          <div className="flex gap-2 mb-6 rounded-2xl border-2 border-ink bg-surface-muted p-1">
+            <button
+              onClick={() => setDashTab('email')}
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-bold font-satoshi transition-all ${dashTab === 'email' ? 'bg-white border-2 border-ink shadow-brutal text-primary' : 'text-muted hover:text-ink'}`}
+            >
+              <Mail className="w-4 h-4" /> Email
+            </button>
+            <button
+              onClick={() => setDashTab('linkedin')}
+              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-bold font-satoshi transition-all ${dashTab === 'linkedin' ? 'bg-white border-2 border-ink shadow-brutal text-primary' : 'text-muted hover:text-ink'}`}
+            >
+              <Linkedin className="w-4 h-4" /> LinkedIn
+            </button>
+          </div>
+        )}
+
+        {/* LinkedIn tab */}
+        {(planType === 'linkedin' || (planType === 'both' && dashTab === 'linkedin')) && (
+          <LinkedInDashboard
+            campaign={liCampaign}
+            stats={liStats}
+            requests={liRequests}
+            toggling={liToggling}
+            onToggle={async () => {
+              if (!liCampaign || !linkedInCampaignId) return;
+              setLiToggling(true);
+              try {
+                const action = liCampaign.status === 'running' ? 'pause' : 'resume';
+                await api.post(`/linkedin/automation/campaigns/${linkedInCampaignId}/${action}`);
+                await fetchLinkedInData();
+              } finally { setLiToggling(false); }
+            }}
+          />
+        )}
+
+        {/* Email tab (hidden when LinkedIn-only or viewing LinkedIn tab on both-plan) */}
+        {planType !== 'linkedin' && (planType !== 'both' || dashTab === 'email') && (
+        <>
         {error ? (
           <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8 text-center">
             <p className="text-error font-satoshi">{error}</p>
@@ -429,7 +508,130 @@ export default function DashboardPage() {
         ) : (
           <div className="flex justify-center py-12"><Spinner /></div>
         )}
+        </>
+        )}
       </Container>
+    </div>
+  );
+}
+
+// ── LinkedIn Dashboard sub-component ──────────────────────────────────────────
+
+function LinkedInDashboard({
+  campaign, stats, requests, toggling, onToggle,
+}: {
+  campaign: any; stats: any; requests: any[]; toggling: boolean; onToggle: () => void;
+}) {
+  const [filterTab, setFilterTab] = useState<'all' | 'sent' | 'accepted' | 'replied'>('all');
+
+  if (!campaign) {
+    return (
+      <div className="flex justify-center py-12 animate-fade-in"><Spinner /></div>
+    );
+  }
+
+  const sent = stats?.total_sent ?? campaign.total_sent ?? 0;
+  const accepted = stats?.total_accepted ?? campaign.total_accepted ?? 0;
+  const replied = stats?.total_replied ?? campaign.total_replied ?? 0;
+  const total = campaign.total_leads ?? requests.length;
+  const acceptRate = sent > 0 ? Math.round((accepted / sent) * 100) : 0;
+
+  const filtered = filterTab === 'all' ? requests
+    : requests.filter((r) => r.status === filterTab || (filterTab === 'sent' && ['sent', 'accepted', 'followup_sent', 'replied'].includes(r.status)));
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="font-clash text-2xl font-bold">{campaign.name}</h1>
+          <span className={`inline-block mt-2 text-xs font-bold px-2 py-0.5 rounded-full ${
+            campaign.status === 'running' ? 'bg-green-100 text-green-700'
+            : campaign.status === 'paused' ? 'bg-amber-100 text-amber-700'
+            : 'bg-gray-100 text-gray-500'
+          }`}>
+            {campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
+          </span>
+        </div>
+        <Button
+          variant={campaign.status === 'running' ? 'outline' : 'default'}
+          onClick={onToggle}
+          loading={toggling}
+        >
+          {campaign.status === 'running'
+            ? <><Pause className="w-4 h-4 mr-2 inline" />Pause</>
+            : <><Play className="w-4 h-4 mr-2 inline" />Resume</>}
+        </Button>
+      </div>
+
+      {/* Metrics row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: 'Requests Sent', value: sent },
+          { label: 'Accepted', value: accepted },
+          { label: 'Acceptance Rate', value: `${acceptRate}%` },
+          { label: 'Replies', value: replied },
+        ].map(({ label, value }) => (
+          <div key={label} className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-4 text-center">
+            <p className="text-2xl font-bold font-clash">{value}</p>
+            <p className="text-xs text-muted font-satoshi mt-0.5">{label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Filter tabs */}
+      <div className="flex gap-2">
+        {(['all', 'sent', 'accepted', 'replied'] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setFilterTab(t)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold font-satoshi border transition-all ${
+              filterTab === t ? 'border-ink bg-white shadow-sm text-primary' : 'border-ink/20 text-muted hover:text-ink'
+            }`}
+          >
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+        <span className="ml-auto text-xs text-muted font-satoshi self-center">{total} total leads</span>
+      </div>
+
+      {/* Requests table */}
+      <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal overflow-hidden">
+        {filtered.length === 0 ? (
+          <p className="text-sm text-muted font-satoshi text-center py-8">No requests found.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm font-satoshi">
+              <thead>
+                <tr className="border-b-2 border-ink/10 bg-surface-muted">
+                  <th className="text-left py-3 px-4 text-xs font-bold text-muted uppercase">Name</th>
+                  <th className="text-left py-3 px-4 text-xs font-bold text-muted uppercase hidden md:table-cell">Company</th>
+                  <th className="text-left py-3 px-4 text-xs font-bold text-muted uppercase">Status</th>
+                  <th className="text-left py-3 px-4 text-xs font-bold text-muted uppercase hidden lg:table-cell">Match reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r) => {
+                  const s = LI_STATUS[r.status] || { label: r.status, className: 'bg-gray-100 text-gray-500' };
+                  return (
+                    <tr key={r.id} className="border-b border-ink/5 hover:bg-surface-muted transition-colors">
+                      <td className="py-3 px-4">
+                        <p className="font-bold">{r.name}</p>
+                        {r.headline && <p className="text-xs text-muted truncate max-w-[160px]">{r.headline}</p>}
+                      </td>
+                      <td className="py-3 px-4 text-muted hidden md:table-cell">{r.company || '—'}</td>
+                      <td className="py-3 px-4">
+                        <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-full ${s.className}`}>{s.label}</span>
+                      </td>
+                      <td className="py-3 px-4 text-xs text-muted hidden lg:table-cell">{r.match_reason || '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

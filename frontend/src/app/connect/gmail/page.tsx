@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/hooks/useAuth';
 import { useAppStore } from '@/store/useAppStore';
+import type { PlanType } from '@/store/useAppStore';
 import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
 import { Button } from '@/components/ui/Button';
@@ -16,7 +17,7 @@ function GmailConnectContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { loading } = useAuth();
-  const { emailAccountId, setEmailAccountId } = useAppStore();
+  const { emailAccountId, setEmailAccountId, planType } = useAppStore();
   const { updateOrder } = useOrder();
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -78,7 +79,12 @@ function GmailConnectContent() {
   };
 
   const handleContinue = () => {
-    router.push('/campaign/templates');
+    // For 'both' plans, chain to LinkedIn connect after Gmail
+    if (planType === 'both') {
+      router.push('/connect/linkedin');
+    } else {
+      router.push('/campaign/templates');
+    }
   };
 
   const permissions = [
@@ -100,7 +106,9 @@ function GmailConnectContent() {
             </div>
             <h1 className="font-clash text-2xl font-bold mb-2">Gmail Connected</h1>
             <p className="text-base text-muted mb-8 font-satoshi">Your Gmail account is ready to send outreach emails.</p>
-            <Button onClick={handleContinue}>Continue to Campaign Setup</Button>
+            <Button onClick={handleContinue}>
+              {planType === 'both' ? 'Continue — Connect LinkedIn' : 'Continue to Campaign Setup'}
+            </Button>
           </div>
         ) : (
           <div className="rounded-2xl border-2 border-ink bg-white shadow-brutal p-8">

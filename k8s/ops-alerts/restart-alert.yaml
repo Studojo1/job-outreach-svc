@@ -32,11 +32,19 @@ subjects:
     name: ops-alerter
     namespace: studojo
 ---
-# Secret with the alert webhook URL. Populate via:
+# Secret with the alert sink URL + shared token.
+#
+# Defaults to posting to admin.studojo.com/api/ops-alerts (built-in Ops
+# Alerts page in the admin panel) using a shared-secret header. To enable:
+#
 #   kubectl create secret generic ops-alert-webhook -n studojo \
-#     --from-literal=url='https://hooks.slack.com/services/...'
-# The CronJob will run without alerting (logs only) until the secret exists,
-# so it's safe to deploy this manifest before configuring the webhook.
+#     --from-literal=url='https://admin.studojo.com/api/ops-alerts' \
+#     --from-literal=token='<paste the same token configured as
+#         OPS_ALERT_INGEST_TOKEN on the admin-panel deployment>' \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# The CronJob runs without alerting (logs only) until both fields are set,
+# so it's safe to deploy this manifest before the secret is populated.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -45,6 +53,7 @@ metadata:
 type: Opaque
 stringData:
   url: ""
+  token: ""
 ---
 # CronJob: every 5 minutes, scan all pods cluster-wide. For any pod whose
 # container has restarted >= RESTART_THRESHOLD times AND has restarted in
@@ -81,16 +90,24 @@ spec:
                       name: ops-alert-webhook
                       key: url
                       optional: true
+                - name: ALERT_WEBHOOK_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: ops-alert-webhook
+                      key: token
+                      optional: true
               command:
                 - /bin/bash
                 - -c
                 - |
                   set -uo pipefail
+                  if ! command -v jq >/dev/null 2>&1; then
+                    apt-get update -qq && apt-get install -y -qq --no-install-recommends jq >/dev/null
+                  fi
                   now=$(date +%s)
                   window_seconds=$((RECENT_WINDOW_MIN * 60))
-                  alerts=""
                   # Walk every container in every pod across all namespaces.
-                  # Output rows: namespace name restartCount lastRestartedAt
+                  # Output rows: namespace pod container restartCount lastRestartedAt
                   rows=$(kubectl get pods --all-namespaces -o json | \
                     jq -r '
                       .items[] |
@@ -104,34 +121,50 @@ spec:
                         (.restartCount // 0),
                         (.lastState.terminated.finishedAt // .state.running.startedAt // "1970-01-01T00:00:00Z")
                       ] | @tsv')
+
+                  # Build a JSON array of alert objects.
+                  alerts_json="[]"
+                  human=""
                   while IFS=$'\t' read -r ns pod ctr count finished_at; do
                     [ -z "$ns" ] && continue
                     if [ "$count" -lt "$RESTART_THRESHOLD" ]; then continue; fi
                     finished_ts=$(date -d "$finished_at" +%s 2>/dev/null || echo 0)
                     age=$((now - finished_ts))
                     if [ "$age" -gt "$window_seconds" ]; then continue; fi
-                    line="$ns/$pod[$ctr] restarts=$count age=${age}s"
-                    echo "ALERT: $line"
-                    alerts="${alerts}- ${line}\n"
+                    summary="${ns}/${pod}[${ctr}] restarts=${count} (last ${age}s ago)"
+                    human="${human}- ${summary}\n"
+                    alerts_json=$(echo "$alerts_json" | jq \
+                      --arg ns "$ns" --arg pod "$pod" --arg ctr "$ctr" \
+                      --argjson count "$count" \
+                      --arg last "$finished_at" --arg summary "$summary" \
+                      '. + [{namespace:$ns, pod:$pod, container:$ctr,
+                             restart_count:$count, last_restart_at:$last,
+                             summary:$summary}]')
                   done <<< "$rows"
 
-                  if [ -z "$alerts" ]; then
+                  count=$(echo "$alerts_json" | jq 'length')
+                  if [ "$count" -eq 0 ]; then
                     echo "OK: no pods over $RESTART_THRESHOLD restarts in last ${RECENT_WINDOW_MIN}min"
                     exit 0
                   fi
+                  echo "FOUND $count alert(s):"
+                  printf "%b" "$human"
 
                   # Fire webhook if configured. Empty URL = log-only mode.
-                  if [ -n "${ALERT_WEBHOOK_URL:-}" ]; then
-                    payload=$(printf '{"text":"🚨 Studojo pod restart alert\n%b"}' "$alerts")
-                    code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
-                      -X POST "$ALERT_WEBHOOK_URL" \
-                      -H "Content-Type: application/json" \
-                      -d "$payload" || echo "000")
-                    echo "webhook -> HTTP $code"
-                    cat /tmp/resp.txt || true
-                  else
-                    echo "ALERT_WEBHOOK_URL empty; logged above. Configure secret ops-alert-webhook to enable notifications."
+                  if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
+                    echo "ALERT_WEBHOOK_URL empty; logged above. Set the ops-alert-webhook secret to enable notifications."
+                    exit 0
                   fi
+                  payload=$(jq -n --argjson alerts "$alerts_json" '{alerts:$alerts}')
+                  code=$(curl -sS -o /tmp/resp.txt -w "%{http_code}" \
+                    --max-time 15 \
+                    -X POST "$ALERT_WEBHOOK_URL" \
+                    -H "Content-Type: application/json" \
+                    -H "X-Alert-Token: ${ALERT_WEBHOOK_TOKEN:-}" \
+                    -d "$payload" || echo "000")
+                  echo "webhook -> HTTP $code"
+                  cat /tmp/resp.txt || true
+                  [ "$code" = "200" ] || [ "$code" = "201" ]
               resources:
                 requests:
                   cpu: 10m

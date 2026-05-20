@@ -4,6 +4,8 @@ import { User } from '@/lib/types/auth';
 import { ChatMessage } from '@/lib/types/candidate';
 import { EmailTemplate } from '@/lib/types/campaign';
 
+export type PlanType = 'email' | 'linkedin' | 'both';
+
 interface AppState {
   // Auth
   user: User | null;
@@ -21,6 +23,10 @@ interface AppState {
   selectedTier: 200 | 350 | 500;
   setSelectedTier: (tier: 200 | 350 | 500) => void;
 
+  // Plan selection (email / linkedin / both)
+  planType: PlanType;
+  setPlanType: (t: PlanType) => void;
+
   // Campaign
   selectedTemplate: EmailTemplate | null;
   setSelectedTemplate: (t: EmailTemplate | null) => void;
@@ -33,6 +39,9 @@ interface AppState {
 
   emailAccountId: number | null;
   setEmailAccountId: (id: number | null) => void;
+
+  linkedInCampaignId: number | null;
+  setLinkedInCampaignId: (id: number | null) => void;
 
   // Order tracking
   orderId: number | null;
@@ -57,6 +66,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   selectedTier: 350,
   setSelectedTier: (selectedTier) => set({ selectedTier }),
 
+  planType: 'email',
+  setPlanType: (planType) => set({ planType }),
+
   selectedTemplate: null,
   setSelectedTemplate: (selectedTemplate) => set({ selectedTemplate }),
 
@@ -68,6 +80,9 @@ export const useAppStore = create<AppState>()(persist((set) => ({
 
   emailAccountId: null,
   setEmailAccountId: (emailAccountId) => set({ emailAccountId }),
+
+  linkedInCampaignId: null,
+  setLinkedInCampaignId: (linkedInCampaignId) => set({ linkedInCampaignId }),
 
   orderId: null,
   setOrderId: (orderId) => set({ orderId }),
@@ -81,9 +96,11 @@ export const useAppStore = create<AppState>()(persist((set) => ({
     candidateId: state.candidateId,
     currentStep: state.currentStep,
     selectedTier: state.selectedTier,
+    planType: state.planType,
     selectedStyles: state.selectedStyles,
     campaignId: state.campaignId,
     emailAccountId: state.emailAccountId,
+    linkedInCampaignId: state.linkedInCampaignId,
     orderId: state.orderId,
   }),
 }));

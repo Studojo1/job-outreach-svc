@@ -257,6 +257,13 @@ class OutreachOrder(Base):
     campaign_paused_at      = Column(DateTime, nullable=True)
     campaign_completed_at   = Column(DateTime, nullable=True)
 
+    # LinkedIn channel
+    plan_type = Column(Text, nullable=False, default="email")  # "email" | "linkedin" | "both"
+    linkedin_campaign_id = Column(Integer, ForeignKey("linkedin_campaigns.id", ondelete="SET NULL"), nullable=True)
+    linkedin_connected_at = Column(DateTime, nullable=True)
+    linkedin_credits_reserved = Column(Integer, nullable=False, default=0)
+    linkedin_credits_used = Column(Integer, nullable=False, default=0)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -294,6 +301,7 @@ class PaymentOrder(Base):
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)
+    plan_id = Column(Text, nullable=True)  # e.g. "email_200", "linkedin_350", "both_500"
     coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
     outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="created", nullable=False)
