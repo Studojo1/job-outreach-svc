@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: staging-ingress
+  namespace: staging
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 100m
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - studojo.pro
+      secretName: studojo-pro-tls-secret
+  rules:
+    - host: studojo.pro
+      http:
+        paths:
+          - path: /outreach
+            pathType: Prefix
+            backend:
+              service:
+                name: job-outreach-frontend
+                port:
+                  number: 3000
+          - path: /lkot
+            pathType: Prefix
+            backend:
+              service:
+                name: job-outreach-frontend
+                port:
+                  number: 3000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000

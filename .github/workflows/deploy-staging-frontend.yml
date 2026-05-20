@@ -87,7 +87,11 @@ jobs:
             ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
           kubectl patch deployment/${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }} --type=json \
-            -p='[{"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/httpGet/path","value":"/lkot"},{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/lkot"}]'
+            -p='[{"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/httpGet/path","value":"/outreach"},{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/outreach"}]'
+
+          # Ensure /outreach routes to job-outreach-frontend (not the main frontend service)
+          kubectl apply -f k8s/job-outreach-frontend/ingress-staging.yaml
+
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."

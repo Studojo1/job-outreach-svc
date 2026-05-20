@@ -4,9 +4,6 @@ metadata:
   name: job-outreach-frontend-ingress
   namespace: studojo
   annotations:
-    # NO rewrite-target: the Next.js frontend runs with basePath '/lkot', so it
-    # expects the '/lkot' prefix to be preserved. Stripping it (rewrite-target /$2)
-    # makes every route under /lkot 404.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
@@ -21,6 +18,13 @@ spec:
     - host: studojo.com
       http:
         paths:
+          - path: /outreach
+            pathType: Prefix
+            backend:
+              service:
+                name: job-outreach-frontend
+                port:
+                  number: 3000
           - path: /lkot
             pathType: Prefix
             backend:
