@@ -32,6 +32,8 @@ export function useOrder() {
     email_account_id?: number;
     leads_collected?: number;
     log_entry?: string;
+    linkedin_campaign_id?: number;
+    linkedin_connected?: boolean;
   }) => {
     if (!orderId) return;
     try {
