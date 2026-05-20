@@ -554,7 +554,7 @@ function LinkedInDashboard({
           </span>
         </div>
         <Button
-          variant={campaign.status === 'running' ? 'outline' : 'default'}
+          variant={campaign.status === 'running' ? 'outline' : 'primary'}
           onClick={onToggle}
           loading={toggling}
         >
