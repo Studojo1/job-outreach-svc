@@ -1349,7 +1349,15 @@ async def list_requests(
     if status:
         q = q.filter(LinkedInConnectionRequest.status == status)
 
-    requests = q.order_by(LinkedInConnectionRequest.created_at.desc()).limit(limit).all()
+    # Show non-pending (sent/accepted/replied/error) first so progress is always visible,
+    # then pending by created_at asc so the queue order is preserved.
+    from sqlalchemy import case as sa_case
+    priority = sa_case(
+        (LinkedInConnectionRequest.status == "pending", 1),
+        (LinkedInConnectionRequest.status == "error", 2),
+        else_=0,
+    )
+    requests = q.order_by(priority, LinkedInConnectionRequest.created_at.asc()).limit(limit).all()
 
     return [
         ConnectionRequestResponse(
