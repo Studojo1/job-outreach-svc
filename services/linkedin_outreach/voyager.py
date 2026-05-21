@@ -48,12 +48,29 @@ def _build_headers(li_at: str, jsessionid: str) -> dict:
 
 
 def _parse_graphql_search_results(data: dict) -> list[dict]:
-    """Parse LinkedIn GraphQL search response into a flat list of people dicts."""
+    """Parse LinkedIn GraphQL search response into a flat list of people dicts.
+
+    LinkedIn's normalized response stores entityResult objects in the top-level
+    'included' array and references them via '*entityResult' URN keys in items.
+    Both inline ('entityResult') and reference ('*entityResult') formats are handled.
+    """
+    # Build URN -> object lookup from the normalized included array
+    by_urn: dict = {obj["entityUrn"]: obj for obj in data.get("included", []) if obj.get("entityUrn")}
+
     people = []
-    clusters = (data.get("data") or {}).get("searchDashClustersByAll") or {}
-    for cluster in clusters.get("elements", []):
+    # Navigate: data.data.searchDashClustersByAll (double-nested 'data' in GraphQL response)
+    outer = data.get("data") or {}
+    clusters_root = outer.get("searchDashClustersByAll") or (outer.get("data") or {}).get("searchDashClustersByAll") or {}
+    for cluster in clusters_root.get("elements", []):
         for item in cluster.get("items", []):
-            entity = ((item.get("item") or {}).get("entityResult")) or {}
+            item_data = item.get("item") or {}
+            # Inline entity (old format)
+            entity = item_data.get("entityResult") or {}
+            # Reference entity (new normalized format)
+            if not entity:
+                ref = item_data.get("*entityResult")
+                if ref:
+                    entity = by_urn.get(ref, {})
             if not entity:
                 continue
             name = ((entity.get("title") or {}).get("text") or "").strip()

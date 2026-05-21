@@ -1037,10 +1037,13 @@ class LinkedInAutomationDaemon:
                 if not req.profile_url:
                     try:
                         from services.linkedin_outreach.voyager import resolve_linkedin_url
+                        from core.config import settings as _settings
+                        _proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
                         first_name = (req.name or "").split()[0] if req.name else ""
                         resolved = await resolve_linkedin_url(
                             first_name, req.company or "", req.headline or "",
                             li_at, jsessionid,
+                            proxy_url=_proxy_url,
                         )
                         if resolved:
                             req.profile_url = resolved
