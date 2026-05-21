@@ -661,170 +661,205 @@ async def playwright_send_message(
     from services.linkedin_outreach.automation_service import LinkedInAuthError
 
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
-
     proxy_cfg = _parse_proxy(proxy_url)
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"],
-            proxy=proxy_cfg,
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-        )
+    # Prime the proxy IP before acquiring the browser semaphore (pure network I/O)
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
+    active_js = fresh_js or jsessionid
+    jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
+    logger.info("Playwright msg: %s — using %s JSESSIONID", slug, "fresh" if fresh_js else "stored")
 
-        # Inject fresh JSESSIONID for the current proxy IP
-        fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
-        active_js = fresh_js or jsessionid
+    async with _BROWSER_SEM:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy_cfg,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--window-size=1280,800",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="Asia/Calcutta",
+                java_script_enabled=True,
+            )
 
-        cookies = [
-            {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/", "secure": True, "sameSite": "None"},
-            {"name": "JSESSIONID", "value": f'"{active_js}"' if not active_js.startswith('"') else active_js,
-             "domain": ".linkedin.com", "path": "/", "secure": True, "sameSite": "None"},
-        ]
-        if cookies_blob:
-            import json as _json
-            try:
-                for c in _json.loads(cookies_blob):
-                    if c.get("name") not in ("li_at", "JSESSIONID") and c.get("name") and c.get("value") is not None:
-                        cookies.append({
-                            "name": c["name"], "value": str(c["value"]),
-                            "domain": c.get("domain", ".linkedin.com"),
-                            "path": c.get("path", "/"),
-                        })
-            except Exception:
-                pass
-        await context.add_cookies(cookies)
-
-        page = await context.new_page()
-        try:
-            # Go directly to the target profile (skip feed warmup — causes redirect loops
-            # when JSESSIONID can't be refreshed for the current proxy IP)
-            # Navigate to the target profile
-            target_url = profile_url if "/in/" in profile_url else f"https://www.linkedin.com/in/{slug}/"
-            try:
-                await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(3000)
-            except PWTimeout:
-                await page.wait_for_timeout(3000)
-
-            if "/login" in page.url or "/authwall" in page.url:
-                raise LinkedInAuthError("Session expired — redirected to login")
-
-            title = await page.title()
-            logger.info("Playwright msg: %s loaded — title=%r", slug, title)
-
-            # Look for Message button (only appears for 1st-degree connections)
-            msg_btn = None
-            for selector in [
-                'button:has-text("Message")',
-                'a:has-text("Message")',
-                '[data-control-name="message"]',
-                'button[aria-label*="Message"]',
-            ]:
+            # Inject cookies before any navigation — same pattern as playwright_send_invitation
+            injected_full_jar = False
+            if cookies_blob:
                 try:
-                    btn = page.locator(selector).first
-                    if await btn.is_visible(timeout=3000):
-                        msg_btn = btn
-                        logger.info("Playwright msg: found Message button via %r", selector)
-                        break
-                except Exception:
-                    continue
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        domain = c.get("domain") or ".linkedin.com"
+                        ss_raw = (c.get("sameSite") or "no_restriction").lower()
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": domain,
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(ss_raw, "Lax"),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                        logger.info("Playwright msg: %s — injected full cookie jar (%d cookies)", slug, len(pw_cookies))
+                except Exception as e:
+                    logger.warning("Playwright msg: could not inject cookie jar: %s", e)
 
-            if not msg_btn:
-                # Scroll and retry
-                await page.evaluate("window.scrollTo(0, 200)")
-                await page.wait_for_timeout(1000)
-                for selector in ['button:has-text("Message")', 'a:has-text("Message")']:
+            if not injected_full_jar:
+                # Fallback: inject li_at (domain-wide) + fresh JSESSIONID (www-scoped)
+                await context.add_cookies([{
+                    "name": "li_at",
+                    "value": li_at,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }])
+                if fresh_js:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID",
+                        "value": jsessionid_val,
+                        "domain": "www.linkedin.com",
+                        "path": "/",
+                        "httpOnly": False,
+                        "secure": True,
+                        "sameSite": "None",
+                    }])
+
+            page = await context.new_page()
+            try:
+                target_url = profile_url if "/in/" in profile_url else f"https://www.linkedin.com/in/{slug}/"
+                try:
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(3000)
+                except PWTimeout:
+                    await page.wait_for_timeout(3000)
+
+                if "/login" in page.url or "/authwall" in page.url:
+                    raise LinkedInAuthError("Session expired — redirected to login")
+
+                title = await page.title()
+                logger.info("Playwright msg: %s loaded — title=%r url=%r", slug, title, page.url)
+
+                # Look for Message button (only appears for 1st-degree connections)
+                msg_btn = None
+                for selector in [
+                    'button:has-text("Message")',
+                    'a:has-text("Message")',
+                    '[data-control-name="message"]',
+                    'button[aria-label*="Message"]',
+                ]:
                     try:
                         btn = page.locator(selector).first
-                        if await btn.is_visible(timeout=2000):
+                        if await btn.is_visible(timeout=3000):
                             msg_btn = btn
+                            logger.info("Playwright msg: found Message button via %r", selector)
                             break
                     except Exception:
                         continue
 
-            if not msg_btn:
-                # Check if Connect button is visible (not yet connected)
-                connect_visible = False
-                for sel in ['button:has-text("Connect")', 'button:has-text("Pending")']:
+                if not msg_btn:
+                    # Scroll down a bit and retry
+                    await page.evaluate("window.scrollTo(0, 200)")
+                    await page.wait_for_timeout(1000)
+                    for selector in ['button:has-text("Message")', 'a:has-text("Message")']:
+                        try:
+                            btn = page.locator(selector).first
+                            if await btn.is_visible(timeout=2000):
+                                msg_btn = btn
+                                break
+                        except Exception:
+                            continue
+
+                if not msg_btn:
+                    btns = await page.evaluate("""
+                        () => Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).filter(t => t).slice(0, 15)
+                    """)
+                    logger.info("Playwright msg: no Message btn — buttons=%s", btns[:8])
+                    return {"ok": False, "error": "not_connected", "buttons": btns[:8]}
+
+                await msg_btn.scroll_into_view_if_needed()
+                await msg_btn.click()
+                await page.wait_for_timeout(2000)
+
+                # Find the message textarea
+                textarea = None
+                for selector in [
+                    ".msg-form__contenteditable",
+                    'div[role="textbox"][contenteditable="true"]',
+                    "div[contenteditable='true']",
+                    ".msg-form__msg-content-container div[contenteditable]",
+                ]:
                     try:
-                        if await page.locator(sel).first.is_visible(timeout=1500):
-                            connect_visible = True
+                        el = page.locator(selector).first
+                        if await el.is_visible(timeout=3000):
+                            textarea = el
                             break
                     except Exception:
-                        pass
-                btns = await page.evaluate("""
-                    () => Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).filter(t => t).slice(0,15)
-                """)
-                logger.info("Playwright msg: no Message btn — connect_visible=%s buttons=%s", connect_visible, btns[:8])
-                return {"ok": False, "error": "not_connected", "buttons": btns[:8]}
+                        continue
 
-            await msg_btn.scroll_into_view_if_needed()
-            await msg_btn.click()
-            await page.wait_for_timeout(2000)
+                if not textarea:
+                    return {"ok": False, "error": "message_textarea_not_found"}
 
-            # Find the message textarea
-            textarea = None
-            for selector in [
-                ".msg-form__contenteditable",
-                'div[role="textbox"][contenteditable="true"]',
-                "div[contenteditable='true']",
-                ".msg-form__msg-content-container div[contenteditable]",
-            ]:
-                try:
-                    el = page.locator(selector).first
-                    if await el.is_visible(timeout=3000):
-                        textarea = el
-                        break
-                except Exception:
-                    continue
+                await textarea.click()
+                await page.wait_for_timeout(500)
+                await textarea.fill(message)
+                await page.wait_for_timeout(800)
 
-            if not textarea:
-                return {"ok": False, "error": "message_textarea_not_found"}
+                # Find and click Send
+                send_btn = None
+                for selector in [
+                    "button.msg-form__send-btn",
+                    'button[aria-label*="Send" i]',
+                    'button:has-text("Send")',
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=3000):
+                            send_btn = btn
+                            break
+                    except Exception:
+                        continue
 
-            await textarea.click()
-            await page.wait_for_timeout(500)
-            await textarea.fill(message)
-            await page.wait_for_timeout(800)
+                if not send_btn:
+                    return {"ok": False, "error": "send_button_not_found"}
 
-            # Find and click Send
-            send_btn = None
-            for selector in [
-                "button.msg-form__send-btn",
-                'button[aria-label*="Send" i]',
-                'button:has-text("Send")',
-            ]:
-                try:
-                    btn = page.locator(selector).first
-                    if await btn.is_visible(timeout=3000):
-                        send_btn = btn
-                        break
-                except Exception:
-                    continue
+                await send_btn.click()
+                await page.wait_for_timeout(1500)
+                logger.info("Playwright msg: message sent to %s", slug)
+                return {"ok": True}
 
-            if not send_btn:
-                return {"ok": False, "error": "send_button_not_found"}
-
-            await send_btn.click()
-            await page.wait_for_timeout(1500)
-            logger.info("Playwright msg: message sent to %s", slug)
-            return {"ok": True}
-
-        except LinkedInAuthError:
-            raise
-        except PWTimeout:
-            return {"ok": False, "error": "page_timeout"}
-        except Exception as e:
-            logger.error("Playwright send_message failed for %s: %s", slug, e)
-            return {"ok": False, "error": str(e)}
-        finally:
-            await page.close()
-            await context.close()
-            await browser.close()
+            except LinkedInAuthError:
+                raise
+            except PWTimeout:
+                return {"ok": False, "error": "page_timeout"}
+            except Exception as e:
+                logger.error("Playwright send_message failed for %s: %s", slug, e)
+                return {"ok": False, "error": str(e)}
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
