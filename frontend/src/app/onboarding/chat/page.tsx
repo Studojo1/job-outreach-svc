@@ -89,24 +89,22 @@ export default function ChatPage() {
     }
   };
 
-  // Boot/resume the quiz. Two cases:
-  //  - Fresh load: chatHistory is empty → send "__start__" and add the welcome msg.
-  //  - Refresh mid-quiz: chatHistory survives in localStorage but currentResponse
-  //    does not. Replay history through the stream endpoint to re-fetch the
-  //    current question state so MCQ/text input rerenders.
+  // Boot the quiz. chatHistory is not persisted (intentionally omitted from
+  // Zustand partialize), so every page load — including mid-quiz refreshes —
+  // starts clean with __start__. The question_engine is deterministic, so
+  // the same Q1 is always returned, giving consistent behaviour on refresh.
   useEffect(() => {
     if (!candidateId || autoStarted.current) return;
     autoStarted.current = true;
-    const isFresh = chatHistory.length === 0;
     setStarted(true);
     setLoading(true);
-    callChatStream(candidateId, isFresh ? '__start__' : '', chatHistory)
+    callChatStream(candidateId, '__start__', [])
       .then((response) => {
-        if (isFresh) addChatMessage({ role: 'assistant', content: response.message });
+        addChatMessage({ role: 'assistant', content: response.message });
         setCurrentResponse(response);
       })
       .catch(() => {
-        if (isFresh) addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
+        addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
       })
       .finally(() => setLoading(false));
   }, [candidateId]);
