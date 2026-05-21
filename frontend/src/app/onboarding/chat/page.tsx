@@ -46,7 +46,7 @@ const CURRENT_STEP = 2;
 export default function ChatPage() {
   const router = useRouter();
   useAuth();
-  const { candidateId, chatHistory, addChatMessage, setCurrentStep } = useAppStore();
+  const { candidateId, chatHistory, addChatMessage, clearChatHistory, setCurrentStep } = useAppStore();
   const [loading, setLoading] = useState(false);
   const [currentResponse, setCurrentResponse] = useState<AgentResponse | null>(null);
   const [textInput, setTextInput] = useState('');
@@ -89,24 +89,64 @@ export default function ChatPage() {
     }
   };
 
-  // Boot the quiz. chatHistory is not persisted (intentionally omitted from
-  // Zustand partialize), so every page load — including mid-quiz refreshes —
-  // starts clean with __start__. The question_engine is deterministic, so
-  // the same Q1 is always returned, giving consistent behaviour on refresh.
+  // Boot / resume the quiz on every page load.
+  //
+  // chatHistory is persisted in localStorage so progress survives a refresh.
+  // On resume (chatHistory has user answers), replay the history through the
+  // question_engine to get the current question state back. The engine is
+  // deterministic so replay is safe and instant.
+  //
+  // Three cases:
+  //  1. Fresh start: chatHistory empty → __start__, add Q1 message.
+  //  2. Mid-quiz, last msg is assistant: already have current question text +
+  //     need MCQ options restored → replay with existing history.
+  //  3. Mid-quiz, last msg is user: Q next hasn't been delivered yet →
+  //     replay; engine returns next question and we add it to history.
   useEffect(() => {
     if (!candidateId || autoStarted.current) return;
     autoStarted.current = true;
     setStarted(true);
     setLoading(true);
-    callChatStream(candidateId, '__start__', [])
-      .then((response) => {
-        addChatMessage({ role: 'assistant', content: response.message });
-        setCurrentResponse(response);
-      })
-      .catch(() => {
-        addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
-      })
-      .finally(() => setLoading(false));
+
+    const hasUserAnswers = chatHistory.some((m) => m.role === 'user');
+
+    if (!hasUserAnswers) {
+      // Case 1 (and case where user refreshed before answering Q1):
+      // Start clean — clear any stale Q1 bubble and restart.
+      clearChatHistory();
+      callChatStream(candidateId, '__start__', [])
+        .then((response) => {
+          addChatMessage({ role: 'assistant', content: response.message });
+          setCurrentResponse(response);
+        })
+        .catch(() => {
+          addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
+        })
+        .finally(() => setLoading(false));
+    } else {
+      // Cases 2 & 3: replay history to restore current question state.
+      callChatStream(candidateId, '', chatHistory)
+        .then((response) => {
+          // If the last persisted message is from the user, the assistant
+          // response for the current question hasn't been stored yet — add it.
+          const lastMsg = chatHistory[chatHistory.length - 1];
+          if (lastMsg?.role === 'user') {
+            addChatMessage({ role: 'assistant', content: response.message });
+          }
+          setCurrentResponse(response);
+        })
+        .catch(() => {
+          // Replay failed (e.g. stale history from old endpoint) — restart.
+          clearChatHistory();
+          callChatStream(candidateId, '__start__', [])
+            .then((r) => {
+              addChatMessage({ role: 'assistant', content: r.message });
+              setCurrentResponse(r);
+            })
+            .finally(() => setLoading(false));
+        })
+        .finally(() => setLoading(false));
+    }
   }, [candidateId]);
 
   const handleMCQSubmit = (selected: string[]) => {

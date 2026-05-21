@@ -94,6 +94,7 @@ export const useAppStore = create<AppState>()(persist((set) => ({
   partialize: (state) => ({
     user: state.user,
     candidateId: state.candidateId,
+    chatHistory: state.chatHistory,
     currentStep: state.currentStep,
     selectedTier: state.selectedTier,
     planType: state.planType,
