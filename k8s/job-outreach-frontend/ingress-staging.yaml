@@ -21,13 +21,6 @@ spec:
     - host: studojo.pro
       http:
         paths:
-          - path: /outreach
-            pathType: Prefix
-            backend:
-              service:
-                name: job-outreach-frontend
-                port:
-                  number: 3000
           - path: /lkot
             pathType: Prefix
             backend:
