@@ -9,8 +9,36 @@ import { ChatInterface } from '@/components/features/ChatInterface';
 import { MCQSelector } from '@/components/features/MCQSelector';
 import { Button } from '@/components/ui/Button';
 import { Send, Check } from 'lucide-react';
-import api from '@/lib/api';
+import api, { API_BASE } from '@/lib/api';
 import type { ChatMessage, AgentResponse } from '@/lib/types/candidate';
+
+/** Call the deterministic streaming chat endpoint (question_engine, no LLM per turn). */
+async function callChatStream(
+  candidateId: number,
+  message: string,
+  history: ChatMessage[],
+): Promise<AgentResponse> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}/candidate/${candidateId}/chat/stream`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({
+      message,
+      chat_history: history.map((m) => ({ role: m.role, content: m.content })),
+    }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  // SSE format: "data: {...}\n\n" — endpoint emits a single 'complete' event then closes.
+  const text = await res.text();
+  const match = text.match(/^data: (.+)$/m);
+  if (!match) throw new Error('No SSE data event in response');
+  return JSON.parse(match[1]) as AgentResponse;
+}
 
 const STEPS = ['Upload Resume', 'AI Chat', 'Your Profile'];
 const CURRENT_STEP = 2;
@@ -33,15 +61,7 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const res = await api.post(`/candidate/${candidateId}/chat`, {
-        message: content,
-        chat_history: [...chatHistory, userMsg].map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-      });
-
-      const response: AgentResponse = res.data;
+      const response = await callChatStream(candidateId, content, [...chatHistory, userMsg]);
       const assistantMsg: ChatMessage = { role: 'assistant', content: response.message };
       addChatMessage(assistantMsg);
       setCurrentResponse(response);
@@ -69,29 +89,26 @@ export default function ChatPage() {
     }
   };
 
-  const startChat = async () => {
+  // Boot/resume the quiz. Two cases:
+  //  - Fresh load: chatHistory is empty → send "__start__" and add the welcome msg.
+  //  - Refresh mid-quiz: chatHistory survives in localStorage but currentResponse
+  //    does not. Replay history through the stream endpoint to re-fetch the
+  //    current question state so MCQ/text input rerenders.
+  useEffect(() => {
+    if (!candidateId || autoStarted.current) return;
+    autoStarted.current = true;
+    const isFresh = chatHistory.length === 0;
     setStarted(true);
     setLoading(true);
-    try {
-      const res = await api.post(`/candidate/${candidateId}/chat`, {
-        message: '__start__',
-        chat_history: [],
-      });
-      const response: AgentResponse = res.data;
-      addChatMessage({ role: 'assistant', content: response.message });
-      setCurrentResponse(response);
-    } catch {
-      addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (candidateId && !started && !autoStarted.current && chatHistory.length === 0) {
-      autoStarted.current = true;
-      startChat();
-    }
+    callChatStream(candidateId, isFresh ? '__start__' : '', chatHistory)
+      .then((response) => {
+        if (isFresh) addChatMessage({ role: 'assistant', content: response.message });
+        setCurrentResponse(response);
+      })
+      .catch(() => {
+        if (isFresh) addChatMessage({ role: 'assistant', content: 'Failed to start chat. Please refresh.' });
+      })
+      .finally(() => setLoading(false));
   }, [candidateId]);
 
   const handleMCQSubmit = (selected: string[]) => {
