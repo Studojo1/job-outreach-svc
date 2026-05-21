@@ -4,16 +4,16 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/hooks/useAuth';
 import { useAppStore } from '@/store/useAppStore';
-import { Container } from '@/components/layout/Container';
 import { Navbar } from '@/components/layout/Navbar';
-import { ProgressSteps } from '@/components/ui/ProgressSteps';
 import { ChatInterface } from '@/components/features/ChatInterface';
 import { MCQSelector } from '@/components/features/MCQSelector';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
-import { Send } from 'lucide-react';
+import { Send, Check } from 'lucide-react';
 import api from '@/lib/api';
 import type { ChatMessage, AgentResponse } from '@/lib/types/candidate';
+
+const STEPS = ['Upload Resume', 'AI Chat', 'Your Profile'];
+const CURRENT_STEP = 2;
 
 export default function ChatPage() {
   const router = useRouter();
@@ -46,51 +46,24 @@ export default function ChatPage() {
       addChatMessage(assistantMsg);
       setCurrentResponse(response);
 
-      // Debug logging for quiz state
-      console.log('[QUIZ] Response received:', {
-        state: response.current_state,
-        has_mcq: !!response.mcq,
-        mcq_options: response.mcq?.options?.length ?? 0,
-        text_input: response.text_input,
-        is_complete: response.is_complete,
-        questions_asked: response.questions_asked_so_far,
-      });
-      console.log('[QUIZ] Full response:', response);
-
       if (response.is_complete) {
-        // Generate the full candidate profile payload before navigating
         const fullHistory = [...chatHistory, userMsg, { role: 'assistant' as const, content: response.message }];
         try {
           setLoading(true);
-          console.log('[ProfileGeneration] Starting profile generation...');
-          const payloadRes = await api.post(`/candidate/${candidateId}/generate-payload`, {
+          await api.post(`/candidate/${candidateId}/generate-payload`, {
             message: '__generate__',
-            chat_history: fullHistory.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
+            chat_history: fullHistory.map((m) => ({ role: m.role, content: m.content })),
           });
-          console.log('[ProfileGeneration] Profile created successfully', payloadRes.data);
-          // Brief delay so user sees "Profile complete" message
           await new Promise((r) => setTimeout(r, 1500));
-          console.log('[ProfileGeneration] Redirecting to profile page');
           setCurrentStep(3);
           router.push('/onboarding/profile');
-        } catch (err) {
-          console.error('[ProfileGeneration] Failed to generate profile payload:', err);
-          addChatMessage({
-            role: 'assistant',
-            content: 'Profile generation failed. Please try again.',
-          });
+        } catch {
+          addChatMessage({ role: 'assistant', content: 'Profile generation failed. Please try again.' });
           setLoading(false);
         }
       }
-    } catch (err: any) {
-      console.error('[QUIZ] Chat error:', err);
-      addChatMessage({
-        role: 'assistant',
-        content: 'Something went wrong. Please try again.',
-      });
+    } catch {
+      addChatMessage({ role: 'assistant', content: 'Something went wrong. Please try again.' });
     } finally {
       setLoading(false);
     }
@@ -114,7 +87,6 @@ export default function ChatPage() {
     }
   };
 
-  // Auto-start the quiz immediately — no intermediate screen
   useEffect(() => {
     if (candidateId && !started && !autoStarted.current && chatHistory.length === 0) {
       autoStarted.current = true;
@@ -137,62 +109,145 @@ export default function ChatPage() {
     return (
       <div className="min-h-screen bg-white">
         <Navbar />
-        <Container className="max-w-onboarding py-8 text-center">
+        <div className="mx-auto max-w-3xl px-4 py-8 md:px-8 text-center">
           <p className="text-base text-muted mt-8 font-satoshi">
             Please upload your resume first.
           </p>
           <Button onClick={() => router.push('/onboarding/upload')} className="mt-6">
             Go to Upload
           </Button>
-        </Container>
+        </div>
       </div>
     );
   }
 
+  const questionsAsked = currentResponse?.questions_asked_so_far ?? 0;
+
+  // MCQ / text input rendered in the bottom panel
+  const bottomPanel = currentResponse?.is_complete ? null
+    : currentResponse?.mcq ? (
+      <MCQSelector
+        question={currentResponse.mcq.question}
+        options={currentResponse.mcq.options}
+        allowMultiple={currentResponse.mcq.allow_multiple}
+        onSubmit={handleMCQSubmit}
+        loading={loading}
+      />
+    ) : (currentResponse?.text_input || (!currentResponse?.mcq && started && !loading)) ? (
+      <div className="flex gap-2 items-end">
+        <textarea
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          placeholder={(currentResponse as { input_placeholder?: string } | null)?.input_placeholder || 'Type your answer...'}
+          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleTextSubmit())}
+          rows={2}
+          className="flex-1 px-4 py-2.5 rounded-xl border-2 border-ink/20 text-sm font-satoshi focus:outline-none focus:ring-2 focus:ring-primary resize-none"
+        />
+        <button
+          onClick={handleTextSubmit}
+          disabled={!textInput.trim() || loading}
+          className="h-10 w-10 rounded-xl bg-primary text-white flex items-center justify-center border-2 border-ink shadow-brutal transition-all hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none disabled:opacity-50 disabled:pointer-events-none flex-shrink-0"
+        >
+          <Send className="w-4 h-4" />
+        </button>
+      </div>
+    ) : null;
+
   return (
-    <div className="min-h-screen bg-white">
+    <div className="h-screen flex flex-col overflow-hidden bg-white">
       <Navbar />
-      <Container className="max-w-onboarding py-8">
-        <ProgressSteps steps={['Upload Resume', 'AI Chat', 'Your Profile']} currentStep={2} />
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar — vertical stepper */}
+        <aside className="hidden md:flex flex-col w-56 border-r border-ink/10 bg-surface-muted/30 items-center justify-center flex-shrink-0">
+          <div className="flex flex-col" style={{ alignItems: 'flex-start' }}>
+            {STEPS.map((label, idx) => {
+              const n = idx + 1;
+              const isDone = n < CURRENT_STEP;
+              const isCurrent = n === CURRENT_STEP;
+              const isLast = idx === STEPS.length - 1;
+              return (
+                <div key={idx} className="flex flex-col items-start">
+                  <div className="flex items-center gap-3">
+                    <div className="flex flex-col items-center">
+                      <div
+                        className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-all duration-300 ${
+                          isDone
+                            ? 'bg-secondary text-white border-secondary'
+                            : isCurrent
+                            ? 'bg-primary text-white border-primary'
+                            : 'bg-white text-muted border-ink/15'
+                        }`}
+                      >
+                        {isDone ? <Check className="w-4 h-4" /> : n}
+                      </div>
+                      {!isLast && (
+                        <div className={`w-0.5 h-10 ${isDone ? 'bg-secondary' : 'bg-ink/10'}`} />
+                      )}
+                    </div>
+                    <div>
+                      <p
+                        className={`text-sm font-satoshi leading-tight ${
+                          isCurrent ? 'text-ink font-semibold'
+                            : isDone ? 'text-secondary font-medium'
+                            : 'text-muted'
+                        }`}
+                      >
+                        {label}
+                      </p>
+                      {isCurrent && n === 2 && questionsAsked > 0 && (
+                        <p className="text-xs text-muted font-satoshi mt-0.5">Q {questionsAsked}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </aside>
 
-        <div className="mt-8">
-          <h1 className="font-clash text-2xl font-bold mb-2">Career Intelligence Chat</h1>
-          <p className="text-sm text-muted font-satoshi mb-6">
-            Our AI will ask you a few questions to understand your career goals.
-          </p>
-
-          <ChatInterface messages={chatHistory} loading={loading}>
-            {currentResponse?.is_complete ? (
-              <div className="text-center p-4">
-                <p className="text-sm text-secondary font-semibold font-satoshi">
-                  Profile complete! Redirecting...
-                </p>
-              </div>
-            ) : currentResponse?.mcq ? (
-              <MCQSelector
-                question={currentResponse.mcq.question}
-                options={currentResponse.mcq.options}
-                allowMultiple={currentResponse.mcq.allow_multiple}
-                onSubmit={handleMCQSubmit}
-                loading={loading}
-              />
-            ) : currentResponse?.text_input || (!currentResponse?.mcq && started) ? (
-              <div className="flex gap-2">
-                <Input
-                  value={textInput}
-                  onChange={(e) => setTextInput(e.target.value)}
-                  placeholder="Type your answer..."
-                  onKeyDown={(e) => e.key === 'Enter' && handleTextSubmit()}
-                  className="flex-1"
+        {/* Main content */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Mobile compact stepper */}
+          <div className="md:hidden flex items-center justify-between px-4 pt-4 pb-1 flex-shrink-0">
+            <div className="flex items-center gap-1.5">
+              {STEPS.map((_, idx) => (
+                <div
+                  key={idx}
+                  className={`w-2 h-2 rounded-full transition-colors ${
+                    idx + 1 < CURRENT_STEP ? 'bg-secondary'
+                      : idx + 1 === CURRENT_STEP ? 'bg-primary'
+                      : 'bg-ink/15'
+                  }`}
                 />
-                <Button onClick={handleTextSubmit} disabled={!textInput.trim() || loading}>
-                  <Send className="w-4 h-4" />
-                </Button>
-              </div>
-            ) : null}
-          </ChatInterface>
+              ))}
+            </div>
+            {questionsAsked > 0 && (
+              <span className="text-xs font-satoshi text-muted">Q{questionsAsked}</span>
+            )}
+          </div>
+
+          {/* Heading */}
+          <div className="flex-shrink-0 px-6 pt-6 md:pt-8 pb-2">
+            <h1 className="font-clash text-xl md:text-2xl font-bold text-ink">Quick Profile Setup</h1>
+            <p className="text-sm text-muted font-satoshi mt-1">
+              A few quick questions so we can find the right hiring managers for you.
+            </p>
+          </div>
+
+          {/* Chat + bottom panel */}
+          <div className="flex-1 overflow-hidden px-4 md:px-6 pb-4">
+            <ChatInterface messages={chatHistory} loading={loading}>
+              {currentResponse?.is_complete ? (
+                <div className="text-center p-4">
+                  <p className="text-sm text-secondary font-semibold font-satoshi">
+                    Profile complete! Redirecting...
+                  </p>
+                </div>
+              ) : bottomPanel}
+            </ChatInterface>
+          </div>
         </div>
-      </Container>
+      </div>
     </div>
   );
 }
