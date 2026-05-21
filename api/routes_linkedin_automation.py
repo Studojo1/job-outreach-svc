@@ -1128,19 +1128,52 @@ async def send_one_now(
         db.commit()
         raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
 
-    req = (
+    # Try up to 5 pending requests — skip any that can't be resolved
+    candidates = (
         db.query(LinkedInConnectionRequest)
         .filter(
             LinkedInConnectionRequest.campaign_id == campaign_id,
             LinkedInConnectionRequest.status == "pending",
         )
-        .first()
+        .limit(5)
+        .all()
     )
-    if not req:
+    if not candidates:
         raise HTTPException(status_code=404, detail="No pending leads to send")
 
     from services.linkedin_outreach.automation_service import _decrypt_cookies_blob
+    from services.linkedin_outreach.voyager import resolve_linkedin_url
+    from core.config import settings as _settings
     cookies_blob = _decrypt_cookies_blob(token_row)
+    proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
+
+    req = None
+    for candidate in candidates:
+        if not candidate.profile_url:
+            first_name = (candidate.name or "").split()[0] if candidate.name else ""
+            try:
+                resolved = await resolve_linkedin_url(
+                    first_name, candidate.company or "", candidate.headline or "",
+                    li_at, jsessionid, proxy_url=proxy_url,
+                )
+            except Exception:
+                resolved = None
+            if resolved:
+                candidate.profile_url = resolved
+                db.commit()
+                req = candidate
+                break
+            else:
+                candidate.status = "error"
+                candidate.error = "Could not resolve LinkedIn profile"
+                candidate.updated_at = datetime.utcnow()
+                db.commit()
+        else:
+            req = candidate
+            break
+
+    if not req:
+        raise HTTPException(status_code=404, detail="Could not resolve any pending leads — try again later")
 
     # Resolve URN (best-effort — Playwright fallback works without it)
     if not req.profile_urn:
