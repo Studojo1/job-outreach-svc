@@ -108,11 +108,14 @@ export default function ChatPage() {
     setStarted(true);
     setLoading(true);
 
-    const hasUserAnswers = chatHistory.some((m) => m.role === 'user');
+    // Read state directly from the store at call time — avoids stale closure
+    // where the effect captures chatHistory=[] from the pre-hydration render
+    // while Zustand has already rehydrated by the time the effect fires.
+    const history = useAppStore.getState().chatHistory;
+    const hasUserAnswers = history.some((m) => m.role === 'user');
 
     if (!hasUserAnswers) {
-      // Case 1 (and case where user refreshed before answering Q1):
-      // Start clean — clear any stale Q1 bubble and restart.
+      // No answers yet — start clean (covers fresh load and pre-Q1 refresh).
       clearChatHistory();
       callChatStream(candidateId, '__start__', [])
         .then((response) => {
@@ -124,19 +127,19 @@ export default function ChatPage() {
         })
         .finally(() => setLoading(false));
     } else {
-      // Cases 2 & 3: replay history to restore current question state.
-      callChatStream(candidateId, '', chatHistory)
+      // Mid-quiz refresh: replay history to restore the current question state.
+      callChatStream(candidateId, '', history)
         .then((response) => {
-          // If the last persisted message is from the user, the assistant
-          // response for the current question hasn't been stored yet — add it.
-          const lastMsg = chatHistory[chatHistory.length - 1];
+          // If the last message was from the user, the next question bubble
+          // hasn't been stored yet — add it now.
+          const lastMsg = history[history.length - 1];
           if (lastMsg?.role === 'user') {
             addChatMessage({ role: 'assistant', content: response.message });
           }
           setCurrentResponse(response);
         })
         .catch(() => {
-          // Replay failed (e.g. stale history from old endpoint) — restart.
+          // Replay failed — restart clean.
           clearChatHistory();
           callChatStream(candidateId, '__start__', [])
             .then((r) => {
