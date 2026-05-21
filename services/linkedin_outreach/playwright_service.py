@@ -59,30 +59,29 @@ async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None
     try:
         async with httpx.AsyncClient(
             timeout=20,
-            follow_redirects=False,
+            follow_redirects=True,  # follow to final 200 where LinkedIn sets JSESSIONID
             proxies=proxies,
-            headers={
-                "User-Agent": ua,
-                "Cookie": f"li_at={li_at}",
-                "Accept": "text/html,application/xhtml+xml",
-            },
         ) as client:
             for canary in _CANARY_SLUGS:
                 try:
-                    resp = await client.get(f"https://www.linkedin.com/in/{canary}/")
-                    jsessionid = resp.cookies.get("JSESSIONID")
+                    resp = await client.get(
+                        f"https://www.linkedin.com/in/{canary}/",
+                        headers={
+                            "User-Agent": ua,
+                            "Cookie": f"li_at={li_at}",
+                            "Accept": "text/html,application/xhtml+xml",
+                        },
+                    )
+                    # Check jar first (populated as redirects are followed)
+                    jsessionid = client.cookies.get("JSESSIONID") or resp.cookies.get("JSESSIONID")
                     logger.info(
                         "_get_fresh_jsessionid: canary=%s status=%s jsessionid=%s",
                         canary, resp.status_code, repr(jsessionid),
                     )
                     if jsessionid:
                         return jsessionid
-                    if resp.status_code not in (200, 301, 302):
-                        continue  # blocked — try next canary
-                    # For 301/302 with no JSESSIONID yet, the cookie may be in the jar
-                    jsessionid = client.cookies.get("JSESSIONID")
-                    if jsessionid:
-                        return jsessionid
+                    if resp.status_code not in (200, 301, 302, 999):
+                        continue
                 except Exception as e:
                     logger.debug("_get_fresh_jsessionid: canary %s failed (%s)", canary, e)
             logger.warning("_get_fresh_jsessionid: all canaries exhausted, no JSESSIONID obtained")
@@ -705,16 +704,8 @@ async def playwright_send_message(
 
         page = await context.new_page()
         try:
-            # Navigate via feed to establish the SPA session first
-            try:
-                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(2000)
-            except PWTimeout:
-                pass
-
-            if "/login" in page.url or "/authwall" in page.url:
-                raise LinkedInAuthError("Session expired — redirected to login")
-
+            # Go directly to the target profile (skip feed warmup — causes redirect loops
+            # when JSESSIONID can't be refreshed for the current proxy IP)
             # Navigate to the target profile
             target_url = profile_url if "/in/" in profile_url else f"https://www.linkedin.com/in/{slug}/"
             try:
