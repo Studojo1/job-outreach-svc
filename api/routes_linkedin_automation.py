@@ -1284,7 +1284,7 @@ class ConnectionRequestResponse(BaseModel):
     name: str
     headline: Optional[str]
     company: Optional[str]
-    profile_url: str
+    profile_url: Optional[str]
     connection_note: Optional[str]
     followup_message: Optional[str]
     match_reason: Optional[str]
