@@ -356,18 +356,22 @@ async def send_message(
     profile_urn: str,
     message: str,
     session_id: str | None = None,
+    profile_url: str | None = None,
+    cookies_blob: str | None = None,
 ) -> bool:
-    """Send a LinkedIn DM to a 1st-degree connection."""
+    """Send a LinkedIn DM to a 1st-degree connection.
+
+    Tries the Voyager messaging API first; falls back to Playwright if the API
+    returns a non-2xx status (common when the session was established through a
+    different proxy IP than the current request).
+    """
     payload = {
         "keyVersion": "LEGACY_INBOX",
         "conversationCreate": {
             "eventCreate": {
                 "value": {
                     "com.linkedin.voyager.messaging.create.MessageCreate": {
-                        "attributedBody": {
-                            "text": message,
-                            "attributes": [],
-                        },
+                        "attributedBody": {"text": message, "attributes": []},
                         "attachments": [],
                     }
                 }
@@ -380,12 +384,47 @@ async def send_message(
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/messaging/conversations",
-                headers=_headers(li_at, jsessionid),
+                headers=_headers(li_at, jsessionid, cookies_blob),
                 json=payload,
             )
-        return res.status_code in (200, 201)
+        if res.status_code in (200, 201):
+            return True
+        logger.warning(
+            "send_message Voyager API returned %d — falling back to Playwright", res.status_code
+        )
     except Exception as e:
-        logger.error("send_message failed: %s", e)
+        logger.warning("send_message Voyager API error — falling back to Playwright: %s", e)
+
+    # Playwright fallback — more reliable when session IP differs from request IP
+    if not profile_url and profile_urn:
+        profile_url = f"https://www.linkedin.com/in/{profile_urn}/"
+    if not profile_url:
+        return False
+    try:
+        from services.linkedin_outreach.playwright_service import playwright_send_message
+        from core.config import settings as _s
+        proxy = (_s.LINKEDIN_PROXY_URL or "").strip() or None
+        result = await playwright_send_message(
+            li_at=li_at,
+            jsessionid=jsessionid,
+            profile_url=profile_url,
+            message=message,
+            proxy_url=proxy,
+            cookies_blob=cookies_blob,
+        )
+        if result.get("ok"):
+            logger.info("send_message Playwright succeeded for %s", profile_url)
+            return True
+        err = result.get("error", "unknown")
+        if err == "not_connected":
+            logger.info("send_message: %s not yet connected (no Message button)", profile_url)
+        else:
+            logger.warning("send_message Playwright failed: %s", err)
+        return False
+    except LinkedInAuthError:
+        raise
+    except Exception as e:
+        logger.error("send_message Playwright fallback failed: %s", e)
         return False
 
 
@@ -1159,50 +1198,61 @@ class LinkedInAutomationDaemon:
             )
 
             for req in sent_requests:
-                if not req.profile_urn:
+                if not req.profile_url and not req.profile_urn:
                     continue
-                try:
-                    accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
-                except Exception as e:
-                    logger.warning("Campaign %d: acceptance check error for %s: %s", campaign.id, req.profile_urn, e)
+
+                # Generate follow-up message if needed (before attempting to send)
+                followup_msg = req.followup_message
+                if not followup_msg and campaign.followup_message:
+                    try:
+                        from services.linkedin_outreach.message_gen import generate_followup_message
+                        followup_msg = await generate_followup_message(
+                            person_name=req.name or "",
+                            person_headline=req.headline or "",
+                            person_company=req.company or "",
+                            target_role=campaign.target_role or "the role",
+                            student_name=None,
+                        )
+                        req.followup_message = followup_msg
+                        db.commit()
+                        logger.info("Campaign %d: generated followup for %s", campaign.id, req.name)
+                    except Exception as gen_err:
+                        logger.warning("Campaign %d: followup gen failed for %s: %s", campaign.id, req.name, gen_err)
+                        followup_msg = None
+
+                if not followup_msg or not campaign.followup_message:
+                    # Try Voyager-only acceptance check (lightweight) if no follow-up to send
+                    if req.profile_urn:
+                        try:
+                            accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
+                            if accepted:
+                                req.status = "accepted"
+                                req.accepted_at = datetime.utcnow()
+                                campaign.total_accepted += 1
+                                db.commit()
+                        except Exception as e:
+                            logger.warning("Campaign %d: acceptance check error for %s: %s", campaign.id, req.profile_urn, e)
                     continue
-                if accepted:
-                    req.status = "accepted"
-                    req.accepted_at = datetime.utcnow()
-                    campaign.total_accepted += 1
+
+                # Attempt to send the follow-up. Playwright's Message button check
+                # implicitly confirms the connection was accepted — no separate check needed.
+                await asyncio.sleep(random.uniform(5, 15))  # brief human-like pause
+                ok = await send_message(
+                    li_at, jsessionid,
+                    req.profile_urn or "",
+                    followup_msg,
+                    session_id,
+                    profile_url=req.profile_url,
+                    cookies_blob=cookies_blob,
+                )
+                if ok:
+                    req.status = "followup_sent"
+                    req.accepted_at = req.accepted_at or datetime.utcnow()
+                    req.followup_sent_at = datetime.utcnow()
+                    campaign.total_accepted = max(campaign.total_accepted, 0) + 1
+                    campaign.total_followups_sent += 1
                     db.commit()
-
-                    # Send follow-up 2–3 minutes after acceptance (human-like delay)
-                    if campaign.followup_message:  # non-empty = follow-ups enabled for this campaign
-                        followup_msg = req.followup_message
-                        if not followup_msg:
-                            # Generate AI message on-the-fly for this person
-                            try:
-                                from services.linkedin_outreach.message_gen import generate_followup_message
-                                followup_msg = await generate_followup_message(
-                                    person_name=req.name or "",
-                                    person_headline=req.headline or "",
-                                    person_company=req.company or "",
-                                    target_role=campaign.target_role or "the role",
-                                    student_name=None,
-                                )
-                                req.followup_message = followup_msg
-                                db.commit()
-                                logger.info("Campaign %d: generated followup for %s", campaign.id, req.name)
-                            except Exception as gen_err:
-                                logger.warning("Campaign %d: followup gen failed for %s: %s", campaign.id, req.name, gen_err)
-                                followup_msg = None
-
-                        if followup_msg:
-                            await asyncio.sleep(random.uniform(120, 180))
-                            ok = await send_message(
-                                li_at, jsessionid, req.profile_urn, followup_msg, session_id
-                            )
-                            if ok:
-                                req.status = "followup_sent"
-                                req.followup_sent_at = datetime.utcnow()
-                                campaign.total_followups_sent += 1
-                                db.commit()
+                    logger.info("Campaign %d: follow-up sent to %s", campaign.id, req.name)
 
         # Phase 3: detect replies — independent 2h timer so it runs even when Phase 2 is cooling down
         should_check_replies = (now_ts - _last_reply_check.get(campaign.id, 0) >= _REPLY_INTERVAL)

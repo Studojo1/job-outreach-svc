@@ -640,3 +640,200 @@ async def playwright_send_invitation(
                 await page.close()
                 await context.close()
                 await browser.close()
+
+
+async def playwright_send_message(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    message: str,
+    proxy_url: str | None = None,
+    cookies_blob: str | None = None,
+) -> dict:
+    """Send a LinkedIn DM to a 1st-degree connection via Playwright.
+
+    Navigates to the profile, finds the Message button (only visible for 1st-degree
+    connections), types the message, and clicks Send.
+
+    Returns {"ok": True} on success, {"ok": False, "error": "..."} on failure.
+    "not_connected" error means the person hasn't accepted the connection request yet.
+    """
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+    from services.linkedin_outreach.automation_service import LinkedInAuthError
+
+    slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
+
+    proxy_cfg = _parse_proxy(proxy_url)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox"],
+            proxy=proxy_cfg,
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+        )
+
+        # Inject fresh JSESSIONID for the current proxy IP
+        fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
+        active_js = fresh_js or jsessionid
+
+        cookies = [
+            {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/", "secure": True, "sameSite": "None"},
+            {"name": "JSESSIONID", "value": f'"{active_js}"' if not active_js.startswith('"') else active_js,
+             "domain": ".linkedin.com", "path": "/", "secure": True, "sameSite": "None"},
+        ]
+        if cookies_blob:
+            import json as _json
+            try:
+                for c in _json.loads(cookies_blob):
+                    if c.get("name") not in ("li_at", "JSESSIONID") and c.get("name") and c.get("value") is not None:
+                        cookies.append({
+                            "name": c["name"], "value": str(c["value"]),
+                            "domain": c.get("domain", ".linkedin.com"),
+                            "path": c.get("path", "/"),
+                        })
+            except Exception:
+                pass
+        await context.add_cookies(cookies)
+
+        page = await context.new_page()
+        try:
+            # Navigate via feed to establish the SPA session first
+            try:
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(2000)
+            except PWTimeout:
+                pass
+
+            if "/login" in page.url or "/authwall" in page.url:
+                raise LinkedInAuthError("Session expired — redirected to login")
+
+            # Navigate to the target profile
+            target_url = profile_url if "/in/" in profile_url else f"https://www.linkedin.com/in/{slug}/"
+            try:
+                await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(3000)
+            except PWTimeout:
+                await page.wait_for_timeout(3000)
+
+            if "/login" in page.url or "/authwall" in page.url:
+                raise LinkedInAuthError("Session expired — redirected to login")
+
+            title = await page.title()
+            logger.info("Playwright msg: %s loaded — title=%r", slug, title)
+
+            # Look for Message button (only appears for 1st-degree connections)
+            msg_btn = None
+            for selector in [
+                'button:has-text("Message")',
+                'a:has-text("Message")',
+                '[data-control-name="message"]',
+                'button[aria-label*="Message"]',
+            ]:
+                try:
+                    btn = page.locator(selector).first
+                    if await btn.is_visible(timeout=3000):
+                        msg_btn = btn
+                        logger.info("Playwright msg: found Message button via %r", selector)
+                        break
+                except Exception:
+                    continue
+
+            if not msg_btn:
+                # Scroll and retry
+                await page.evaluate("window.scrollTo(0, 200)")
+                await page.wait_for_timeout(1000)
+                for selector in ['button:has-text("Message")', 'a:has-text("Message")']:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=2000):
+                            msg_btn = btn
+                            break
+                    except Exception:
+                        continue
+
+            if not msg_btn:
+                # Check if Connect button is visible (not yet connected)
+                connect_visible = False
+                for sel in ['button:has-text("Connect")', 'button:has-text("Pending")']:
+                    try:
+                        if await page.locator(sel).first.is_visible(timeout=1500):
+                            connect_visible = True
+                            break
+                    except Exception:
+                        pass
+                btns = await page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).filter(t => t).slice(0,15)
+                """)
+                logger.info("Playwright msg: no Message btn — connect_visible=%s buttons=%s", connect_visible, btns[:8])
+                return {"ok": False, "error": "not_connected", "buttons": btns[:8]}
+
+            await msg_btn.scroll_into_view_if_needed()
+            await msg_btn.click()
+            await page.wait_for_timeout(2000)
+
+            # Find the message textarea
+            textarea = None
+            for selector in [
+                ".msg-form__contenteditable",
+                'div[role="textbox"][contenteditable="true"]',
+                "div[contenteditable='true']",
+                ".msg-form__msg-content-container div[contenteditable]",
+            ]:
+                try:
+                    el = page.locator(selector).first
+                    if await el.is_visible(timeout=3000):
+                        textarea = el
+                        break
+                except Exception:
+                    continue
+
+            if not textarea:
+                return {"ok": False, "error": "message_textarea_not_found"}
+
+            await textarea.click()
+            await page.wait_for_timeout(500)
+            await textarea.fill(message)
+            await page.wait_for_timeout(800)
+
+            # Find and click Send
+            send_btn = None
+            for selector in [
+                "button.msg-form__send-btn",
+                'button[aria-label*="Send" i]',
+                'button:has-text("Send")',
+            ]:
+                try:
+                    btn = page.locator(selector).first
+                    if await btn.is_visible(timeout=3000):
+                        send_btn = btn
+                        break
+                except Exception:
+                    continue
+
+            if not send_btn:
+                return {"ok": False, "error": "send_button_not_found"}
+
+            await send_btn.click()
+            await page.wait_for_timeout(1500)
+            logger.info("Playwright msg: message sent to %s", slug)
+            return {"ok": True}
+
+        except LinkedInAuthError:
+            raise
+        except PWTimeout:
+            return {"ok": False, "error": "page_timeout"}
+        except Exception as e:
+            logger.error("Playwright send_message failed for %s: %s", slug, e)
+            return {"ok": False, "error": str(e)}
+        finally:
+            await page.close()
+            await context.close()
+            await browser.close()
