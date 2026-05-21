@@ -45,7 +45,7 @@ MAX_GAP_SECONDS = 240
 # Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
 _last_accept_check: dict[int, float] = {}
 _last_reply_check: dict[int, float] = {}
-_ACCEPT_INTERVAL = 14400  # 4 hours
+_ACCEPT_INTERVAL = 300  # 5 minutes
 _REPLY_INTERVAL = 7200    # 2 hours
 
 
@@ -1151,16 +1151,36 @@ class LinkedInAutomationDaemon:
                     db.commit()
 
                     # Send follow-up 2–3 minutes after acceptance (human-like delay)
-                    if campaign.followup_message and req.followup_message:
-                        await asyncio.sleep(random.uniform(120, 180))
-                        ok = await send_message(
-                            li_at, jsessionid, req.profile_urn, req.followup_message, session_id
-                        )
-                        if ok:
-                            req.status = "followup_sent"
-                            req.followup_sent_at = datetime.utcnow()
-                            campaign.total_followups_sent += 1
-                            db.commit()
+                    if campaign.followup_message:  # non-empty = follow-ups enabled for this campaign
+                        followup_msg = req.followup_message
+                        if not followup_msg:
+                            # Generate AI message on-the-fly for this person
+                            try:
+                                from services.linkedin_outreach.message_gen import generate_followup_message
+                                followup_msg = await generate_followup_message(
+                                    person_name=req.name or "",
+                                    person_headline=req.headline or "",
+                                    person_company=req.company or "",
+                                    target_role=campaign.target_role or "the role",
+                                    student_name=None,
+                                )
+                                req.followup_message = followup_msg
+                                db.commit()
+                                logger.info("Campaign %d: generated followup for %s", campaign.id, req.name)
+                            except Exception as gen_err:
+                                logger.warning("Campaign %d: followup gen failed for %s: %s", campaign.id, req.name, gen_err)
+                                followup_msg = None
+
+                        if followup_msg:
+                            await asyncio.sleep(random.uniform(120, 180))
+                            ok = await send_message(
+                                li_at, jsessionid, req.profile_urn, followup_msg, session_id
+                            )
+                            if ok:
+                                req.status = "followup_sent"
+                                req.followup_sent_at = datetime.utcnow()
+                                campaign.total_followups_sent += 1
+                                db.commit()
 
         # Phase 3: detect replies — independent 2h timer so it runs even when Phase 2 is cooling down
         should_check_replies = (now_ts - _last_reply_check.get(campaign.id, 0) >= _REPLY_INTERVAL)
