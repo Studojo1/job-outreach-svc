@@ -395,17 +395,39 @@ async def check_connection_accepted(
     profile_urn: str,
     session_id: str | None = None,
 ) -> bool:
-    """Check if a profile is now a 1st-degree connection."""
+    """Check if a profile is now a 1st-degree connection.
+
+    LinkedIn deprecated /networkinfo (returns 410). Fall back through two
+    alternative Voyager endpoints that still expose distance info.
+    """
     try:
         async with httpx.AsyncClient(timeout=15, **_proxy(session_id)) as client:
+            # Primary: main profile endpoint — returns distance alongside profile data
             res = await client.get(
-                f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}/networkinfo",
+                f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}",
                 headers=_headers(li_at, jsessionid),
             )
-        if res.status_code == 200:
-            data = res.json()
-            distance = data.get("distance", {}).get("value") or data.get("distance", "")
-            return str(distance) == "DISTANCE_1"
+            if res.status_code == 200:
+                data = res.json()
+                dist = (data.get("distance") or {}).get("value") or data.get("distance", "")
+                if str(dist) == "DISTANCE_1":
+                    return True
+                if str(dist) in ("DISTANCE_2", "DISTANCE_3", "OUT_OF_NETWORK"):
+                    return False
+                # distance field absent — try profileView which always has it
+            if res.status_code in (200, 404, 410):
+                res2 = await client.get(
+                    f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}/profileView",
+                    headers=_headers(li_at, jsessionid),
+                )
+                if res2.status_code == 200:
+                    data2 = res2.json()
+                    dist2 = (
+                        (data2.get("memberRelationship") or {}).get("memberRelationshipUnion", {}).get("distance", {}).get("value")
+                        or (data2.get("distance") or {}).get("value")
+                        or ""
+                    )
+                    return str(dist2) == "DISTANCE_1"
     except Exception as e:
         logger.warning("check_connection_accepted failed for %s: %s", profile_urn, e)
     return False
