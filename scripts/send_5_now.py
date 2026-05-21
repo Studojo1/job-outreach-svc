@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 CAMPAIGN_ID = 12
-LIMIT = 5
+LIMIT = 1
 
 
 async def main():

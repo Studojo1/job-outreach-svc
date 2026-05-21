@@ -218,18 +218,21 @@ async def send_connection_request(
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed GET — use an authenticated profile page so LinkedIn issues a fresh
-            # JSESSIONID for this proxy IP. The home page (/) doesn't set JSESSIONID;
-            # a public profile page does because li_at is present in the request.
+            # Seed GET — send ONLY li_at (no stale JSESSIONID) so LinkedIn is forced
+            # to issue a fresh JSESSIONID for this proxy IP. Sending the stale one
+            # causes LinkedIn to accept it as-is and return no new Set-Cookie.
+            # A public profile page is used because / doesn't trigger JSESSIONID issuance.
+            _fresh_jsessionid = None
             for _canary in ("williamhgates", "jeffweiner08", "reidhoffman"):
                 seed = await client.get(
                     f"https://www.linkedin.com/in/{_canary}/",
-                    headers={"Cookie": seed_cookie_header, "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
+                    headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
                     follow_redirects=True,
                 )
-                if client.cookies.get("JSESSIONID"):
+                _fresh_jsessionid = seed.cookies.get("JSESSIONID") or client.cookies.get("JSESSIONID")
+                if _fresh_jsessionid:
                     break
-            raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
+            raw_csrf = _fresh_jsessionid or jsessionid
             # LinkedIn stores JSESSIONID as "ajax:XXXX" (with surrounding quotes).
             # The csrf-token header must be the bare value; Cookie header must keep quotes.
             csrf = raw_csrf.strip('"')
