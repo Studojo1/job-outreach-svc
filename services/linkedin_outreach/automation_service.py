@@ -1031,6 +1031,35 @@ class LinkedInAutomationDaemon:
                     await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
                 first_in_batch = False
 
+                # Resolve profile_url via Voyager if not already known.
+                # Apollo search doesn't return linkedin_url for most leads, so
+                # we search by name + company just before sending.
+                if not req.profile_url:
+                    try:
+                        from services.linkedin_outreach.voyager import resolve_linkedin_url
+                        first_name = (req.name or "").split()[0] if req.name else ""
+                        resolved = await resolve_linkedin_url(
+                            first_name, req.company or "", req.headline or "",
+                            li_at, jsessionid,
+                        )
+                        if resolved:
+                            req.profile_url = resolved
+                            db.commit()
+                        else:
+                            logger.warning("Campaign %d: could not resolve LinkedIn URL for '%s' at '%s', skipping", campaign.id, req.name, req.company)
+                            req.status = "error"
+                            req.error = "Could not resolve LinkedIn profile"
+                            req.updated_at = datetime.utcnow()
+                            db.commit()
+                            continue
+                    except Exception as resolve_err:
+                        logger.warning("Campaign %d: Voyager resolve error for '%s': %s", campaign.id, req.name, resolve_err)
+                        req.status = "error"
+                        req.error = "Profile resolve failed"
+                        req.updated_at = datetime.utcnow()
+                        db.commit()
+                        continue
+
                 # Resolve URN best-effort (Playwright fallback works without it).
                 if not req.profile_urn:
                     try:

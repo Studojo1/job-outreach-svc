@@ -564,15 +564,13 @@ async def create_campaign_from_order(
     if not cand:
         raise HTTPException(status_code=404, detail="Candidate profile not found")
 
-    # Pull leads with linkedin_url, ordered best-score first
+    # Pull leads ordered best-score first.
+    # profile_url may be NULL (Apollo search rarely returns linkedin_url) —
+    # the automation daemon resolves it lazily via Voyager just before sending.
     leads_query = (
         db.query(Lead)
         .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
-        .filter(
-            Lead.candidate_id == candidate_id,
-            Lead.linkedin_url.isnot(None),
-            Lead.linkedin_url != "",
-        )
+        .filter(Lead.candidate_id == candidate_id)
         .order_by(LeadScore.overall_score.desc().nullslast())
         .limit(linkedin_limit)
         .all()
@@ -581,7 +579,7 @@ async def create_campaign_from_order(
     if not leads_query:
         raise HTTPException(
             status_code=400,
-            detail="No leads with LinkedIn profiles found. The lead discovery step must complete first.",
+            detail="No leads found. Complete the lead discovery step first.",
         )
 
     # Derive campaign targeting from candidate profile (same logic as from-profile)

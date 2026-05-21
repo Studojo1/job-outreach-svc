@@ -434,7 +434,7 @@ class LinkedInConnectionRequest(Base):
     headline = Column(Text)
     company = Column(Text)
     location = Column(Text)
-    profile_url = Column(Text, nullable=False)
+    profile_url = Column(Text, nullable=True)   # resolved by daemon via Voyager if None
     profile_urn = Column(Text)         # fsd_profile URN for Voyager API
     profile_image_url = Column(Text)
     # Outreach content
