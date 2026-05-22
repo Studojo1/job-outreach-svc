@@ -1196,6 +1196,37 @@ class LinkedInAutomationDaemon:
                 # acceptance without a note. The user can opt in per campaign.
                 note_to_send = (req.connection_note or "") if campaign.send_with_note else ""
 
+                # Optional warmup: like the lead's most recent post before the
+                # invite lands. Best-effort, swallows all errors so we never
+                # block the actual connect on a like attempt. We only do this
+                # when we have a profile_url (need to navigate by slug).
+                if campaign.like_post_before_connect and req.profile_url:
+                    try:
+                        from services.linkedin_outreach.playwright_service import (
+                            playwright_like_recent_post,
+                        )
+                        from core.config import settings as _settings
+                        _proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
+                        like_res = await playwright_like_recent_post(
+                            li_at, jsessionid, req.profile_url,
+                            proxy_url=_proxy_url, cookies_blob=cookies_blob,
+                        )
+                        logger.info(
+                            "Campaign %d like-post for %s: %s",
+                            campaign.id, req.profile_url, like_res,
+                        )
+                        # Small human-like pause between liking and connecting
+                        # so the actions don't look back-to-back-scripted.
+                        await asyncio.sleep(random.uniform(8, 18))
+                    except LinkedInAuthError:
+                        # Bubble up — same failure mode as the connect step.
+                        raise
+                    except Exception as like_err:
+                        logger.warning(
+                            "Campaign %d like-post errored (continuing to connect): %s",
+                            campaign.id, like_err,
+                        )
+
                 # Send — pass profile_url so Playwright works even if URN is empty
                 try:
                     ok = await send_connection_request(

@@ -863,3 +863,188 @@ async def playwright_send_message(
                 await page.close()
                 await context.close()
                 await browser.close()
+
+
+async def playwright_like_recent_post(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    proxy_url: str | None = None,
+    cookies_blob: str | None = None,
+) -> dict:
+    """Visit a profile's recent activity and like their most recent post.
+
+    Best-effort warmup before sending a connection request — LinkedIn's activity
+    feed shows that we engaged with their content, which lifts acceptance for
+    active users. Skipped silently (returns {"ok": True, "skipped": True, ...})
+    when:
+      - No posts found on the activity page (inactive profile)
+      - The latest post is already liked
+      - The Like button isn't where we expect (LinkedIn DOM drift)
+
+    Never raises — failures here must not block the actual connect step.
+    """
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+    from services.linkedin_outreach.automation_service import LinkedInAuthError
+
+    slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
+    proxy_cfg = _parse_proxy(proxy_url)
+
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
+    active_js = fresh_js or jsessionid
+    jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
+
+    async with _BROWSER_SEM:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy_cfg,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--window-size=1280,800",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="Asia/Calcutta",
+                java_script_enabled=True,
+            )
+
+            injected_full_jar = False
+            if cookies_blob:
+                try:
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": c.get("domain") or ".linkedin.com",
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(
+                                (c.get("sameSite") or "no_restriction").lower(), "Lax"
+                            ),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                except Exception as e:
+                    logger.warning("Playwright like-post: jar inject failed: %s", e)
+
+            if not injected_full_jar:
+                await context.add_cookies([{
+                    "name": "li_at", "value": li_at, "domain": ".linkedin.com",
+                    "path": "/", "httpOnly": True, "secure": True, "sameSite": "None",
+                }])
+                if fresh_js:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID", "value": jsessionid_val,
+                        "domain": "www.linkedin.com", "path": "/",
+                        "httpOnly": False, "secure": True, "sameSite": "None",
+                    }])
+
+            page = await context.new_page()
+            try:
+                activity_url = f"https://www.linkedin.com/in/{slug}/recent-activity/all/"
+                try:
+                    await page.goto(activity_url, wait_until="domcontentloaded", timeout=45000)
+                    await page.wait_for_timeout(3000)
+                except PWTimeout:
+                    return {"ok": False, "skipped": True, "error": "activity_page_timeout"}
+
+                if "/login" in page.url or "/authwall" in page.url:
+                    raise LinkedInAuthError("Session expired — redirected to login (like-post)")
+
+                # Find the first feed update on the activity page. LinkedIn's
+                # selectors change frequently, so try several patterns.
+                # Returns:
+                #   { found: true, alreadyLiked: bool }  on success path
+                #   { found: false, reason: 'no_posts' | 'no_like_button' }
+                result = await page.evaluate(
+                    """
+                    () => {
+                        // Anchor on the post container — multiple known class hooks.
+                        const post = document.querySelector([
+                            'div.feed-shared-update-v2',
+                            'div[data-id^="urn:li:activity"]',
+                            'div.scaffold-finite-scroll__content article',
+                            'div.profile-creator-shared-feed-update__container',
+                        ].join(', '));
+                        if (!post) return { found: false, reason: 'no_posts' };
+
+                        // Find the Like / React button inside this post.
+                        // 1st-priority: explicit React Like button (aria-label contains 'Like').
+                        // 2nd: any reactions trigger button.
+                        const candidates = Array.from(post.querySelectorAll('button')).filter((b) => {
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                            const txt = (b.innerText || '').trim().toLowerCase();
+                            return (
+                                aria.includes('react like') ||
+                                aria === 'like' ||
+                                aria.startsWith('like ') ||
+                                (txt === 'like' && b.querySelector('svg, use'))
+                            );
+                        });
+                        const btn = candidates[0];
+                        if (!btn) return { found: false, reason: 'no_like_button' };
+
+                        // Detect already-liked: aria-pressed=true, or 'active' / 'reacted' class.
+                        const ariaPressed = (btn.getAttribute('aria-pressed') || '').toLowerCase();
+                        const cls = (btn.className || '').toLowerCase();
+                        const alreadyLiked = (
+                            ariaPressed === 'true' ||
+                            cls.includes('react-button--active') ||
+                            cls.includes('reactions-react-button--active')
+                        );
+
+                        if (alreadyLiked) return { found: true, alreadyLiked: true };
+
+                        // Scroll into view so the click registers, then click.
+                        btn.scrollIntoView({ block: 'center' });
+                        btn.click();
+                        return { found: true, alreadyLiked: false };
+                    }
+                    """,
+                )
+
+                if not result.get("found"):
+                    logger.info("like-post %s: no actionable post (%s) — skipping", slug, result.get("reason"))
+                    return {"ok": True, "skipped": True, "reason": result.get("reason")}
+
+                if result.get("alreadyLiked"):
+                    logger.info("like-post %s: latest post already liked — skipping", slug)
+                    return {"ok": True, "skipped": True, "reason": "already_liked"}
+
+                # Give LinkedIn's like POST a moment to land before we tear down.
+                await page.wait_for_timeout(1500)
+                logger.info("like-post %s: liked the latest post", slug)
+                return {"ok": True, "liked": True}
+
+            except LinkedInAuthError:
+                raise
+            except Exception as e:
+                logger.warning("Playwright like-post failed for %s: %s", slug, e)
+                return {"ok": False, "skipped": True, "error": str(e)}
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
