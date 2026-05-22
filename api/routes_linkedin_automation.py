@@ -560,6 +560,21 @@ async def create_campaign_from_order(
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first via the LinkedIn tab.")
 
+    # Re-login path: order already has a campaign. Don't create a duplicate.
+    # Flip the existing campaign back to running so the daemon picks it up
+    # with the fresh LinkedInToken cookies just written above.
+    if order.linkedin_campaign_id:
+        existing = db.query(LinkedInCampaign).filter_by(
+            id=order.linkedin_campaign_id, user_id=current_user.id,
+        ).first()
+        if existing:
+            if existing.status in ("auth_failed", "paused"):
+                existing.status = "running"
+            order.linkedin_connected_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return _campaign_to_response(existing)
+
     cand = db.query(Candidate).filter(Candidate.id == candidate_id, Candidate.user_id == current_user.id).first()
     if not cand:
         raise HTTPException(status_code=404, detail="Candidate profile not found")
