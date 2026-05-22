@@ -1066,22 +1066,44 @@ class LinkedInAutomationDaemon:
         from database.models import LinkedInConnectionRequest
 
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = datetime.utcnow() - timedelta(days=7)
 
-        # Count how many we've sent today for this campaign
+        sent_statuses = ["sent", "accepted", "followup_sent", "replied"]
+
         sent_today = (
             db.query(LinkedInConnectionRequest)
             .filter(
                 LinkedInConnectionRequest.campaign_id == campaign.id,
                 LinkedInConnectionRequest.sent_at >= today_start,
-                LinkedInConnectionRequest.status.in_(["sent", "accepted", "followup_sent", "replied"]),
+                LinkedInConnectionRequest.status.in_(sent_statuses),
+            )
+            .count()
+        )
+        sent_this_week = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == campaign.id,
+                LinkedInConnectionRequest.sent_at >= week_start,
+                LinkedInConnectionRequest.status.in_(sent_statuses),
             )
             .count()
         )
 
         remaining_today = campaign.daily_limit - sent_today
+        weekly_limit = campaign.weekly_invite_limit or 95
+        remaining_this_week = weekly_limit - sent_this_week
+        # The lower of the two budgets wins. Weekly cap is the LinkedIn-safety
+        # cap (~100/wk soft limit); daily cap is the pacing knob.
+        budget = min(remaining_today, remaining_this_week)
+        if budget <= 0 and remaining_today > 0:
+            logger.info(
+                "Campaign %d: weekly invite limit reached (%d/%d), pausing sends until window slides",
+                campaign.id, sent_this_week, weekly_limit,
+            )
 
         # Phase 1: send pending connection requests (IST business hours only)
-        if remaining_today > 0 and _is_ist_sending_window():
+        if budget > 0 and _is_ist_sending_window():
+            remaining_today = budget  # treat the lower bound as the effective cap
             pending = (
                 db.query(LinkedInConnectionRequest)
                 .filter(
@@ -1145,12 +1167,41 @@ class LinkedInAutomationDaemon:
                     if urn:
                         req.profile_urn = urn
 
+                # Skip if we already sent an invite to this profile under any
+                # campaign for this user — it'd be a duplicate request and is
+                # the most common cause of LinkedIn flagging an account.
+                if req.profile_url:
+                    already = (
+                        db.query(LinkedInConnectionRequest)
+                        .filter(
+                            LinkedInConnectionRequest.user_id == campaign.user_id,
+                            LinkedInConnectionRequest.profile_url == req.profile_url,
+                            LinkedInConnectionRequest.id != req.id,
+                            LinkedInConnectionRequest.status.in_(sent_statuses),
+                        )
+                        .first()
+                    )
+                    if already:
+                        logger.info(
+                            "Campaign %d: %s already has a pending/sent invite (request %d), skipping",
+                            campaign.id, req.profile_url, already.id,
+                        )
+                        req.status = "skipped_duplicate"
+                        req.error = "Invite already pending from a previous campaign"
+                        req.updated_at = datetime.utcnow()
+                        db.commit()
+                        continue
+
+                # send_with_note=False (default) → LinkedIn data shows higher
+                # acceptance without a note. The user can opt in per campaign.
+                note_to_send = (req.connection_note or "") if campaign.send_with_note else ""
+
                 # Send — pass profile_url so Playwright works even if URN is empty
                 try:
                     ok = await send_connection_request(
                         li_at, jsessionid,
                         req.profile_urn or "",
-                        req.connection_note or "",
+                        note_to_send,
                         session_id,
                         profile_url=req.profile_url,
                         cookies_blob=cookies_blob,

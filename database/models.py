@@ -409,7 +409,17 @@ class LinkedInCampaign(Base):
     connection_note = Column(Text)     # ≤300 chars, personalised per lead by AI
     followup_message = Column(Text)    # sent after connection accepted
     # Automation settings
-    daily_limit = Column(Integer, default=10)
+    daily_limit = Column(Integer, default=12)
+    # Acceptance rate is ~10pt higher without a connection note. Default off,
+    # surfaced in UI with a disclaimer if the user opts in.
+    send_with_note = Column(Boolean, nullable=False, default=False)
+    # Per-campaign rolling-7-day invite cap. Initialised to a random 92-97 at
+    # launch so we stay safely under LinkedIn's ~100/week soft limit without
+    # every campaign hitting the same round number.
+    weekly_invite_limit = Column(Integer, nullable=False, default=95)
+    # Optional: visit the lead's recent activity and like their latest post
+    # before sending the invite. Bumps acceptance for warm leads.
+    like_post_before_connect = Column(Boolean, nullable=False, default=False)
     # Aggregate stats (denormalised for fast reads)
     total_leads = Column(Integer, default=0)
     total_sent = Column(Integer, default=0)

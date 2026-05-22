@@ -361,6 +361,9 @@ class CampaignResponse(BaseModel):
     connection_note: Optional[str]
     followup_message: Optional[str]
     daily_limit: int
+    weekly_invite_limit: int
+    send_with_note: bool
+    like_post_before_connect: bool
     total_leads: int
     total_sent: int
     total_accepted: int
@@ -383,6 +386,9 @@ def _campaign_to_response(c: LinkedInCampaign) -> CampaignResponse:
         connection_note=c.connection_note,
         followup_message=c.followup_message,
         daily_limit=c.daily_limit,
+        weekly_invite_limit=c.weekly_invite_limit or 95,
+        send_with_note=bool(c.send_with_note),
+        like_post_before_connect=bool(c.like_post_before_connect),
         total_leads=c.total_leads,
         total_sent=c.total_sent,
         total_accepted=c.total_accepted,
@@ -524,7 +530,9 @@ async def create_campaign_from_profile(
 
 class CreateCampaignFromOrderRequest(BaseModel):
     order_id: int
-    daily_limit: int = Field(default=10, ge=1, le=25)
+    # ~12/day clears a 200-invite plan in 17 days (≈ 2.5 weeks) while staying
+    # comfortably under the weekly 92-97 cap. Bounded 1-25 for safety.
+    daily_limit: int = Field(default=12, ge=1, le=25)
 
 
 @router.post("/campaigns/from-order", response_model=CampaignResponse)
@@ -637,6 +645,13 @@ async def create_campaign_from_order(
         keyword_parts.extend([str(s) for s in skills[:5]])
     target_keywords = " ".join(keyword_parts).strip() or None
 
+    import random as _random
+    # Randomised weekly cap so concurrent campaigns don't all hit the same
+    # round number — looks more human and stays safely under LinkedIn's
+    # ~100/week soft limit. With ~12/day + 92-97/week cap, a user clears
+    # the 200-invite plan in ~16-18 days.
+    weekly_cap = _random.randint(92, 97)
+
     campaign = LinkedInCampaign(
         user_id=current_user.id,
         candidate_id=cand.id,
@@ -648,6 +663,7 @@ async def create_campaign_from_order(
         target_company_sizes=[],
         target_keywords=target_keywords,
         daily_limit=body.daily_limit,
+        weekly_invite_limit=weekly_cap,
         total_leads=len(leads_query),
         launched_at=datetime.utcnow(),
     )
@@ -818,6 +834,34 @@ async def update_campaign(
     c.connection_note = body.connection_note
     c.followup_message = body.followup_message
     c.daily_limit = body.daily_limit
+    c.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(c)
+    return _campaign_to_response(c)
+
+
+class UpdateCampaignSettingsRequest(BaseModel):
+    send_with_note: Optional[bool] = None
+    like_post_before_connect: Optional[bool] = None
+
+
+@router.patch("/campaigns/{campaign_id}/settings", response_model=CampaignResponse)
+async def update_campaign_settings(
+    campaign_id: int,
+    body: UpdateCampaignSettingsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Toggle operationally-safe settings without pausing the campaign.
+
+    These toggles only affect future sends; in-flight invites and the daemon's
+    pacing are unaffected, so there's no reason to force a pause/resume cycle.
+    """
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    if body.send_with_note is not None:
+        c.send_with_note = body.send_with_note
+    if body.like_post_before_connect is not None:
+        c.like_post_before_connect = body.like_post_before_connect
     c.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(c)
@@ -1426,6 +1470,250 @@ async def list_requests(
         )
         for r in requests
     ]
+
+
+# ── Inbox ──────────────────────────────────────────────────────────────────────
+# Lightweight inbox built on the data the daemon already collects (reply_text /
+# reply_received_at / accepted_at on each connection request). For deeper thread
+# history the user can click through to LinkedIn; replies sent from here go
+# through the same Voyager + Playwright-fallback pipeline as automated
+# follow-ups, so they look identical from LinkedIn's perspective.
+
+class InboxConversation(BaseModel):
+    request_id: int
+    name: str
+    headline: Optional[str]
+    company: Optional[str]
+    profile_url: Optional[str]
+    profile_image_url: Optional[str]
+    status: str  # accepted | followup_sent | replied
+    accepted_at: Optional[str]
+    followup_sent_at: Optional[str]
+    followup_message: Optional[str]
+    reply_text: Optional[str]
+    reply_sentiment: Optional[str]
+    reply_received_at: Optional[str]
+    last_activity_at: Optional[str]  # max of the above timestamps — for sort
+
+
+class InboxMessage(BaseModel):
+    direction: str   # "out" | "in"
+    text: str
+    sent_at: Optional[str]
+
+
+class InboxThreadResponse(BaseModel):
+    request_id: int
+    name: str
+    profile_url: Optional[str]
+    messages: list[InboxMessage]
+
+
+class InboxReplyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+
+
+def _conversation_from_request(r: LinkedInConnectionRequest) -> InboxConversation:
+    last = max(
+        [t for t in (r.reply_received_at, r.followup_sent_at, r.accepted_at) if t],
+        default=None,
+    )
+    return InboxConversation(
+        request_id=r.id,
+        name=r.name,
+        headline=r.headline,
+        company=r.company,
+        profile_url=r.profile_url,
+        profile_image_url=r.profile_image_url,
+        status=r.status,
+        accepted_at=r.accepted_at.isoformat() if r.accepted_at else None,
+        followup_sent_at=r.followup_sent_at.isoformat() if r.followup_sent_at else None,
+        followup_message=r.followup_message,
+        reply_text=r.reply_text,
+        reply_sentiment=r.reply_sentiment,
+        reply_received_at=r.reply_received_at.isoformat() if r.reply_received_at else None,
+        last_activity_at=last.isoformat() if last else None,
+    )
+
+
+@router.get("/campaigns/{campaign_id}/inbox", response_model=list[InboxConversation])
+async def inbox_list(
+    campaign_id: int,
+    only_replies: bool = False,
+    limit: int = 200,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List inbox conversations — accepted, followed-up, or replied.
+
+    Default returns everyone who's accepted (those are the people the user can
+    actually message). Set only_replies=true to filter to people who've replied.
+    """
+    _get_campaign_or_404(campaign_id, current_user.id, db)
+
+    statuses = ["replied"] if only_replies else ["accepted", "followup_sent", "replied"]
+
+    # Sort: replies first (newest), then followup_sent, then accepted (newest accept).
+    # Use a CASE for status priority + the relevant timestamp for in-bucket ordering.
+    from sqlalchemy import case as sa_case, desc, func as sa_func
+    status_priority = sa_case(
+        (LinkedInConnectionRequest.status == "replied", 0),
+        (LinkedInConnectionRequest.status == "followup_sent", 1),
+        else_=2,
+    )
+    activity_ts = sa_func.coalesce(
+        LinkedInConnectionRequest.reply_received_at,
+        LinkedInConnectionRequest.followup_sent_at,
+        LinkedInConnectionRequest.accepted_at,
+    )
+
+    rows = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+            LinkedInConnectionRequest.status.in_(statuses),
+        )
+        .order_by(status_priority.asc(), desc(activity_ts))
+        .limit(limit)
+        .all()
+    )
+    return [_conversation_from_request(r) for r in rows]
+
+
+@router.get("/campaigns/{campaign_id}/inbox/{request_id}", response_model=InboxThreadResponse)
+async def inbox_thread(
+    campaign_id: int,
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the message thread we know about for one connection request.
+
+    Sources, in order: the original connection note, the AI follow-up message,
+    and the latest captured reply. For full LinkedIn-side history the user
+    clicks through to the profile — fetching full conversation history
+    through the proxy is unreliable enough that we don't surface it here.
+    """
+    _get_campaign_or_404(campaign_id, current_user.id, db)
+    r = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == request_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found in this campaign")
+
+    msgs: list[InboxMessage] = []
+    if r.connection_note:
+        msgs.append(InboxMessage(
+            direction="out", text=r.connection_note,
+            sent_at=r.sent_at.isoformat() if r.sent_at else None,
+        ))
+    if r.followup_message and r.followup_sent_at:
+        msgs.append(InboxMessage(
+            direction="out", text=r.followup_message,
+            sent_at=r.followup_sent_at.isoformat(),
+        ))
+    if r.reply_text:
+        msgs.append(InboxMessage(
+            direction="in", text=r.reply_text,
+            sent_at=r.reply_received_at.isoformat() if r.reply_received_at else None,
+        ))
+
+    return InboxThreadResponse(
+        request_id=r.id, name=r.name, profile_url=r.profile_url, messages=msgs,
+    )
+
+
+@router.post("/campaigns/{campaign_id}/inbox/{request_id}/reply")
+async def inbox_reply(
+    campaign_id: int,
+    request_id: int,
+    body: InboxReplyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a manual reply on top of the daemon's automated thread.
+
+    Goes through the same Voyager + Playwright fallback used for follow-ups
+    so it doesn't tip LinkedIn off as a separate sender. We append the sent
+    message to the request's followup_message field (last-write-wins) and
+    bump followup_sent_at for inbox ordering.
+    """
+    from services.linkedin_outreach.automation_service import send_message, LinkedInAuthError
+    from services.linkedin_outreach.crypto import decrypt, decrypt_second, decrypt_single
+
+    campaign = _get_campaign_or_404(campaign_id, current_user.id, db)
+    r = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == request_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found")
+    # Replies only make sense once they've accepted — LinkedIn rejects DMs
+    # to non-1st-degree connections anyway.
+    if r.status not in ("accepted", "followup_sent", "replied"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot send reply yet — connection status is '{r.status}'",
+        )
+
+    token = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token:
+        raise HTTPException(status_code=400, detail="LinkedIn not connected")
+
+    try:
+        li_at = decrypt(token.li_at_enc, token.nonce)
+        jsessionid = decrypt_second(token.jsessionid_enc, token.nonce)
+    except Exception:
+        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed — reconnect")
+
+    cookies_blob = None
+    if getattr(token, "cookies_blob_enc", None) and getattr(token, "cookies_blob_nonce", None):
+        try:
+            cookies_blob = decrypt_single(token.cookies_blob_enc, token.cookies_blob_nonce)
+        except Exception:
+            cookies_blob = None
+
+    try:
+        ok = await send_message(
+            li_at, jsessionid,
+            r.profile_urn or "",
+            body.text,
+            session_id=f"user_{current_user.id}",
+            profile_url=r.profile_url,
+            cookies_blob=cookies_blob,
+        )
+    except LinkedInAuthError:
+        campaign.status = "auth_failed"
+        campaign.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect first")
+
+    if not ok:
+        raise HTTPException(status_code=502, detail="LinkedIn rejected the message. Try again in a minute.")
+
+    # Treat manual reply as the latest activity on this thread.
+    r.followup_message = body.text
+    r.followup_sent_at = datetime.utcnow()
+    if r.status == "accepted":
+        r.status = "followup_sent"
+    r.updated_at = datetime.utcnow()
+
+    # Campaign-level counter
+    campaign.total_followups_sent = (campaign.total_followups_sent or 0) + 1
+    campaign.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(r)
+    return {"ok": True, "sent_at": r.followup_sent_at.isoformat()}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
