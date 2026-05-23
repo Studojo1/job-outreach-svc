@@ -17,12 +17,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def _httpx_proxy(proxy_url: str | None) -> dict | None:
-    """Return httpx proxy dict for a given proxy URL (or settings fallback)."""
+def _httpx_proxy(proxy_url: str | None, session_id: str | None = None) -> dict | None:
+    """Return httpx proxy dict. When session_id is set, inject Evomi sticky
+    modifier into the password — keeps the user on one residential IP across
+    the call chain. See automation_service.apply_sticky_session() for why.
+    """
     from core.config import settings
+    from services.linkedin_outreach.automation_service import apply_sticky_session
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
+    url = apply_sticky_session(url, session_id)
     # Evomi host:port:user:pass format
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
         without_scheme = url[len("http://"):]
@@ -37,15 +42,16 @@ def _httpx_proxy(proxy_url: str | None) -> dict | None:
     return {"http://": url, "https://": url}
 
 
-async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None:
+async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None, session_id: str | None = None) -> str | None:
     """Obtain a fresh JSESSIONID for the current proxy IP via a lightweight httpx request.
 
-    We hit /robots.txt (no auth needed, never triggers bot detection) and then
-    the authenticated /feed/ to get LinkedIn to issue a JSESSIONID for this IP.
-    The JSESSIONID is IP-bound; injecting a fresh one prevents the redirect-loop
-    that occurs when a stale (different-IP) JSESSIONID is sent to a new proxy IP.
+    The JSESSIONID we get back is bound to whatever proxy IP this httpx call
+    landed on. When session_id is passed, we hit the SAME sticky-session IP
+    that downstream Playwright calls will use, so JSESSIONID and request IP
+    agree. Without it, JSESSIONID is bound to one IP and the actual operation
+    uses a different IP → LinkedIn rejects with redirect/999.
     """
-    proxies = _httpx_proxy(proxy_url)
+    proxies = _httpx_proxy(proxy_url, session_id)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -94,12 +100,17 @@ async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None
 _BROWSER_SEM = asyncio.Semaphore(3)
 
 
-def _parse_proxy(proxy_url: str | None) -> dict | None:
-    """Convert proxy URL to Playwright proxy dict. Handles standard and Evomi generator formats."""
+def _parse_proxy(proxy_url: str | None, session_id: str | None = None) -> dict | None:
+    """Convert proxy URL to Playwright proxy dict. Handles standard and Evomi
+    generator formats. When session_id is set, injects Evomi sticky modifier
+    into the password so the browser pins to one residential IP for the call.
+    """
     from core.config import settings
+    from services.linkedin_outreach.automation_service import apply_sticky_session
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
+    url = apply_sticky_session(url, session_id)
 
     # Evomi generator emits host:port:user:pass — convert to standard http://user:pass@host:port
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
@@ -284,6 +295,7 @@ async def playwright_send_invitation(
     proxy_url: str | None = None,
     existing_urn: str | None = None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Send a LinkedIn connection request by clicking the Connect button in a headless browser.
 
@@ -302,12 +314,14 @@ async def playwright_send_invitation(
     if not slug:
         return {"ok": False, "error": "Invalid profile URL"}
 
-    proxy = _parse_proxy(proxy_url)
+    proxy = _parse_proxy(proxy_url, session_id)
 
     # Prime the proxy IP: make an httpx request first so LinkedIn issues a fresh
     # JSESSIONID for the current proxy IP. Injecting a stale JSESSIONID (from a
-    # different IP) into the browser causes LinkedIn to redirect-loop.
-    fresh_jsessionid = await _get_fresh_jsessionid(li_at, proxy_url)
+    # different IP) into the browser causes LinkedIn to redirect-loop. Pass the
+    # session_id so the JSESSIONID-fetch lands on the SAME sticky IP the
+    # browser will use.
+    fresh_jsessionid = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
     effective_jsessionid = fresh_jsessionid or jsessionid
     jsessionid_val = effective_jsessionid if effective_jsessionid.startswith('"') else f'"{effective_jsessionid}"'
     logger.info("Playwright: %s — using %s JSESSIONID", slug, "fresh" if fresh_jsessionid else "stored")
@@ -648,6 +662,7 @@ async def playwright_send_message(
     message: str,
     proxy_url: str | None = None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Send a LinkedIn DM to a 1st-degree connection via Playwright.
 
@@ -661,10 +676,10 @@ async def playwright_send_message(
     from services.linkedin_outreach.automation_service import LinkedInAuthError
 
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
-    proxy_cfg = _parse_proxy(proxy_url)
+    proxy_cfg = _parse_proxy(proxy_url, session_id)
 
     # Prime the proxy IP before acquiring the browser semaphore (pure network I/O)
-    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
     active_js = fresh_js or jsessionid
     jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
     logger.info("Playwright msg: %s — using %s JSESSIONID", slug, "fresh" if fresh_js else "stored")
@@ -871,6 +886,7 @@ async def playwright_like_recent_post(
     profile_url: str,
     proxy_url: str | None = None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Visit a profile's recent activity and like their most recent post.
 
@@ -888,9 +904,9 @@ async def playwright_like_recent_post(
     from services.linkedin_outreach.automation_service import LinkedInAuthError
 
     slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
-    proxy_cfg = _parse_proxy(proxy_url)
+    proxy_cfg = _parse_proxy(proxy_url, session_id)
 
-    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url)
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
     active_js = fresh_js or jsessionid
     jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
 

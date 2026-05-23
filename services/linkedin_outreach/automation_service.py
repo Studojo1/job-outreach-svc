@@ -21,20 +21,51 @@ def _is_ist_sending_window() -> bool:
     return 9 <= hour < 18
 
 
+def apply_sticky_session(proxy_url: str, session_id: str | None) -> str:
+    """Inject Evomi sticky-session modifier into the password portion of the URL.
+
+    Evomi's URL convention is `user:password_modifier1_modifier2@host:port` —
+    targeting modifiers (country, city) go in the *password* with `_key-value`
+    suffixes. Sticky sessions follow the same pattern with `_session-XXX`.
+
+    Empirically tested 2026-05-23: `_session-{token}` pins a residential IP
+    for the lifetime of the session token AND respects the preceding
+    `_country-IN_city-bengaluru` geo modifiers (got `205.254.184.6` in
+    Bengaluru across multiple requests with the same token).
+
+    Why this matters: without sticky, every httpx call gets a fresh Evomi
+    IP. LinkedIn sees the "same user" jumping across dozens of residential
+    IPs in minutes, which trips bot detection (HTTP 999 / login redirects).
+    With sticky, one user = one IP for ~30min, looks like a real session.
+    """
+    if not session_id or not proxy_url:
+        return proxy_url
+
+    import re as _re
+    m = _re.match(r"^(http://[^:]+):([^@]+)@(.+)$", proxy_url)
+    if not m:
+        return proxy_url
+
+    scheme_user, password, host_port = m.group(1), m.group(2), m.group(3)
+    # Don't double-append if a session marker is already in the password
+    if "_session-" in password:
+        return proxy_url
+    return f"{scheme_user}:{password}_session-{session_id}@{host_port}"
+
+
 def _proxy(session_id: str | None = None) -> dict:
     """Build httpx proxy kwarg for Evomi residential proxy.
 
-    Evomi sticky-session URL variants fail with 407 on HTTPS CONNECT tunneling
-    (LinkedIn). Plain credential URL works correctly and gives a fresh
-    residential IP per request. Rate-limiting (90-240s between sends) is the
-    primary anti-ban mechanism, not IP consistency. session_id is kept for
-    API compatibility but is not used.
+    Uses sticky-session URL when session_id is provided — gives this user
+    a consistent residential IP for the duration of the proxy session (we
+    use `proxy_session_id` from the LinkedInToken row, which is stable per
+    user-session). Falls back to rotating IP when no session_id.
     """
     from core.config import settings
     base_url = (settings.LINKEDIN_PROXY_URL or "").strip()
     if not base_url:
         return {}
-    return {"proxy": base_url}
+    return {"proxy": apply_sticky_session(base_url, session_id)}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
 MAX_DAILY_REQUESTS = 25
@@ -188,7 +219,7 @@ async def send_connection_request(
     """
     # If we have no URN, skip Voyager attempts — they require profileId.
     if not profile_urn and profile_url:
-        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob)
+        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob, session_id=session_id)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -320,7 +351,7 @@ async def send_connection_request(
     # Playwright fallback: click the Connect button in a real browser
     # Prefer the real profile_url if caller passed it, else reconstruct from URN.
     target_url = profile_url or f"https://www.linkedin.com/in/{profile_urn}/"
-    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob)
+    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob, session_id=session_id)
 
 
 async def _send_via_playwright(
@@ -330,6 +361,7 @@ async def _send_via_playwright(
     note: str,
     existing_urn: str | None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> bool:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
@@ -343,6 +375,7 @@ async def _send_via_playwright(
             proxy_url=proxy_url,
             existing_urn=existing_urn,
             cookies_blob=cookies_blob,
+            session_id=session_id,
         )
         if result.get("ok"):
             logger.info("Playwright send succeeded for %s", profile_url)
@@ -418,6 +451,7 @@ async def send_message(
             message=message,
             proxy_url=proxy,
             cookies_blob=cookies_blob,
+            session_id=session_id,
         )
         if result.get("ok"):
             logger.info("send_message Playwright succeeded for %s", profile_url)
@@ -1231,6 +1265,7 @@ class LinkedInAutomationDaemon:
                         like_res = await playwright_like_recent_post(
                             li_at, jsessionid, req.profile_url,
                             proxy_url=_proxy_url, cookies_blob=cookies_blob,
+                            session_id=session_id,
                         )
                         logger.info(
                             "Campaign %d like-post for %s: %s",

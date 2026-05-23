@@ -49,7 +49,10 @@ def _store_token(
     import secrets as _secrets
     from services.linkedin_outreach.crypto import encrypt as encrypt_single
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
-    proxy_session_id = _secrets.token_hex(8)
+    # Evomi caps sticky-session tokens at ~12 chars before returning 400 on
+    # the proxy CONNECT. token_hex(6) = 12 hex chars, well within the limit
+    # and still 48 bits of entropy (plenty of uniqueness per user).
+    proxy_session_id = _secrets.token_hex(6)
 
     cookies_blob_enc = None
     cookies_blob_nonce = None
