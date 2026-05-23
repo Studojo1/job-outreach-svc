@@ -1234,19 +1234,23 @@ async def send_one_now(
     if not req:
         raise HTTPException(status_code=404, detail="Could not resolve any pending leads — try again later")
 
-    # Resolve URN (best-effort — Playwright fallback works without it)
+    # Resolve URN (best-effort — Playwright fallback works without it).
+    # Manual sends do NOT flip the campaign to auth_failed on a single
+    # LinkedInAuthError. LinkedIn returns HTTP 999 / login redirects on
+    # transient rate-limits + IP blocks too, and killing the campaign
+    # permanently on one click is too aggressive. The daemon handles real
+    # auth death across many ticks; one-off manual sends just report back.
     if not req.profile_urn:
         try:
             urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id, cookies_blob)
-        except LinkedInAuthError:
-            c.status = "auth_failed"
-            c.updated_at = datetime.utcnow()
-            db.commit()
-            raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+        except LinkedInAuthError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
+            )
         if urn:
             req.profile_urn = urn
 
-    # Send — passes profile_url so Playwright fallback works even with no URN
     try:
         ok = await send_connection_request(
             li_at, jsessionid,
@@ -1256,11 +1260,11 @@ async def send_one_now(
             profile_url=req.profile_url,
             cookies_blob=cookies_blob,
         )
-    except LinkedInAuthError:
-        c.status = "auth_failed"
-        c.updated_at = datetime.utcnow()
-        db.commit()
-        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+    except LinkedInAuthError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
+        )
 
     if ok:
         req.status = "sent"

@@ -44,6 +44,13 @@ MAX_GAP_SECONDS = 240
 
 # Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
 _last_accept_check: dict[int, float] = {}
+# Consecutive auth-failure count per campaign. Reset on any success.
+# LinkedIn returns 999 / login redirects for both transient rate-limits AND
+# genuinely-expired sessions, and the bootstrap pass can't distinguish them.
+# Tolerate up to AUTH_FAIL_THRESHOLD consecutive failures before flipping the
+# campaign to auth_failed, so a brief rate-limit doesn't permanently kill it.
+_auth_fail_count: dict[int, int] = {}
+AUTH_FAIL_THRESHOLD = 3
 _last_reply_check: dict[int, float] = {}
 _ACCEPT_INTERVAL = 300  # 5 minutes
 _REPLY_INTERVAL = 7200    # 2 hours
@@ -1159,7 +1166,21 @@ class LinkedInAutomationDaemon:
                     try:
                         urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id, cookies_blob)
                     except LinkedInAuthError:
-                        logger.warning("Campaign %d: auth failed during URN resolve, marking auth_failed", campaign.id)
+                        # LinkedIn returns auth-looking errors for transient
+                        # rate-limits too. Tolerate AUTH_FAIL_THRESHOLD strikes
+                        # before marking the campaign dead.
+                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                        cnt = _auth_fail_count[campaign.id]
+                        if cnt < AUTH_FAIL_THRESHOLD:
+                            logger.warning(
+                                "Campaign %d: auth failure %d/%d during URN resolve — will retry next tick",
+                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                            )
+                            return  # break out of this tick, try again next time
+                        logger.warning(
+                            "Campaign %d: %d consecutive auth failures, marking auth_failed",
+                            campaign.id, cnt,
+                        )
                         campaign.status = "auth_failed"
                         campaign.updated_at = datetime.utcnow()
                         db.commit()
@@ -1238,7 +1259,18 @@ class LinkedInAutomationDaemon:
                         cookies_blob=cookies_blob,
                     )
                 except LinkedInAuthError:
-                    logger.warning("Campaign %d: LinkedIn session expired, marking auth_failed", campaign.id)
+                    _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                    cnt = _auth_fail_count[campaign.id]
+                    if cnt < AUTH_FAIL_THRESHOLD:
+                        logger.warning(
+                            "Campaign %d: auth failure %d/%d on send — will retry next tick",
+                            campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                        )
+                        return
+                    logger.warning(
+                        "Campaign %d: %d consecutive auth failures, marking auth_failed",
+                        campaign.id, cnt,
+                    )
                     campaign.status = "auth_failed"
                     campaign.updated_at = datetime.utcnow()
                     db.commit()
@@ -1251,6 +1283,8 @@ class LinkedInAutomationDaemon:
                     req.status = "sent"
                     req.sent_at = datetime.utcnow()
                     campaign.total_sent += 1
+                    # Reset the consecutive-failure counter on any success.
+                    _auth_fail_count.pop(campaign.id, None)
                 else:
                     req.status = "error"
                     req.error = "Send failed"
