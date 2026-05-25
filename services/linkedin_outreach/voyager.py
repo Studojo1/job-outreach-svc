@@ -173,6 +173,18 @@ async def resolve_linkedin_url(
     keywords = f"{first_name} {company}".strip()
     try:
         results = await search_people(li_at, jsessionid, keywords, count=5, proxy_url=proxy_url)
+    except ValueError as e:
+        # search_people raises ValueError on 401/403 ("LinkedIn session
+        # expired") and 429 ("rate limited"). Both signal the daemon should
+        # back off — surface as LinkedInAuthError so the caller's
+        # auth-failure threshold ticks instead of treating it as a missing
+        # profile and retrying immediately.
+        msg = str(e)
+        if "session expired" in msg.lower() or "rate limited" in msg.lower():
+            from services.linkedin_outreach.automation_service import LinkedInAuthError
+            raise LinkedInAuthError(msg) from e
+        logger.warning("Voyager resolve failed for '%s' at '%s': %s", first_name, company, e)
+        return None
     except Exception as e:
         logger.warning("Voyager resolve failed for '%s' at '%s': %s", first_name, company, e)
         return None

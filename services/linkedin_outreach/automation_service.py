@@ -1145,11 +1145,17 @@ class LinkedInAutomationDaemon:
         # Phase 1: send pending connection requests (IST business hours only)
         if budget > 0 and _is_ist_sending_window():
             remaining_today = budget  # treat the lower bound as the effective cap
+            # Only pull "pending" — NOT "error". Previously errors were re-
+            # queued every tick, creating a hot loop on unresolvable leads
+            # (one staging user burned ~200 MB Evomi bandwidth in 4 hours
+            # retrying the same 5 names). Errors now sit until the user
+            # explicitly clicks "Retry failed" (existing /retry-errors
+            # endpoint flips them back to pending).
             pending = (
                 db.query(LinkedInConnectionRequest)
                 .filter(
                     LinkedInConnectionRequest.campaign_id == campaign.id,
-                    LinkedInConnectionRequest.status.in_(["pending", "error"]),
+                    LinkedInConnectionRequest.status == "pending",
                 )
                 .limit(min(remaining_today, 5))  # max 5 per daemon tick
                 .all()
@@ -1187,6 +1193,30 @@ class LinkedInAutomationDaemon:
                             req.updated_at = datetime.utcnow()
                             db.commit()
                             continue
+                    except LinkedInAuthError:
+                        # Voyager rejected our session during URL resolve.
+                        # Count this toward the auth-failure threshold so we
+                        # stop hammering the proxy after a few consecutive
+                        # failures (previous handler caught it as a generic
+                        # Exception, marking one lead error and continuing
+                        # the loop — burned ~200 MB Evomi bandwidth in a
+                        # single morning before we noticed).
+                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                        cnt = _auth_fail_count[campaign.id]
+                        if cnt < AUTH_FAIL_THRESHOLD:
+                            logger.warning(
+                                "Campaign %d: auth failure %d/%d during resolve — will retry next tick",
+                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                            )
+                            return  # exit tick — let it cool down for 60s
+                        logger.warning(
+                            "Campaign %d: %d consecutive auth failures (during resolve), marking auth_failed",
+                            campaign.id, cnt,
+                        )
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        return
                     except Exception as resolve_err:
                         logger.warning("Campaign %d: Voyager resolve error for '%s': %s", campaign.id, req.name, resolve_err)
                         req.status = "error"
