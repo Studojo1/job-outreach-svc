@@ -875,6 +875,10 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
     lead_company = lead.company or ""
     lead_title = lead.title or ""
 
+    linkedin_url = (candidate.flex_notes or {}).get("linkedin_url", "")
+    signoff_t2 = f"{first_name_candidate}\n{linkedin_url}" if linkedin_url else first_name_candidate
+    signoff_t3 = f"{first_name_candidate}\n{linkedin_url}" if linkedin_url else first_name_candidate
+
     schema = {
         "type": "object",
         "properties": {"body": {"type": "string"}},
@@ -909,7 +913,7 @@ Sentence 3: Use this exact sentence: "Would you know if there's an opening, or w
 
 Format:
 - Start with "Hi {lead_first},"
-- Sign off: "{first_name_candidate}" on its own line, nothing else
+- Sign off: "{signoff_t2}" — output this exactly, on its own line, nothing else
 - Body total under 55 words"""
 
     else:
@@ -925,7 +929,7 @@ Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door op
 
 Format:
 - Start with "Hi {lead_first},"
-- Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
+- Sign off: "{signoff_t3}" — output this exactly, on its own line, no "Best," or "Take care,"
 - Body total under 30 words
 
 Good example of tone:
