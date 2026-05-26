@@ -43,6 +43,8 @@ class OrderUpdateRequest(BaseModel):
     campaign_id: Optional[int] = None
     email_account_id: Optional[int] = None
     leads_collected: Optional[int] = None
+    linkedin_campaign_id: Optional[int] = None
+    linkedin_connected: Optional[bool] = None
     log_entry: Optional[str] = None
 
 
@@ -176,6 +178,10 @@ async def update_order(
         order.email_account_id = request.email_account_id
     if request.leads_collected is not None:
         order.leads_collected = request.leads_collected
+    if request.linkedin_campaign_id is not None:
+        order.linkedin_campaign_id = request.linkedin_campaign_id
+    if request.linkedin_connected:
+        order.linkedin_connected_at = datetime.utcnow()
 
     if request.log_entry:
         _append_log(order, request.log_entry)
@@ -228,23 +234,32 @@ async def resume_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     status = order.status
+    plan_type = getattr(order, "plan_type", "email") or "email"
+
     if status in ("created", "leads_generating"):
         if order.candidate_id:
             redirect = "/leads/discovery"
         else:
             redirect = "/onboarding/upload"
     elif status == "leads_ready":
-        # JIT: skip enrichment, go to campaign setup (payment page)
         redirect = "/leads/results"
     elif status in ("enriching", "enrichment_complete"):
-        # Legacy orders still in enrichment states — auto-advance to campaign setup
         order.status = "campaign_setup"
         order.updated_at = datetime.utcnow()
         _append_log(order, f"Auto-corrected: {status} → campaign_setup (JIT enrichment)")
         db.commit()
-        redirect = "/connect/gmail"
-    elif status in ("campaign_setup", "email_connected"):
-        redirect = "/campaign/setup"
+        redirect = "/connect/gmail" if plan_type != "linkedin" else "/connect/linkedin"
+    elif status == "campaign_setup":
+        # Route to correct connect page based on plan channel
+        if plan_type == "linkedin":
+            redirect = "/connect/linkedin"
+        else:
+            redirect = "/campaign/setup"
+    elif status == "email_connected":
+        if plan_type == "both" and not getattr(order, "linkedin_connected_at", None):
+            redirect = "/connect/linkedin"
+        else:
+            redirect = "/campaign/setup"
     elif status in ("campaign_running", "completed"):
         redirect = "/campaign/dashboard"
     else:
@@ -300,9 +315,17 @@ def _serialize_order(order: OutreachOrder) -> dict:
         "order": {
             "id": order.id,
             "status": order.status,
+            "plan_type": getattr(order, "plan_type", "email") or "email",
             "candidate_id": order.candidate_id,
             "campaign_id": order.campaign_id,
             "email_account_id": order.email_account_id,
+            "linkedin_campaign_id": getattr(order, "linkedin_campaign_id", None),
+            "linkedin_connected_at": (
+                order.linkedin_connected_at.isoformat()
+                if getattr(order, "linkedin_connected_at", None) else None
+            ),
+            "linkedin_credits_reserved": getattr(order, "linkedin_credits_reserved", 0),
+            "linkedin_credits_used": getattr(order, "linkedin_credits_used", 0),
             "leads_collected": order.leads_collected,
             "leads_target": order.leads_target,
             "action_log": order.action_log or [],

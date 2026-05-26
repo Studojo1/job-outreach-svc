@@ -13,9 +13,12 @@ from pydantic import BaseModel
 from typing import Optional
 
 from database.session import get_db
-from database.models import User, Coupon, PaymentOrder, UserCredit
+from database.models import User, Coupon, PaymentOrder, UserCredit, OutreachOrder
 from core.config import settings
-from core.pricing import get_tier_pricing, get_dodo_product_id, apply_coupon, TIERS, TEST_TIERS
+from core.pricing import (
+    get_plan, get_plans, get_tier_pricing, get_dodo_product_id, apply_coupon,
+    TIERS, TEST_TIERS,
+)
 from core.geo import detect_country, is_india
 from api.dependencies import get_current_user
 from core.analytics import capture
@@ -35,30 +38,33 @@ def _get_razorpay_client():
 
 @router.get("/pricing")
 async def get_pricing(req: Request):
-    """Return tier pricing — currency auto-detected from geo (India → INR, else USD)."""
+    """Return all plan pricing — currency auto-detected from geo (India → INR, else USD)."""
     currency = "INR" if is_india(req) else "USD"
+    sym = "₹" if currency == "INR" else "$"
 
-    source = TEST_TIERS if settings.RAZORPAY_TEST_MODE else TIERS
+    plans = get_plans(settings.RAZORPAY_TEST_MODE)
     result = []
-    for tier_val, tp in source.items():
-        if tier_val == 5:
-            continue  # free test tier not shown in pricing
-        amount = tp.price_inr if currency == "INR" else tp.price_usd
+    for p in plans:
+        amount = p.price_inr if currency == "INR" else p.price_usd
         result.append({
-            "tier": tp.tier,
-            "label": tp.label,
+            "plan_id": p.plan_id,
+            "plan_type": p.plan_type,
+            "label": p.label,
+            "email_credits": p.email_credits,
+            "linkedin_credits": p.linkedin_credits,
             "amount_cents": amount,
             "currency": currency,
-            "display_price": f"{'₹' if currency == 'INR' else '$'}{amount / 100:.0f}",
+            "display_price": f"{sym}{amount / 100:.0f}",
         })
-    return {"tiers": result, "test_mode": settings.RAZORPAY_TEST_MODE, "currency": currency}
+    return {"plans": result, "test_mode": settings.RAZORPAY_TEST_MODE, "currency": currency}
 
 
 # ── Coupon Validation ─────────────────────────────────────────────────────────
 
 class CouponCheckRequest(BaseModel):
     code: str
-    tier: int
+    tier: Optional[int] = None
+    plan_id: Optional[str] = None
     currency: str = "USD"
 
 
@@ -85,8 +91,16 @@ async def validate_coupon(
     if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
         raise HTTPException(status_code=400, detail="Coupon usage limit reached")
 
-    pricing = get_tier_pricing(request.tier, settings.RAZORPAY_TEST_MODE)
-    original = pricing.price_inr if request.currency.upper() == "INR" else pricing.price_usd
+    # Support both plan_id (new) and tier (legacy)
+    if request.plan_id:
+        plan = get_plan(request.plan_id, settings.RAZORPAY_TEST_MODE)
+        original = plan.price_inr if request.currency.upper() == "INR" else plan.price_usd
+    elif request.tier:
+        pricing = get_tier_pricing(request.tier, settings.RAZORPAY_TEST_MODE)
+        original = pricing.price_inr if request.currency.upper() == "INR" else pricing.price_usd
+    else:
+        raise HTTPException(status_code=400, detail="plan_id or tier required")
+
     discounted = apply_coupon(original, coupon.discount_type, float(coupon.discount_value))
 
     return {
@@ -104,7 +118,8 @@ async def validate_coupon(
 # ── Create Payment Order (geo-routed) ────────────────────────────────────────
 
 class CreateOrderRequest(BaseModel):
-    tier: int
+    tier: Optional[int] = None        # legacy email-only path
+    plan_id: Optional[str] = None     # new path: "email_200", "linkedin_350", "both_500", etc.
     currency: str = "USD"
     coupon_code: Optional[str] = None
 
@@ -117,21 +132,36 @@ async def create_order(
     db: Session = Depends(get_db),
 ):
     """Create a payment order — routes to Razorpay (India) or Dodo (international)."""
-    if body.tier == 5:
-        raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
+    # Resolve plan from plan_id (new) or tier (legacy email-only)
+    if body.plan_id:
+        if body.plan_id == "email_5":
+            raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
+        plan = get_plan(body.plan_id, settings.RAZORPAY_TEST_MODE)
+        resolved_plan_id = body.plan_id
+        resolved_tier = plan.email_credits if plan.email_credits else plan.linkedin_credits
+    elif body.tier:
+        if body.tier == 5:
+            raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
+        # Legacy: email-only
+        from core.pricing import get_tier_pricing as _gtp
+        _legacy = _gtp(body.tier, settings.RAZORPAY_TEST_MODE)
+        # Map to a plan_id
+        plan = get_plan(f"email_{body.tier}", settings.RAZORPAY_TEST_MODE)
+        resolved_plan_id = plan.plan_id
+        resolved_tier = body.tier
+    else:
+        raise HTTPException(status_code=400, detail="plan_id or tier required")
 
     # Detect geo for gateway routing
     country = detect_country(req)
     use_razorpay = is_india(req)
 
-    # Determine currency and amount based on gateway
-    pricing = get_tier_pricing(body.tier, settings.RAZORPAY_TEST_MODE)
     if use_razorpay:
         currency = "INR"
-        amount = pricing.price_inr
+        amount = plan.price_inr
     else:
         currency = "USD"
-        amount = pricing.price_usd
+        amount = plan.price_usd
 
     # Apply coupon if provided
     coupon_id = None
@@ -154,14 +184,12 @@ async def create_order(
                     "coupon_code": body.coupon_code.strip().upper(),
                     "discount_type": coupon.discount_type,
                     "discount_value": float(coupon.discount_value),
-                    "tier": body.tier,
+                    "plan_id": resolved_plan_id,
                 })
 
     if amount <= 0:
         # Fully discounted — grant credits directly
         idem_key = str(uuid.uuid4())
-        # Funnel: free coupon path skips the gateway, so fire both
-        # payment_page_reached and payment_made and link the order.
         from services.stage_tracking import safe_mark_stage, get_or_create_active_order
         try:
             outreach_order = get_or_create_active_order(db, str(current_user.id))
@@ -173,23 +201,28 @@ async def create_order(
             provider="coupon",
             amount_cents=0,
             currency=currency,
-            tier=body.tier,
+            tier=resolved_tier,
+            plan_id=resolved_plan_id,
             coupon_id=coupon_id,
             outreach_order_id=outreach_order_id,
             geo_country=country,
             status="paid",
-            credits_granted=body.tier,
+            credits_granted=plan.email_credits,
             idempotency_key=idem_key,
         )
         db.add(order)
-        _grant_credits(db, current_user.id, body.tier)
+        if plan.email_credits:
+            _grant_credits(db, current_user.id, plan.email_credits)
         if coupon_id:
             db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
+        _set_plan_on_order(db, outreach_order_id, plan)
         db.commit()
-        logger.info("[PAYMENT] Free order (100%% coupon) for user %s, tier %d", current_user.id, body.tier)
+        logger.info("[PAYMENT] Free order (100%% coupon) for user %s, plan %s", current_user.id, resolved_plan_id)
         capture("payment_confirmed", str(current_user.id), {
-            "tier": body.tier,
-            "credits_granted": body.tier,
+            "plan_id": resolved_plan_id,
+            "plan_type": plan.plan_type,
+            "email_credits": plan.email_credits,
+            "linkedin_credits": plan.linkedin_credits,
             "provider": "coupon",
             "amount_cents": 0,
             "currency": currency,
@@ -197,7 +230,7 @@ async def create_order(
         })
         safe_mark_stage(db, str(current_user.id), "payment_page_reached")
         safe_mark_stage(db, str(current_user.id), "payment_made")
-        return {"free": True, "credits_granted": body.tier}
+        return {"free": True, "credits_granted": plan.email_credits, "plan_id": resolved_plan_id, "plan_type": plan.plan_type}
 
     idem_key = str(uuid.uuid4())
 
@@ -208,8 +241,6 @@ async def create_order(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        # Redirect back to enrichment page with dodo_return flag.
-        # The enrichment page handles verification inline (like Razorpay modal).
         return_url = f"{settings.FRONTEND_URL}/enrichment?dodo_return=1"
 
         try:
@@ -221,7 +252,8 @@ async def create_order(
                 amount_cents=amount,
                 metadata={
                     "user_id": str(current_user.id),
-                    "tier": str(body.tier),
+                    "plan_id": resolved_plan_id,
+                    "tier": str(resolved_tier),
                     "coupon_id": str(coupon_id) if coupon_id else "",
                     "idempotency_key": idem_key,
                 },
@@ -230,7 +262,6 @@ async def create_order(
             logger.error("[PAYMENT] Dodo checkout creation failed: %s", e)
             raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
 
-        # Funnel: link this PaymentOrder to the user's active outreach order.
         from services.stage_tracking import safe_mark_stage, get_or_create_active_order
         try:
             outreach_order = get_or_create_active_order(db, str(current_user.id))
@@ -243,7 +274,8 @@ async def create_order(
             dodo_checkout_id=dodo_result["session_id"],
             amount_cents=amount,
             currency=currency,
-            tier=body.tier,
+            tier=resolved_tier,
+            plan_id=resolved_plan_id,
             coupon_id=coupon_id,
             outreach_order_id=outreach_order_id,
             geo_country=country,
@@ -251,27 +283,29 @@ async def create_order(
             idempotency_key=idem_key,
         )
         db.add(order)
+        _set_plan_on_order(db, outreach_order_id, plan)
         db.commit()
 
-        logger.info("[PAYMENT] Dodo order created: %s for user %s, tier %d, amount %d %s",
-                    dodo_result["session_id"], current_user.id, body.tier, amount, currency)
+        logger.info("[PAYMENT] Dodo order created: %s for user %s, plan %s, amount %d %s",
+                    dodo_result["session_id"], current_user.id, resolved_plan_id, amount, currency)
         capture("payment_order_created", str(current_user.id), {
-            "tier": body.tier,
+            "plan_id": resolved_plan_id,
+            "plan_type": plan.plan_type,
             "amount_cents": amount,
             "currency": currency,
             "provider": "dodo",
             "coupon_applied": coupon_id is not None,
             "country": country,
         })
-
-        # Funnel: stage 5 — user reached the payment page (Dodo checkout opened).
         safe_mark_stage(db, str(current_user.id), "payment_page_reached")
 
         return {
             "provider": "dodo",
             "checkout_url": dodo_result["checkout_url"],
             "session_id": dodo_result["session_id"],
-            "tier": body.tier,
+            "plan_id": resolved_plan_id,
+            "plan_type": plan.plan_type,
+            "tier": resolved_tier,
             "dodo_test_mode": settings.DODO_TEST_MODE,
         }
 
@@ -285,7 +319,8 @@ async def create_order(
             "receipt": f"order_{idem_key[:8]}",
             "notes": {
                 "user_id": str(current_user.id),
-                "tier": str(body.tier),
+                "plan_id": resolved_plan_id,
+                "tier": str(resolved_tier),
                 "coupon_id": str(coupon_id) if coupon_id else "",
             },
         })
@@ -293,7 +328,6 @@ async def create_order(
         logger.error("[PAYMENT] Razorpay order creation failed: %s", e)
         raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
 
-    # Funnel: link this PaymentOrder to the user's active outreach order.
     from services.stage_tracking import safe_mark_stage, get_or_create_active_order
     try:
         outreach_order = get_or_create_active_order(db, str(current_user.id))
@@ -306,7 +340,8 @@ async def create_order(
         razorpay_order_id=rz_order["id"],
         amount_cents=amount,
         currency=currency,
-        tier=body.tier,
+        tier=resolved_tier,
+        plan_id=resolved_plan_id,
         coupon_id=coupon_id,
         outreach_order_id=outreach_order_id,
         geo_country=country,
@@ -314,20 +349,20 @@ async def create_order(
         idempotency_key=idem_key,
     )
     db.add(order)
+    _set_plan_on_order(db, outreach_order_id, plan)
     db.commit()
 
-    logger.info("[PAYMENT] Razorpay order created: %s for user %s, tier %d, amount %d %s",
-                rz_order["id"], current_user.id, body.tier, amount, currency)
+    logger.info("[PAYMENT] Razorpay order created: %s for user %s, plan %s, amount %d %s",
+                rz_order["id"], current_user.id, resolved_plan_id, amount, currency)
     capture("payment_order_created", str(current_user.id), {
-        "tier": body.tier,
+        "plan_id": resolved_plan_id,
+        "plan_type": plan.plan_type,
         "amount_cents": amount,
         "currency": currency,
         "provider": "razorpay",
         "coupon_applied": coupon_id is not None,
         "country": country,
     })
-
-    # Funnel: stage 5 — user reached the payment page (Razorpay modal will open).
     safe_mark_stage(db, str(current_user.id), "payment_page_reached")
 
     return {
@@ -336,7 +371,9 @@ async def create_order(
         "amount": amount,
         "currency": currency,
         "key_id": settings.RAZORPAY_KEY_ID,
-        "tier": body.tier,
+        "plan_id": resolved_plan_id,
+        "plan_type": plan.plan_type,
+        "tier": resolved_tier,
     }
 
 
@@ -364,7 +401,7 @@ async def verify_payment(
         raise HTTPException(status_code=404, detail="Order not found")
 
     if order.status == "paid":
-        return {"status": "already_verified", "credits": order.credits_granted}
+        return {"status": "already_verified", "credits": order.credits_granted, "plan_type": _order_plan_type(order)}
 
     # Verify signature
     expected_signature = hmac.new(
@@ -379,37 +416,34 @@ async def verify_payment(
         logger.error("[PAYMENT] Signature mismatch for order %s", request.razorpay_order_id)
         raise HTTPException(status_code=400, detail="Payment verification failed")
 
-    # Mark paid and grant credits (idempotent)
     order.razorpay_payment_id = request.razorpay_payment_id
     order.razorpay_signature = request.razorpay_signature
     order.status = "paid"
-    order.credits_granted = order.tier
     order.updated_at = datetime.utcnow()
 
-    _grant_credits(db, current_user.id, order.tier)
+    _finalize_credits(db, order)
 
-    # Increment coupon usage
     if order.coupon_id:
         db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
 
     db.commit()
 
-    logger.info("[PAYMENT] Payment verified: %s, granted %d credits to user %s",
-                request.razorpay_order_id, order.tier, current_user.id)
+    logger.info("[PAYMENT] Payment verified: %s, plan=%s, user %s",
+                request.razorpay_order_id, order.plan_id, current_user.id)
     capture("payment_confirmed", str(current_user.id), {
-        "tier": order.tier,
-        "credits_granted": order.tier,
+        "plan_id": order.plan_id,
+        "plan_type": _order_plan_type(order),
+        "credits_granted": order.credits_granted,
         "provider": "razorpay",
         "amount_cents": order.amount_cents,
         "currency": order.currency,
         "country": order.geo_country,
     })
 
-    # Funnel: stage 6 — money received (Razorpay).
     from services.stage_tracking import safe_mark_stage
     safe_mark_stage(db, str(current_user.id), "payment_made")
 
-    return {"status": "verified", "credits": order.credits_granted}
+    return {"status": "verified", "credits": order.credits_granted, "plan_type": _order_plan_type(order)}
 
 
 # ── Verify Dodo Payment (frontend polls after redirect) ──────────────────────
@@ -434,41 +468,38 @@ async def verify_dodo_payment(
         raise HTTPException(status_code=404, detail="Order not found")
 
     if order.status == "paid":
-        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
 
     if order.status == "failed":
         return {"status": "failed"}
 
-    # Order still pending — actively check Dodo API instead of waiting for webhook
     dodo_status = await dodo_svc.get_checkout_status(request.session_id)
     logger.info("[PAYMENT] Dodo checkout %s status from API: %s", request.session_id, dodo_status)
 
     if dodo_status["status"] in ("succeeded", "paid", "complete", "completed"):
-        # Payment confirmed — grant credits
         order.dodo_payment_id = dodo_status.get("payment_id", "")
         order.status = "paid"
-        order.credits_granted = order.tier
         order.updated_at = datetime.utcnow()
-        _grant_credits(db, order.user_id, order.tier)
+        _finalize_credits(db, order)
 
         if order.coupon_id:
             db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
 
         db.commit()
-        logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, granted %d credits",
-                    request.session_id, order.tier)
+        logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, plan=%s",
+                    request.session_id, order.plan_id)
         capture("payment_confirmed", str(order.user_id), {
-            "tier": order.tier,
-            "credits_granted": order.tier,
+            "plan_id": order.plan_id,
+            "plan_type": _order_plan_type(order),
+            "credits_granted": order.credits_granted,
             "provider": "dodo",
             "amount_cents": order.amount_cents,
             "currency": order.currency,
             "country": order.geo_country,
         })
-        # Funnel: stage 6 — money received (Dodo, verified via API poll).
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
-        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier}
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):
         order.status = "failed"
@@ -486,7 +517,6 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
     """Dodo Payments webhook handler. Verifies Standard Webhooks signature."""
     body = await request.body()
 
-    # Verify Standard Webhooks signature if secret is configured
     if settings.DODO_WEBHOOK_SECRET:
         try:
             from standardwebhooks.webhooks import Webhook
@@ -522,26 +552,23 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
             logger.warning("[DODO_WEBHOOK] No order found for checkout %s", checkout_id)
             return {"status": "ok"}
 
-        # Idempotent — skip if already paid
         if order.status == "paid":
             logger.info("[DODO_WEBHOOK] Order already paid: %s", checkout_id)
             return {"status": "ok"}
 
         order.dodo_payment_id = payment_id
         order.status = "paid"
-        order.credits_granted = order.tier
         order.updated_at = datetime.utcnow()
 
-        _grant_credits(db, order.user_id, order.tier)
+        _finalize_credits(db, order)
 
         if order.coupon_id:
             db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
 
         db.commit()
-        logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, granted %d credits to user %s",
-                    checkout_id, order.tier, order.user_id)
+        logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, plan=%s, user %s",
+                    checkout_id, order.plan_id, order.user_id)
 
-        # Funnel: stage 6 — money received (Dodo webhook).
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
 
@@ -590,14 +617,12 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
             if order and order.status != "paid":
                 order.razorpay_payment_id = rz_payment_id
                 order.status = "paid"
-                order.credits_granted = order.tier
                 order.updated_at = datetime.utcnow()
-                _grant_credits(db, order.user_id, order.tier)
+                _finalize_credits(db, order)
                 if order.coupon_id:
                     db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
                 db.commit()
-                logger.info("[PAYMENT_WEBHOOK] Payment captured: %s, granted %d credits", rz_order_id, order.tier)
-                # Funnel: stage 6 — money received (Razorpay webhook).
+                logger.info("[PAYMENT_WEBHOOK] Payment captured: %s, plan=%s", rz_order_id, order.plan_id)
                 from services.stage_tracking import safe_mark_stage
                 safe_mark_stage(db, str(order.user_id), "payment_made")
 
@@ -634,7 +659,7 @@ async def get_credits(
 
 
 def _grant_credits(db: Session, user_id: str, amount: int):
-    """Add credits to user's balance. Creates row if not exists."""
+    """Add email credits to user's balance. Creates row if not exists."""
     credit = db.query(UserCredit).filter_by(user_id=user_id).first()
     if credit:
         credit.total_credits += amount
@@ -642,6 +667,59 @@ def _grant_credits(db: Session, user_id: str, amount: int):
     else:
         credit = UserCredit(user_id=user_id, total_credits=amount)
         db.add(credit)
+
+
+def _set_plan_on_order(db: Session, outreach_order_id: int | None, plan) -> None:
+    """Set plan_type + linkedin_credits_reserved on the linked OutreachOrder."""
+    if not outreach_order_id:
+        return
+    oo = db.query(OutreachOrder).filter_by(id=outreach_order_id).first()
+    if not oo:
+        return
+    oo.plan_type = plan.plan_type
+    if plan.linkedin_credits:
+        oo.linkedin_credits_reserved = plan.linkedin_credits
+
+
+def _finalize_credits(db: Session, order: PaymentOrder) -> None:
+    """Grant email credits and set LinkedIn credits after a confirmed payment."""
+    # Resolve plan — prefer plan_id column, fall back to legacy tier for old orders
+    email_credits = 0
+    linkedin_credits = 0
+    plan_type = "email"
+
+    if order.plan_id:
+        try:
+            from core.pricing import get_plan as _gp
+            plan = _gp(order.plan_id)
+            email_credits = plan.email_credits
+            linkedin_credits = plan.linkedin_credits
+            plan_type = plan.plan_type
+        except Exception:
+            email_credits = order.tier
+    else:
+        email_credits = order.tier
+
+    order.credits_granted = email_credits
+
+    if email_credits:
+        _grant_credits(db, order.user_id, email_credits)
+
+    if linkedin_credits and order.outreach_order_id:
+        oo = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
+        if oo:
+            oo.linkedin_credits_reserved = linkedin_credits
+            oo.plan_type = plan_type
+
+
+def _order_plan_type(order: PaymentOrder) -> str:
+    if order.plan_id:
+        try:
+            from core.pricing import get_plan as _gp
+            return _gp(order.plan_id).plan_type
+        except Exception:
+            pass
+    return "email"
 
 
 def deduct_credits(db: Session, user_id: str, amount: int) -> bool:

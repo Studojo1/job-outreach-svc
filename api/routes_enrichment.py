@@ -20,6 +20,7 @@ from database.models import User, Candidate, Lead, OutreachOrder
 from api.dependencies import get_current_user
 from api.routes_payment import deduct_credits, refund_credits
 from core.analytics import capture
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -210,9 +211,12 @@ async def enrich_leads(
     if unenriched_count == 0:
         raise HTTPException(status_code=400, detail="No leads found needing enrichment")
 
+    # In test mode cap at 5 leads — avoids burning Apollo credits during staging tests.
+    effective_limit = min(request.limit, 5) if settings.RAZORPAY_TEST_MODE else request.limit
+
     # Credit check (free tier bypasses)
-    if request.limit > 5:
-        if not deduct_credits(db, current_user.id, request.limit):
+    if effective_limit > 5:
+        if not deduct_credits(db, current_user.id, effective_limit):
             raise HTTPException(
                 status_code=402,
                 detail="Insufficient credits. Please purchase an enrichment package first.",
@@ -226,19 +230,20 @@ async def enrich_leads(
         "progress": "Starting enrichment...",
         "enriched": 0,
         "failed": 0,
-        "total": min(request.limit, unenriched_count),
+        "total": min(effective_limit, unenriched_count),
         "error": "",
         "started_at": datetime.utcnow().isoformat(),
     }
 
     thread = threading.Thread(
         target=_run_enrichment_in_background,
-        args=(job_id, request.candidate_id, request.limit, str(current_user.id), request.order_id),
+        args=(job_id, request.candidate_id, effective_limit, str(current_user.id), request.order_id),
         daemon=True,
     )
     thread.start()
 
-    logger.info("[ENRICHMENT] Job %s started for user %s, limit=%d", job_id, current_user.id, request.limit)
+    logger.info("[ENRICHMENT] Job %s started for user %s, limit=%d (test_mode=%s)",
+                job_id, current_user.id, effective_limit, settings.RAZORPAY_TEST_MODE)
     capture("enrichment_started", str(current_user.id), {
         "job_id": job_id,
         "candidate_id": request.candidate_id,
