@@ -876,8 +876,6 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
     lead_title = lead.title or ""
 
     linkedin_url = (candidate.flex_notes or {}).get("linkedin_url", "")
-    signoff_t2 = f"{first_name_candidate}\n{linkedin_url}" if linkedin_url else first_name_candidate
-    signoff_t3 = f"{first_name_candidate}\n{linkedin_url}" if linkedin_url else first_name_candidate
 
     schema = {
         "type": "object",
@@ -887,6 +885,11 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
 
     if followup_number == 1:
         project = _extract_unused_project(candidate, parent_body)
+
+        linkedin_line = (
+            f'\nAfter Sentence 3, add one final line on its own: "Here\'s my LinkedIn if you\'d like to connect: {linkedin_url}" — output this exactly.'
+            if linkedin_url else ""
+        )
 
         prompt = f"""Ghostwriting a short follow-up email for {candidate_name}, a student looking for internship roles.
 
@@ -909,12 +912,12 @@ Sentence 1: Bump the thread in one casual line. Use something like "just bumping
 
 Sentence 2: Introduce the project above in one punchy sentence. State what it was and one concrete thing from it (a deliverable, outcome, or specific feature). Do NOT say "which might align" or "could be relevant" or "I recently". Just state it as a fact about past work.
 
-Sentence 3: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"
+Sentence 3: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"{linkedin_line}
 
 Format:
 - Start with "Hi {lead_first},"
-- Sign off: "{signoff_t2}" — output this exactly, on its own line, nothing else
-- Body total under 55 words"""
+- Sign off: "{first_name_candidate}" on its own line, nothing else
+- Body total under 65 words"""
 
     else:
         prompt = f"""Ghostwrite a 2-sentence final follow-up email for {candidate_name}, a student.
@@ -929,7 +932,7 @@ Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door op
 
 Format:
 - Start with "Hi {lead_first},"
-- Sign off: "{signoff_t3}" — output this exactly, on its own line, no "Best," or "Take care,"
+- Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
 - Body total under 30 words
 
 Good example of tone:
