@@ -83,6 +83,15 @@ def _store_token(
             cookies_blob_nonce=cookies_blob_nonce,
         ))
     db.commit()
+
+    # Fresh credentials → clear any stale auth-failure counts so the next
+    # campaign tick starts from zero, not mid-threshold.
+    from services.linkedin_outreach.automation_service import reset_auth_fail_count
+    from database.models import LinkedInCampaign
+    campaigns = db.query(LinkedInCampaign).filter(LinkedInCampaign.user_id == user_id).all()
+    for camp in campaigns:
+        reset_auth_fail_count(camp.id)
+
     return display_name
 
 
@@ -1370,6 +1379,8 @@ async def resume_campaign(
     c.status = "running"
     c.updated_at = datetime.utcnow()
     db.commit()
+    from services.linkedin_outreach.automation_service import reset_auth_fail_count
+    reset_auth_fail_count(c.id)
     return {"ok": True, "status": "running"}
 
 

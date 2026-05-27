@@ -81,7 +81,17 @@ _last_accept_check: dict[int, float] = {}
 # Tolerate up to AUTH_FAIL_THRESHOLD consecutive failures before flipping the
 # campaign to auth_failed, so a brief rate-limit doesn't permanently kill it.
 _auth_fail_count: dict[int, int] = {}
-AUTH_FAIL_THRESHOLD = 3
+AUTH_FAIL_THRESHOLD = 5
+
+
+def reset_auth_fail_count(campaign_id: int) -> None:
+    """Clear the consecutive auth-failure counter for a campaign.
+
+    Call this whenever the user provides fresh credentials or manually resumes
+    an auth_failed campaign, so a stale count doesn't immediately re-trigger
+    the auth_failed state on the next tick.
+    """
+    _auth_fail_count.pop(campaign_id, None)
 _last_reply_check: dict[int, float] = {}
 _ACCEPT_INTERVAL = 300  # 5 minutes
 _REPLY_INTERVAL = 7200    # 2 hours
