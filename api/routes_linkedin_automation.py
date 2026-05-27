@@ -559,17 +559,15 @@ async def create_campaign_from_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    candidate_id = order.candidate_id
-    if not candidate_id:
-        raise HTTPException(status_code=400, detail="Order has no candidate profile linked")
-
+    # Token must exist before any re-login path — the caller always hits
+    # /login/cookies first, which creates/refreshes the token.
     token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
     if not token_row:
         raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first via the LinkedIn tab.")
 
-    # Re-login path A: order is already linked to a campaign.
-    # Must run before the credits check so session-expired users can reconnect
-    # even if linkedin_credits_reserved was never backfilled on their order.
+    # Re-login path A: order already linked to a campaign (normal re-auth).
+    # Runs before candidate/credits checks — re-login never needs to create
+    # anything new, so no candidate or credits are required.
     if order.linkedin_campaign_id:
         existing = db.query(LinkedInCampaign).filter_by(
             id=order.linkedin_campaign_id, user_id=current_user.id,
@@ -582,9 +580,9 @@ async def create_campaign_from_order(
             db.refresh(existing)
             return _campaign_to_response(existing)
 
-    # Re-login path B: user has a campaign but it's not linked to this order yet.
-    # This covers LKOT-migrated users whose campaign was created before the
-    # OutreachOrder integration existed, and users whose store state drifted.
+    # Re-login path B: user has a campaign but it's not linked to this order.
+    # Covers LKOT-migrated users (campaign created before OutreachOrder integration),
+    # users whose store drifted to a different order, and any other unlinked state.
     latest_campaign = (
         db.query(LinkedInCampaign)
         .filter_by(user_id=current_user.id)
@@ -600,9 +598,16 @@ async def create_campaign_from_order(
         db.refresh(latest_campaign)
         return _campaign_to_response(latest_campaign)
 
-    # New campaign path — credits check only applies here.
-    # Fall back to plan_type for orders created before linkedin_credits_reserved
-    # was backfilled (old orders have 0 in the column despite having a LinkedIn plan).
+    # ── New campaign path ────────────────────────────────────────────────────
+    # Only reached when the user has no existing campaign at all.
+    # Now we need a candidate and credits.
+
+    candidate_id = order.candidate_id
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="Order has no candidate profile linked")
+
+    # Credits check. Fall back to plan_type for orders whose
+    # linkedin_credits_reserved column was never backfilled.
     linkedin_limit = getattr(order, "linkedin_credits_reserved", 0) or 0
     if linkedin_limit == 0:
         plan_type = getattr(order, "plan_type", "email") or "email"
