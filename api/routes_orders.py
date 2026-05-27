@@ -250,14 +250,21 @@ async def resume_order(
         db.commit()
         redirect = "/connect/gmail" if plan_type != "linkedin" else "/connect/linkedin"
     elif status == "campaign_setup":
-        # Route to correct connect page based on plan channel
+        # Route to correct connect page based on plan channel.
+        # If LinkedIn is already connected (handleSuccess set linkedin_connected_at),
+        # send the user to the safety review page instead of back to connect.
         if plan_type == "linkedin":
-            redirect = "/connect/linkedin"
+            if getattr(order, "linkedin_connected_at", None) and getattr(order, "linkedin_campaign_id", None):
+                redirect = "/campaign/linkedin-safety"
+            else:
+                redirect = "/connect/linkedin"
         else:
             redirect = "/campaign/setup"
     elif status == "email_connected":
         if plan_type == "both" and not getattr(order, "linkedin_connected_at", None):
             redirect = "/connect/linkedin"
+        elif plan_type == "both" and getattr(order, "linkedin_campaign_id", None):
+            redirect = "/campaign/linkedin-safety"
         else:
             redirect = "/campaign/setup"
     elif status in ("campaign_running", "completed"):
