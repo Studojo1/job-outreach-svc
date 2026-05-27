@@ -847,6 +847,16 @@ def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str,
     if projects:
         return projects[0]
 
+    # Fall back to flex_notes.best_project before using a generic placeholder.
+    # This prevents the LLM from hallucinating a fabricated project when the
+    # candidate has real experience stored in flex_notes but no structured resume projects.
+    flex = candidate.flex_notes or {}
+    if flex.get("best_project"):
+        desc = flex["best_project"].strip()
+        if flex.get("outcome"):
+            desc += ". " + flex["outcome"].strip()
+        return {"name": "project", "description": desc}
+
     return {
         "name": "recent coursework",
         "description": "hands-on student projects focused on user research and interface design",
