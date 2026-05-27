@@ -263,10 +263,21 @@ async def _find_connect_button(page):
             # Navigate directly to the invite URL — the SPA router opens the modal.
             # Do NOT click Send here; let the outer playwright_send_invitation handle it
             # so ok=True is only set after confirmed Send click + API interception.
+            # Use wait_until="commit" (fires on first byte) so slow proxy responses
+            # don't time out the goto before the DOM has a chance to render.
+            # If it still times out, return the sentinel anyway — the outer code will
+            # wait up to 20s for the Send button modal to appear.
             logger.info("Playwright: navigating to Connect href directly")
-            await page.goto(connect_href, wait_until="domcontentloaded", timeout=20000)
-            logger.info("Playwright: after goto Connect href, url=%s", page.url)
-            await page.wait_for_timeout(1500)
+            try:
+                await page.goto(connect_href, wait_until="commit", timeout=40000)
+                logger.info("Playwright: after goto Connect href, url=%s", page.url)
+            except Exception as goto_err:
+                logger.warning(
+                    "Playwright: Connect href navigation timed out (%s) — "
+                    "checking page state for Send button anyway",
+                    goto_err,
+                )
+            await page.wait_for_timeout(2000)
             return "DROPDOWN_CONNECT_CLICKED"
 
         logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
