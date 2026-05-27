@@ -972,7 +972,7 @@ async def send_one_now(
 
     # Send — passes profile_url so Playwright fallback works even with no URN
     try:
-        ok = await send_connection_request(
+        ok, send_error = await send_connection_request(
             li_at, jsessionid,
             req.profile_urn or "",
             req.connection_note or "",
@@ -991,16 +991,17 @@ async def send_one_now(
         req.sent_at = datetime.utcnow()
         c.total_sent += 1
         result = "sent"
+        send_error = ""
     else:
         req.status = "error"
-        req.error = "Send failed"
+        req.error = send_error or "Send failed"
         result = "error"
 
     req.updated_at = datetime.utcnow()
     c.updated_at = datetime.utcnow()
     db.commit()
 
-    return {"ok": ok, "result": result, "lead_name": req.name, "profile_url": req.profile_url}
+    return {"ok": ok, "result": result, "lead_name": req.name, "profile_url": req.profile_url, "error_detail": send_error}
 
 
 @router.post("/campaigns/{campaign_id}/retry-errors")
@@ -1110,6 +1111,7 @@ class ConnectionRequestResponse(BaseModel):
     followup_sent_at: Optional[str]
     reply_text: Optional[str]
     reply_sentiment: Optional[str]
+    error: Optional[str] = None
 
 
 class MarkSentBody(BaseModel):
@@ -1183,6 +1185,7 @@ async def list_requests(
             followup_sent_at=r.followup_sent_at.isoformat() if r.followup_sent_at else None,
             reply_text=r.reply_text,
             reply_sentiment=r.reply_sentiment,
+            error=r.error,
         )
         for r in requests
     ]
