@@ -201,7 +201,14 @@ async def resolve_profile_urn(
 
 
 class LinkedInAuthError(Exception):
-    """Raised when LinkedIn returns 401/403 indicating an expired or invalid session."""
+    """Raised when LinkedIn returns 401/403 indicating an expired or invalid session.
+
+    Set revoked=True when LinkedIn explicitly sends set-cookie: li_at=delete me
+    (Max-Age=0), meaning the session is permanently dead and retrying is pointless.
+    """
+    def __init__(self, message: str = "", revoked: bool = False):
+        super().__init__(message)
+        self.revoked = revoked
 
 
 async def send_connection_request(
@@ -346,7 +353,12 @@ async def send_connection_request(
                 if r.status_code in (200, 201):
                     return True, ""
                 if r.status_code in (401, 403):
-                    raise LinkedInAuthError(f"Session expired (status {r.status_code})")
+                    set_cookie = r.headers.get("set-cookie", "")
+                    revoked = "li_at=delete me" in set_cookie
+                    raise LinkedInAuthError(
+                        f"Session {'revoked' if revoked else 'expired'} (status {r.status_code})",
+                        revoked=revoked,
+                    )
                 res = r
 
         last_status = res.status_code if res is not None else "no_response"
@@ -1204,7 +1216,7 @@ class LinkedInAutomationDaemon:
                             req.updated_at = datetime.utcnow()
                             db.commit()
                             continue
-                    except LinkedInAuthError:
+                    except LinkedInAuthError as _auth_err:
                         # Voyager rejected our session during URL resolve.
                         # Count this toward the auth-failure threshold so we
                         # stop hammering the proxy after a few consecutive
@@ -1212,6 +1224,15 @@ class LinkedInAutomationDaemon:
                         # Exception, marking one lead error and continuing
                         # the loop — burned ~200 MB Evomi bandwidth in a
                         # single morning before we noticed).
+                        if _auth_err.revoked:
+                            logger.warning(
+                                "Campaign %d: LinkedIn explicitly revoked session — marking auth_failed immediately",
+                                campaign.id,
+                            )
+                            campaign.status = "auth_failed"
+                            campaign.updated_at = datetime.utcnow()
+                            db.commit()
+                            return
                         _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
                         cnt = _auth_fail_count[campaign.id]
                         if cnt < AUTH_FAIL_THRESHOLD:
@@ -1240,10 +1261,19 @@ class LinkedInAutomationDaemon:
                 if not req.profile_urn:
                     try:
                         urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id, cookies_blob)
-                    except LinkedInAuthError:
+                    except LinkedInAuthError as _auth_err:
                         # LinkedIn returns auth-looking errors for transient
                         # rate-limits too. Tolerate AUTH_FAIL_THRESHOLD strikes
                         # before marking the campaign dead.
+                        if _auth_err.revoked:
+                            logger.warning(
+                                "Campaign %d: LinkedIn explicitly revoked session during URN resolve — marking auth_failed",
+                                campaign.id,
+                            )
+                            campaign.status = "auth_failed"
+                            campaign.updated_at = datetime.utcnow()
+                            db.commit()
+                            return
                         _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
                         cnt = _auth_fail_count[campaign.id]
                         if cnt < AUTH_FAIL_THRESHOLD:
@@ -1262,6 +1292,7 @@ class LinkedInAutomationDaemon:
                         return
                     if urn:
                         req.profile_urn = urn
+                        db.commit()  # persist URN now so retry ticks don't re-resolve
 
                 # Skip if we already sent an invite to this profile under any
                 # campaign for this user — it'd be a duplicate request and is
@@ -1316,8 +1347,16 @@ class LinkedInAutomationDaemon:
                         # so the actions don't look back-to-back-scripted.
                         await asyncio.sleep(random.uniform(8, 18))
                     except LinkedInAuthError:
-                        # Bubble up — same failure mode as the connect step.
-                        raise
+                        # Do NOT bubble up. Like-post runs before the send; if we
+                        # bubble, the LinkedInAuthError escapes _process_campaign
+                        # and lands in the outer bare `except Exception` logger
+                        # without incrementing _auth_fail_count or setting req.error.
+                        # Just skip the like — the send step runs next and will
+                        # independently detect the dead session and handle it properly.
+                        logger.warning(
+                            "Campaign %d like-post auth error for %s — skipping like, proceeding to connect",
+                            campaign.id, req.profile_url,
+                        )
                     except Exception as like_err:
                         logger.warning(
                             "Campaign %d like-post errored (continuing to connect): %s",
@@ -1334,7 +1373,16 @@ class LinkedInAutomationDaemon:
                         profile_url=req.profile_url,
                         cookies_blob=cookies_blob,
                     )
-                except LinkedInAuthError:
+                except LinkedInAuthError as _auth_err:
+                    if _auth_err.revoked:
+                        logger.warning(
+                            "Campaign %d: LinkedIn explicitly revoked session on send — marking auth_failed immediately",
+                            campaign.id,
+                        )
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        return
                     _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
                     cnt = _auth_fail_count[campaign.id]
                     if cnt < AUTH_FAIL_THRESHOLD:
