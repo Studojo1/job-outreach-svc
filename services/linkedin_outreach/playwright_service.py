@@ -250,45 +250,41 @@ async def _find_connect_button(page):
         """)
         logger.info("Playwright: More dropdown items: %s", dropdown_items)
 
-        # Find Connect link by vanityName from the current URL.
+        # Find Connect link by vanityName in the dropdown.
         # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
         # Scoping by vanityName avoids PYMK "Connect" links on the same page.
-        # Use Playwright locator.click(force=True) — CDP-level click generates isTrusted=true
-        # events which LinkedIn requires to open the invite modal.
         vanity = page.url.rstrip('/').split('/')[-1]
 
-        # Get the full href of the Connect link so we can navigate to it directly.
-        # Clicking the <a> (JS or CDP) opens a dropdown but LinkedIn's SPA click
-        # handler doesn't reliably open the modal in headless contexts. Direct
-        # page.goto(href) forces the SPA router to handle the invite route.
-        connect_href = await page.evaluate(f"""
+        # Click the Connect link via real CDP mouse events (not JS .click() and not
+        # page.goto to the href). JS click generates isTrusted=false which LinkedIn
+        # ignores for invite links. page.goto to /preload/custom-invite/ does a full
+        # page load, losing the SPA context, so the invite modal never renders.
+        # Getting the bounding box and using page.mouse.click fires a trusted mouse
+        # event at the element's center, letting the SPA handle it client-side.
+        connect_handle = await page.evaluate_handle(f"""
             () => {{
                 const link = document.querySelector('a[href*="custom-invite"][href*="{vanity}"]');
-                return link ? link.href : null;
+                return link || null;
             }}
         """)
-        logger.info("Playwright: Connect href for %s: %s", vanity, connect_href)
-
-        if connect_href:
-            # Navigate directly to the invite URL — the SPA router opens the modal.
-            # Do NOT click Send here; let the outer playwright_send_invitation handle it
-            # so ok=True is only set after confirmed Send click + API interception.
-            # Use wait_until="commit" (fires on first byte) so slow proxy responses
-            # don't time out the goto before the DOM has a chance to render.
-            # If it still times out, return the sentinel anyway — the outer code will
-            # wait up to 20s for the Send button modal to appear.
-            logger.info("Playwright: navigating to Connect href directly")
+        connect_elem = connect_handle.as_element()
+        if connect_elem:
             try:
-                await page.goto(connect_href, wait_until="commit", timeout=40000)
-                logger.info("Playwright: after goto Connect href, url=%s", page.url)
-            except Exception as goto_err:
-                logger.warning(
-                    "Playwright: Connect href navigation timed out (%s) — "
-                    "checking page state for Send button anyway",
-                    goto_err,
-                )
-            await page.wait_for_timeout(2000)
-            return "DROPDOWN_CONNECT_CLICKED"
+                box = await connect_elem.bounding_box()
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    logger.info("Playwright: clicking Connect link via mouse at (%.0f, %.0f) for %s", cx, cy, vanity)
+                    await page.mouse.click(cx, cy)
+                    await page.wait_for_timeout(2000)
+                    return "DROPDOWN_CONNECT_CLICKED"
+                else:
+                    logger.warning("Playwright: Connect link has no bounding box for %s — falling back to JS click", vanity)
+                    await page.evaluate("el => el.click()", connect_elem)
+                    await page.wait_for_timeout(2000)
+                    return "DROPDOWN_CONNECT_CLICKED"
+            except Exception as click_err:
+                logger.warning("Playwright: Connect link click failed for %s: %s", vanity, click_err)
 
         logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
         await page.keyboard.press("Escape")
