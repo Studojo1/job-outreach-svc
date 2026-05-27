@@ -202,7 +202,7 @@ async def send_connection_request(
     session_id: str | None = None,
     profile_url: str | None = None,
     cookies_blob: str | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """Send a LinkedIn connection request via Voyager. Returns True on success.
 
     Uses a single persistent httpx client for both the seed GET (to obtain a
@@ -334,14 +334,15 @@ async def send_connection_request(
                     r.text[:300],
                 )
                 if r.status_code in (200, 201):
-                    return True
+                    return True, ""
                 if r.status_code in (401, 403):
                     raise LinkedInAuthError(f"Session expired (status {r.status_code})")
                 res = r
 
+        last_status = res.status_code if res is not None else "no_response"
         logger.warning(
-            "Voyager API send failed (normInvitations=%s, relationships=%s) — falling back to Playwright",
-            "301", "400",
+            "Voyager API send failed (last status=%s) — falling back to Playwright",
+            last_status,
         )
     except LinkedInAuthError:
         raise
@@ -362,7 +363,7 @@ async def _send_via_playwright(
     existing_urn: str | None,
     cookies_blob: str | None = None,
     session_id: str | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
         from core.config import settings
@@ -379,15 +380,15 @@ async def _send_via_playwright(
         )
         if result.get("ok"):
             logger.info("Playwright send succeeded for %s", profile_url)
-            return True
+            return True, ""
         err = result.get("error", "unknown")
         logger.warning("Playwright send failed for %s: %s", profile_url, err)
-        return False
+        return False, f"Playwright: {err}"
     except LinkedInAuthError:
         raise
     except Exception as e:
         logger.error("Playwright send_connection_request failed: %s", e)
-        return False
+        return False, f"Playwright exception: {e}"
 
 
 async def send_message(
@@ -1315,7 +1316,7 @@ class LinkedInAutomationDaemon:
 
                 # Send — pass profile_url so Playwright works even if URN is empty
                 try:
-                    ok = await send_connection_request(
+                    ok, send_error = await send_connection_request(
                         li_at, jsessionid,
                         req.profile_urn or "",
                         note_to_send,
@@ -1342,7 +1343,7 @@ class LinkedInAutomationDaemon:
                     return
                 except Exception as send_err:
                     logger.warning("Campaign %d: send error for %s: %s", campaign.id, req.profile_url, send_err)
-                    ok = False
+                    ok, send_error = False, str(send_err)
 
                 if ok:
                     req.status = "sent"
@@ -1352,7 +1353,7 @@ class LinkedInAutomationDaemon:
                     _auth_fail_count.pop(campaign.id, None)
                 else:
                     req.status = "error"
-                    req.error = "Send failed"
+                    req.error = send_error or "Send failed"
                 req.updated_at = datetime.utcnow()
                 db.commit()
         elif remaining_today > 0:
