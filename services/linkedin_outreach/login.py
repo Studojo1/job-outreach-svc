@@ -86,9 +86,27 @@ async def _linkedin_login_attempt(
         await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_timeout(1500)
 
-        await page.fill("#username", email)
-        await page.fill("#password", password)
-        await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
+        # LinkedIn A/B-serves two login layouts:
+        #   Variant A (classic): #username / #password
+        #   Variant B (React):   obfuscated IDs (:r0:), with hidden duplicate fields.
+        # Fill the classic IDs when present, otherwise target the VISIBLE inputs so
+        # we don't fill a hidden duplicate (which silently never submits).
+        if await page.query_selector("#username"):
+            await page.fill("#username", email)
+            await page.fill("#password", password)
+        else:
+            await page.locator("input[type=email]:visible, input[autocomplete=username]:visible").first.fill(email)
+            await page.locator("input[type=password]:visible").first.fill(password)
+
+        # Click the visible Sign in button (role-based works across both variants).
+        try:
+            signin = page.get_by_role("button", name="Sign in")
+            if await signin.count():
+                await signin.first.click()
+            else:
+                await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
+        except Exception:
+            await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
         # networkidle can take a while via residential proxy due to LinkedIn analytics scripts
         try:
             await page.wait_for_load_state("networkidle", timeout=45000)
@@ -99,7 +117,32 @@ async def _linkedin_login_attempt(
         current_url = page.url
         logger.info("Login result URL: %s", current_url)
 
-        # Wrong password / account locked — URL stays on /login, not checkpoint
+        # Read the VISIBLE page text — this is what the user would actually see.
+        # We classify on visible text, NOT raw HTML: LinkedIn injects a PerimeterX
+        # bot-detection script (li.protechts.net) on every page whose body contains
+        # the word "captcha", which previously caused every wrong-password and PIN
+        # page to be misclassified as a captcha challenge.
+        try:
+            visible_text = (await page.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
+        except Exception:
+            visible_text = ""
+
+        # Wrong password / bad credentials — LinkedIn shows this both on /login and
+        # on the checkpoint/lg/login-submit URL (and as a decoy when PerimeterX
+        # flags the session as a bot). Detect it by the visible message, regardless
+        # of URL, so we surface a real error instead of a phantom "verification code".
+        cred_error_markers = [
+            "wrong email or password",
+            "that's not the right password",
+            "the password you provided",
+            "couldn't find a linkedin account",
+            "hmm, that's not the right",
+        ]
+        if any(m in visible_text for m in cred_error_markers):
+            await _cleanup()
+            raise ValueError("Wrong email or password. Please double-check your LinkedIn credentials.")
+
+        # Still on the login form (no checkpoint) with no creds entered taking — treat as failure
         if "login" in current_url and "checkpoint" not in current_url and "authwall" not in current_url:
             error_text = await page.evaluate(
                 "() => document.querySelector('.error-for-password, .alert-content, [role=alert]')?.innerText || ''"
@@ -111,18 +154,30 @@ async def _linkedin_login_attempt(
 
         # Challenge required
         if "checkpoint" in current_url or "challenge" in current_url:
-            challenge_page = await page.content()
-            challenge_lower = challenge_page.lower()
+            # Detect a REAL captcha by its challenge iframe (Arkose/FunCaptcha), NOT by
+            # the word "captcha" in HTML (the PerimeterX script always matches that).
+            iframe_srcs = await page.evaluate(
+                "() => Array.from(document.querySelectorAll('iframe')).map(f => f.src || '')"
+            )
+            has_real_captcha = any(
+                any(s in (src or "").lower() for s in ["arkoselabs", "funcaptcha", "/captcha", "recaptcha"])
+                for src in iframe_srcs
+            ) or "verify you're a human" in visible_text or "let's do a quick" in visible_text or "press & hold" in visible_text
 
-            if "captcha" in challenge_lower:
+            pin_markers = ["verification code", "enter the code", "we sent", "we emailed", "6-digit", "check your email"]
+
+            if has_real_captcha:
                 challenge_type = "captcha"
-            elif any(x in challenge_lower for x in ["pin", "email", "verification code", "enter the code"]):
+            elif any(m in visible_text for m in pin_markers):
                 challenge_type = "pin"
             else:
                 challenge_type = "phone_tap"
 
             key = str(uuid.uuid4())
-            logger.info("LinkedIn challenge for %s — type=%s key=%s", email, challenge_type, key)
+            logger.info(
+                "LinkedIn challenge for %s — type=%s key=%s (iframes=%s)",
+                email, challenge_type, key, iframe_srcs,
+            )
 
             if challenge_type == "phone_tap":
                 # Keep browser alive — we'll poll for redirect after user taps Yes
