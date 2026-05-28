@@ -131,6 +131,69 @@ Return only the sentence."""
         return f"Works in a relevant area for {target_role}"
 
 
+async def generate_followup_message(
+    person_name: str,
+    person_headline: str,
+    person_company: str,
+    target_role: str,
+    student_name: Optional[str] = None,
+) -> str:
+    """Generate a LinkedIn DM to send ~2 minutes after a connection is accepted.
+
+    Should feel like a real first message — not a pitch, not a template.
+    Under 300 chars so it doesn't read like a wall of text.
+    """
+    from core.config import settings
+
+    client = AsyncAzureOpenAI(
+        api_key=settings.AZURE_OPENAI_KEY,
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
+    )
+
+    student_line = f"The student's name is {student_name}." if student_name else "Do not include the student's name."
+
+    prompt = f"""You are helping a student write the very first LinkedIn message after a connection request was accepted.
+
+The student is looking for: {target_role}
+
+They just connected with:
+- Name: {person_name}
+- Headline: {person_headline or "not available"}
+- Company: {person_company or "not available"}
+
+{student_line}
+
+Write a follow-up message under 300 characters that:
+- Opens by acknowledging they connected (naturally, not "Thanks for accepting my request")
+- References something specific about their role or company (one concrete detail)
+- Expresses genuine interest in how they work / what they've built
+- Ends with ONE short, thoughtful question (about their work, not asking for a job)
+- Reads like a real person wrote it — curious, warm, brief
+- Does NOT sound like a template, sales pitch, or AI output
+- No subject line, no "Hi [Name]" opener — start with the message body
+
+Return only the message text, nothing else."""
+
+    try:
+        response = await client.chat.completions.create(
+            model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=120,
+            temperature=0.85,
+        )
+        message = response.choices[0].message.content or ""
+        return message.strip()[:300]
+    except Exception as e:
+        logger.error("Failed to generate followup message for %s: %s", person_name, e)
+        company_hint = f" at {person_company}" if person_company else ""
+        return (
+            f"Great to connect! I've been following what you're building{company_hint}. "
+            f"Would love to hear how you think about {target_role.split('/')[0].strip()} roles — "
+            f"happy to chat whenever."
+        )[:300]
+
+
 async def generate_messages_for_leads(
     leads: list[dict],
     target_role: str,

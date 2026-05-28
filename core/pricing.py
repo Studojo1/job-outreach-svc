@@ -1,28 +1,88 @@
-"""Pricing configuration for enrichment tiers."""
+"""Pricing configuration — email, LinkedIn, and both-channel plans."""
 
 from dataclasses import dataclass
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class PlanTier:
+    plan_id: str           # e.g. "email_200", "linkedin_350", "both_500"
+    plan_type: str         # "email" | "linkedin" | "both"
+    label: str             # "Starter" | "Growth" | "Scale"
+    email_credits: int     # 0 for linkedin-only plans
+    linkedin_credits: int  # 0 for email-only plans
+    price_usd: int         # cents
+    price_inr: int         # paise
+
+
+# Production plans — 9 tiers (email x3, linkedin x3, both x3)
+PLANS: list[PlanTier] = [
+    # ── Email-only ──────────────────────────────────────────────────────────
+    PlanTier("email_200",    "email",    "Starter", 200, 0,   2000,  177500),
+    PlanTier("email_350",    "email",    "Growth",  350, 0,   2700,  229500),
+    PlanTier("email_500",    "email",    "Scale",   500, 0,   5000,  346500),
+    # ── LinkedIn-only ───────────────────────────────────────────────────────
+    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   2000,  177500),
+    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   2700,  229500),
+    PlanTier("linkedin_500", "linkedin", "Scale",   0, 500,   5000,  346500),
+    # ── Both channels ───────────────────────────────────────────────────────
+    PlanTier("both_200",     "both",     "Starter", 200, 200, 3500,  299900),
+    PlanTier("both_350",     "both",     "Growth",  350, 350, 4500,  399900),
+    PlanTier("both_500",     "both",     "Scale",   500, 500, 7000,  499900),
+]
+
+# Test-mode plans (~$1 / ₹90) — used when RAZORPAY_TEST_MODE=true
+TEST_PLANS: list[PlanTier] = [
+    PlanTier("email_200",    "email",    "Starter", 200, 0,   100,   9000),
+    PlanTier("email_350",    "email",    "Growth",  350, 0,   100,   9000),
+    PlanTier("email_500",    "email",    "Scale",   500, 0,   100,   9000),
+    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   100,   9000),
+    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   100,   9000),
+    PlanTier("linkedin_500", "linkedin", "Scale",   0, 500,   100,   9000),
+    PlanTier("both_200",     "both",     "Starter", 200, 200, 100,   9000),
+    PlanTier("both_350",     "both",     "Growth",  350, 350, 100,   9000),
+    PlanTier("both_500",     "both",     "Scale",   500, 500, 100,   9000),
+]
+
+# Convenience index
+_PLANS_BY_ID: dict[str, PlanTier] = {p.plan_id: p for p in PLANS}
+_TEST_PLANS_BY_ID: dict[str, PlanTier] = {p.plan_id: p for p in TEST_PLANS}
+
+
+def get_plan(plan_id: str, test_mode: bool = False) -> PlanTier:
+    source = _TEST_PLANS_BY_ID if test_mode else _PLANS_BY_ID
+    plan = source.get(plan_id)
+    if not plan:
+        raise ValueError(f"Invalid plan_id: {plan_id}. Must be one of {list(source.keys())}")
+    return plan
+
+
+def get_plans(test_mode: bool = False) -> list[PlanTier]:
+    return TEST_PLANS if test_mode else PLANS
+
+
+# ── Backwards-compat shims (email-only tier int → plan) ─────────────────────
 
 @dataclass(frozen=True)
 class TierPricing:
-    tier: int          # number of leads/credits
-    price_usd: int     # price in USD cents
-    price_inr: int     # price in INR paise
+    tier: int
+    price_usd: int
+    price_inr: int
     label: str
 
 
 TIERS: dict[int, TierPricing] = {
-    5: TierPricing(tier=5, price_usd=0, price_inr=0, label="Test"),
-    200: TierPricing(tier=200, price_usd=2000, price_inr=170000, label="Starter"),       # $20 / ₹1700
-    350: TierPricing(tier=350, price_usd=2700, price_inr=229500, label="Growth"),         # $27 / ₹2295
-    500: TierPricing(tier=500, price_usd=4000, price_inr=340000, label="Scale"),          # $40 / ₹3400
+    5:   TierPricing(tier=5,   price_usd=0,    price_inr=0,      label="Test"),
+    200: TierPricing(tier=200, price_usd=2000, price_inr=177500, label="Starter"),
+    350: TierPricing(tier=350, price_usd=2700, price_inr=229500, label="Growth"),
+    500: TierPricing(tier=500, price_usd=5000, price_inr=346500, label="Scale"),
 }
 
-# Test-mode pricing (~$1 / ₹90) — used when RAZORPAY_TEST_MODE=true
 TEST_TIERS: dict[int, TierPricing] = {
-    5: TierPricing(tier=5, price_usd=0, price_inr=0, label="Test"),
-    200: TierPricing(tier=200, price_usd=100, price_inr=9000, label="Starter"),           # $1 / ₹90
-    350: TierPricing(tier=350, price_usd=100, price_inr=9000, label="Growth"),            # $1 / ₹90
-    500: TierPricing(tier=500, price_usd=100, price_inr=9000, label="Scale"),             # $1 / ₹90
+    5:   TierPricing(tier=5,   price_usd=0,   price_inr=0,    label="Test"),
+    200: TierPricing(tier=200, price_usd=100, price_inr=9000, label="Starter"),
+    350: TierPricing(tier=350, price_usd=100, price_inr=9000, label="Growth"),
+    500: TierPricing(tier=500, price_usd=100, price_inr=9000, label="Scale"),
 }
 
 
@@ -35,7 +95,6 @@ def get_tier_pricing(tier: int, test_mode: bool = False) -> TierPricing:
 
 
 def get_dodo_product_id(settings) -> str:
-    """Return the single Dodo product ID (pay_what_you_want, amount set at checkout)."""
     if not settings.DODO_PRODUCT_OUTREACH:
         raise ValueError("DODO_PRODUCT_OUTREACH not configured")
     return settings.DODO_PRODUCT_OUTREACH

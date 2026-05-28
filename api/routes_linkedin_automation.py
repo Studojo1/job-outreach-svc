@@ -49,7 +49,10 @@ def _store_token(
     import secrets as _secrets
     from services.linkedin_outreach.crypto import encrypt as encrypt_single
     li_at_enc, jsessionid_enc, nonce = encrypt_pair(li_at, jsessionid)
-    proxy_session_id = _secrets.token_hex(8)
+    # Evomi caps sticky-session tokens at ~12 chars before returning 400 on
+    # the proxy CONNECT. token_hex(6) = 12 hex chars, well within the limit
+    # and still 48 bits of entropy (plenty of uniqueness per user).
+    proxy_session_id = _secrets.token_hex(6)
 
     cookies_blob_enc = None
     cookies_blob_nonce = None
@@ -80,6 +83,15 @@ def _store_token(
             cookies_blob_nonce=cookies_blob_nonce,
         ))
     db.commit()
+
+    # Fresh credentials → clear any stale auth-failure counts so the next
+    # campaign tick starts from zero, not mid-threshold.
+    from services.linkedin_outreach.automation_service import reset_auth_fail_count
+    from database.models import LinkedInCampaign
+    campaigns = db.query(LinkedInCampaign).filter(LinkedInCampaign.user_id == user_id).all()
+    for camp in campaigns:
+        reset_auth_fail_count(camp.id)
+
     return display_name
 
 
@@ -361,6 +373,9 @@ class CampaignResponse(BaseModel):
     connection_note: Optional[str]
     followup_message: Optional[str]
     daily_limit: int
+    weekly_invite_limit: int
+    send_with_note: bool
+    like_post_before_connect: bool
     total_leads: int
     total_sent: int
     total_accepted: int
@@ -383,6 +398,9 @@ def _campaign_to_response(c: LinkedInCampaign) -> CampaignResponse:
         connection_note=c.connection_note,
         followup_message=c.followup_message,
         daily_limit=c.daily_limit,
+        weekly_invite_limit=c.weekly_invite_limit or 95,
+        send_with_note=bool(c.send_with_note),
+        like_post_before_connect=bool(c.like_post_before_connect),
         total_leads=c.total_leads,
         total_sent=c.total_sent,
         total_accepted=c.total_accepted,
@@ -522,6 +540,245 @@ async def create_campaign_from_profile(
     return _campaign_to_response(campaign)
 
 
+class CreateCampaignFromOrderRequest(BaseModel):
+    order_id: int
+    # ~12/day clears a 200-invite plan in 17 days (≈ 2.5 weeks) while staying
+    # comfortably under the weekly 92-97 cap. Bounded 1-25 for safety.
+    daily_limit: int = Field(default=12, ge=1, le=25)
+
+
+@router.post("/campaigns/from-order", response_model=CampaignResponse)
+async def create_campaign_from_order(
+    body: CreateCampaignFromOrderRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a LinkedIn campaign from an OutreachOrder, using Apollo leads that have linkedin_url.
+
+    Pulls leads from the candidate's existing Lead records (no new Apollo calls).
+    Generates per-lead connection notes in the background using message_gen.
+    Updates the OutreachOrder with the new linkedin_campaign_id.
+    """
+    from database.models import Candidate, Lead, LeadScore, OutreachOrder
+
+    order = db.query(OutreachOrder).filter_by(
+        id=body.order_id, user_id=current_user.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Token must exist before any re-login path — the caller always hits
+    # /login/cookies first, which creates/refreshes the token.
+    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token_row:
+        raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first via the LinkedIn tab.")
+
+    # Re-login path A: order already linked to a campaign (normal re-auth).
+    # Runs before candidate/credits checks — re-login never needs to create
+    # anything new, so no candidate or credits are required.
+    if order.linkedin_campaign_id:
+        existing = db.query(LinkedInCampaign).filter_by(
+            id=order.linkedin_campaign_id, user_id=current_user.id,
+        ).first()
+        if existing:
+            if existing.status in ("auth_failed", "paused"):
+                existing.status = "running"
+            order.linkedin_connected_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return _campaign_to_response(existing)
+
+    # Re-login path B: user has a campaign but it's not linked to this order.
+    # Covers LKOT-migrated users (campaign created before OutreachOrder integration),
+    # users whose store drifted to a different order, and any other unlinked state.
+    latest_campaign = (
+        db.query(LinkedInCampaign)
+        .filter_by(user_id=current_user.id)
+        .order_by(LinkedInCampaign.id.desc())
+        .first()
+    )
+    if latest_campaign:
+        order.linkedin_campaign_id = latest_campaign.id
+        order.linkedin_connected_at = datetime.utcnow()
+        if latest_campaign.status in ("auth_failed", "paused"):
+            latest_campaign.status = "running"
+        db.commit()
+        db.refresh(latest_campaign)
+        return _campaign_to_response(latest_campaign)
+
+    # ── New campaign path ────────────────────────────────────────────────────
+    # Only reached when the user has no existing campaign at all.
+    # Now we need a candidate and credits.
+
+    candidate_id = order.candidate_id
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="Order has no candidate profile linked")
+
+    # Credits check. Fall back to plan_type for orders whose
+    # linkedin_credits_reserved column was never backfilled.
+    linkedin_limit = getattr(order, "linkedin_credits_reserved", 0) or 0
+    if linkedin_limit == 0:
+        plan_type = getattr(order, "plan_type", "email") or "email"
+        if plan_type in ("linkedin", "both"):
+            linkedin_limit = 200
+        else:
+            raise HTTPException(status_code=400, detail="No LinkedIn credits reserved for this order")
+
+    cand = db.query(Candidate).filter(Candidate.id == candidate_id, Candidate.user_id == current_user.id).first()
+    if not cand:
+        raise HTTPException(status_code=404, detail="Candidate profile not found")
+
+    # Pull leads ordered best-score first.
+    # profile_url may be NULL (Apollo search rarely returns linkedin_url) —
+    # the automation daemon resolves it lazily via Voyager just before sending.
+    leads_query = (
+        db.query(Lead)
+        .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
+        .filter(Lead.candidate_id == candidate_id)
+        .order_by(LeadScore.overall_score.desc().nullslast())
+        .limit(linkedin_limit)
+        .all()
+    )
+
+    if not leads_query:
+        raise HTTPException(
+            status_code=400,
+            detail="No leads found. Complete the lead discovery step first.",
+        )
+
+    # Derive campaign targeting from candidate profile (same logic as from-profile)
+    profile = cand.resume_profile if isinstance(cand.resume_profile, dict) else {}
+    target_roles = cand.target_roles if isinstance(cand.target_roles, list) else []
+    target_industries = cand.target_industries if isinstance(cand.target_industries, list) else []
+    likely_roles = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+
+    target_role = ""
+    if target_roles:
+        first = target_roles[0]
+        target_role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not target_role and likely_roles:
+        target_role = str(likely_roles[0])
+    if not target_role:
+        target_role = "professional"
+
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    locations: list[str] = []
+    for key in ("city", "country"):
+        v = (geo.get(key) or "").strip()
+        if v and v not in locations:
+            locations.append(v)
+
+    industries: list[str] = []
+    for ind in target_industries:
+        if isinstance(ind, str):
+            industries.append(ind)
+        elif isinstance(ind, dict):
+            v = ind.get("industry") or ind.get("name")
+            if v:
+                industries.append(str(v))
+
+    dream_companies = cand.dream_companies if isinstance(cand.dream_companies, list) else []
+    keyword_parts: list[str] = []
+    if dream_companies:
+        keyword_parts.extend([str(c.get("name") if isinstance(c, dict) else c) for c in dream_companies if c])
+    skills = profile.get("top_skills") or profile.get("skills") or []
+    if isinstance(skills, list) and skills:
+        keyword_parts.extend([str(s) for s in skills[:5]])
+    target_keywords = " ".join(keyword_parts).strip() or None
+
+    import random as _random
+    # Randomised weekly cap so concurrent campaigns don't all hit the same
+    # round number — looks more human and stays safely under LinkedIn's
+    # ~100/week soft limit. With ~12/day + 92-97/week cap, a user clears
+    # the 200-invite plan in ~16-18 days.
+    weekly_cap = _random.randint(92, 97)
+
+    campaign = LinkedInCampaign(
+        user_id=current_user.id,
+        candidate_id=cand.id,
+        name=f"{target_role} outreach",
+        status="running",
+        target_role=target_role,
+        target_industries=industries,
+        target_locations=locations,
+        target_company_sizes=[],
+        target_keywords=target_keywords,
+        daily_limit=body.daily_limit,
+        weekly_invite_limit=weekly_cap,
+        total_leads=len(leads_query),
+        launched_at=datetime.utcnow(),
+    )
+    db.add(campaign)
+    db.flush()  # get campaign.id before creating requests
+
+    # Create connection requests from Apollo leads
+    request_ids: list[int] = []
+    for lead in leads_query:
+        req = LinkedInConnectionRequest(
+            campaign_id=campaign.id,
+            user_id=current_user.id,
+            name=lead.name or "",
+            headline=lead.title or "",
+            company=lead.company or "",
+            location=lead.location or "",
+            profile_url=lead.linkedin_url,
+            status="pending",
+        )
+        db.add(req)
+        db.flush()
+        request_ids.append(req.id)
+
+    # Link campaign back to the order
+    order.linkedin_campaign_id = campaign.id
+    order.linkedin_connected_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(campaign)
+
+    # Generate per-lead connection notes in the background
+    def _gen_notes(camp_id: int, req_ids: list[int]) -> None:
+        from database.session import SessionLocal
+        from services.linkedin_outreach.message_gen import generate_connection_message
+        bg_db = SessionLocal()
+        try:
+            for req_id in req_ids:
+                req = bg_db.query(LinkedInConnectionRequest).filter_by(id=req_id).first()
+                if not req:
+                    continue
+                camp = bg_db.query(LinkedInCampaign).filter_by(id=camp_id).first()
+                if not camp:
+                    continue
+                try:
+                    msg = generate_connection_message(
+                        target_role=camp.target_role,
+                        lead_name=req.name or "",
+                        lead_headline=req.headline or "",
+                        lead_company=req.company or "",
+                        candidate_profile={},
+                    )
+                    req.connection_note = msg
+                    req.updated_at = datetime.utcnow()
+                    bg_db.commit()
+                except Exception:
+                    pass
+        finally:
+            bg_db.close()
+
+    import threading
+    threading.Thread(
+        target=_gen_notes,
+        args=(campaign.id, request_ids),
+        daemon=True,
+    ).start()
+
+    logger.info(
+        "Campaign %d created from order %d — %d leads, role=%r",
+        campaign.id, body.order_id, len(leads_query), target_role,
+    )
+    return _campaign_to_response(campaign)
+
+
 @router.get("/my-candidate")
 async def my_candidate(
     current_user: User = Depends(get_current_user),
@@ -619,6 +876,34 @@ async def update_campaign(
     c.connection_note = body.connection_note
     c.followup_message = body.followup_message
     c.daily_limit = body.daily_limit
+    c.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(c)
+    return _campaign_to_response(c)
+
+
+class UpdateCampaignSettingsRequest(BaseModel):
+    send_with_note: Optional[bool] = None
+    like_post_before_connect: Optional[bool] = None
+
+
+@router.patch("/campaigns/{campaign_id}/settings", response_model=CampaignResponse)
+async def update_campaign_settings(
+    campaign_id: int,
+    body: UpdateCampaignSettingsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Toggle operationally-safe settings without pausing the campaign.
+
+    These toggles only affect future sends; in-flight invites and the daemon's
+    pacing are unaffected, so there's no reason to force a pause/resume cycle.
+    """
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    if body.send_with_note is not None:
+        c.send_with_note = body.send_with_note
+    if body.like_post_before_connect is not None:
+        c.like_post_before_connect = body.like_post_before_connect
     c.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(c)
@@ -944,33 +1229,70 @@ async def send_one_now(
         db.commit()
         raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
 
-    req = (
+    # Try up to 5 pending requests — skip any that can't be resolved
+    candidates = (
         db.query(LinkedInConnectionRequest)
         .filter(
             LinkedInConnectionRequest.campaign_id == campaign_id,
             LinkedInConnectionRequest.status == "pending",
         )
-        .first()
+        .limit(5)
+        .all()
     )
-    if not req:
+    if not candidates:
         raise HTTPException(status_code=404, detail="No pending leads to send")
 
     from services.linkedin_outreach.automation_service import _decrypt_cookies_blob
+    from services.linkedin_outreach.voyager import resolve_linkedin_url
+    from core.config import settings as _settings
     cookies_blob = _decrypt_cookies_blob(token_row)
+    proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
 
-    # Resolve URN (best-effort — Playwright fallback works without it)
+    req = None
+    for candidate in candidates:
+        if not candidate.profile_url:
+            first_name = (candidate.name or "").split()[0] if candidate.name else ""
+            try:
+                resolved = await resolve_linkedin_url(
+                    first_name, candidate.company or "", candidate.headline or "",
+                    li_at, jsessionid, proxy_url=proxy_url,
+                )
+            except Exception:
+                resolved = None
+            if resolved:
+                candidate.profile_url = resolved
+                db.commit()
+                req = candidate
+                break
+            else:
+                candidate.status = "error"
+                candidate.error = "Could not resolve LinkedIn profile"
+                candidate.updated_at = datetime.utcnow()
+                db.commit()
+        else:
+            req = candidate
+            break
+
+    if not req:
+        raise HTTPException(status_code=404, detail="Could not resolve any pending leads — try again later")
+
+    # Resolve URN (best-effort — Playwright fallback works without it).
+    # Manual sends do NOT flip the campaign to auth_failed on a single
+    # LinkedInAuthError. LinkedIn returns HTTP 999 / login redirects on
+    # transient rate-limits + IP blocks too, and killing the campaign
+    # permanently on one click is too aggressive. The daemon handles real
+    # auth death across many ticks; one-off manual sends just report back.
     if not req.profile_urn:
         try:
             urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, token_row.proxy_session_id, cookies_blob)
-        except LinkedInAuthError:
-            c.status = "auth_failed"
-            c.updated_at = datetime.utcnow()
-            db.commit()
-            raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+        except LinkedInAuthError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
+            )
         if urn:
             req.profile_urn = urn
 
-    # Send — passes profile_url so Playwright fallback works even with no URN
     try:
         ok, send_error = await send_connection_request(
             li_at, jsessionid,
@@ -980,11 +1302,11 @@ async def send_one_now(
             profile_url=req.profile_url,
             cookies_blob=cookies_blob,
         )
-    except LinkedInAuthError:
-        c.status = "auth_failed"
-        c.updated_at = datetime.utcnow()
-        db.commit()
-        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect")
+    except LinkedInAuthError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
+        )
 
     if ok:
         req.status = "sent"
@@ -1057,6 +1379,8 @@ async def resume_campaign(
     c.status = "running"
     c.updated_at = datetime.utcnow()
     db.commit()
+    from services.linkedin_outreach.automation_service import reset_auth_fail_count
+    reset_auth_fail_count(c.id)
     return {"ok": True, "status": "running"}
 
 
@@ -1101,7 +1425,7 @@ class ConnectionRequestResponse(BaseModel):
     name: str
     headline: Optional[str]
     company: Optional[str]
-    profile_url: str
+    profile_url: Optional[str]
     connection_note: Optional[str]
     followup_message: Optional[str]
     match_reason: Optional[str]
@@ -1167,7 +1491,15 @@ async def list_requests(
     if status:
         q = q.filter(LinkedInConnectionRequest.status == status)
 
-    requests = q.order_by(LinkedInConnectionRequest.created_at.desc()).limit(limit).all()
+    # Show non-pending (sent/accepted/replied/error) first so progress is always visible,
+    # then pending by created_at asc so the queue order is preserved.
+    from sqlalchemy import case as sa_case
+    priority = sa_case(
+        (LinkedInConnectionRequest.status == "pending", 1),
+        (LinkedInConnectionRequest.status == "error", 2),
+        else_=0,
+    )
+    requests = q.order_by(priority, LinkedInConnectionRequest.created_at.asc()).limit(limit).all()
 
     return [
         ConnectionRequestResponse(
@@ -1189,6 +1521,250 @@ async def list_requests(
         )
         for r in requests
     ]
+
+
+# ── Inbox ──────────────────────────────────────────────────────────────────────
+# Lightweight inbox built on the data the daemon already collects (reply_text /
+# reply_received_at / accepted_at on each connection request). For deeper thread
+# history the user can click through to LinkedIn; replies sent from here go
+# through the same Voyager + Playwright-fallback pipeline as automated
+# follow-ups, so they look identical from LinkedIn's perspective.
+
+class InboxConversation(BaseModel):
+    request_id: int
+    name: str
+    headline: Optional[str]
+    company: Optional[str]
+    profile_url: Optional[str]
+    profile_image_url: Optional[str]
+    status: str  # accepted | followup_sent | replied
+    accepted_at: Optional[str]
+    followup_sent_at: Optional[str]
+    followup_message: Optional[str]
+    reply_text: Optional[str]
+    reply_sentiment: Optional[str]
+    reply_received_at: Optional[str]
+    last_activity_at: Optional[str]  # max of the above timestamps — for sort
+
+
+class InboxMessage(BaseModel):
+    direction: str   # "out" | "in"
+    text: str
+    sent_at: Optional[str]
+
+
+class InboxThreadResponse(BaseModel):
+    request_id: int
+    name: str
+    profile_url: Optional[str]
+    messages: list[InboxMessage]
+
+
+class InboxReplyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)
+
+
+def _conversation_from_request(r: LinkedInConnectionRequest) -> InboxConversation:
+    last = max(
+        [t for t in (r.reply_received_at, r.followup_sent_at, r.accepted_at) if t],
+        default=None,
+    )
+    return InboxConversation(
+        request_id=r.id,
+        name=r.name,
+        headline=r.headline,
+        company=r.company,
+        profile_url=r.profile_url,
+        profile_image_url=r.profile_image_url,
+        status=r.status,
+        accepted_at=r.accepted_at.isoformat() if r.accepted_at else None,
+        followup_sent_at=r.followup_sent_at.isoformat() if r.followup_sent_at else None,
+        followup_message=r.followup_message,
+        reply_text=r.reply_text,
+        reply_sentiment=r.reply_sentiment,
+        reply_received_at=r.reply_received_at.isoformat() if r.reply_received_at else None,
+        last_activity_at=last.isoformat() if last else None,
+    )
+
+
+@router.get("/campaigns/{campaign_id}/inbox", response_model=list[InboxConversation])
+async def inbox_list(
+    campaign_id: int,
+    only_replies: bool = False,
+    limit: int = 200,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List inbox conversations — accepted, followed-up, or replied.
+
+    Default returns everyone who's accepted (those are the people the user can
+    actually message). Set only_replies=true to filter to people who've replied.
+    """
+    _get_campaign_or_404(campaign_id, current_user.id, db)
+
+    statuses = ["replied"] if only_replies else ["accepted", "followup_sent", "replied"]
+
+    # Sort: replies first (newest), then followup_sent, then accepted (newest accept).
+    # Use a CASE for status priority + the relevant timestamp for in-bucket ordering.
+    from sqlalchemy import case as sa_case, desc, func as sa_func
+    status_priority = sa_case(
+        (LinkedInConnectionRequest.status == "replied", 0),
+        (LinkedInConnectionRequest.status == "followup_sent", 1),
+        else_=2,
+    )
+    activity_ts = sa_func.coalesce(
+        LinkedInConnectionRequest.reply_received_at,
+        LinkedInConnectionRequest.followup_sent_at,
+        LinkedInConnectionRequest.accepted_at,
+    )
+
+    rows = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+            LinkedInConnectionRequest.status.in_(statuses),
+        )
+        .order_by(status_priority.asc(), desc(activity_ts))
+        .limit(limit)
+        .all()
+    )
+    return [_conversation_from_request(r) for r in rows]
+
+
+@router.get("/campaigns/{campaign_id}/inbox/{request_id}", response_model=InboxThreadResponse)
+async def inbox_thread(
+    campaign_id: int,
+    request_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the message thread we know about for one connection request.
+
+    Sources, in order: the original connection note, the AI follow-up message,
+    and the latest captured reply. For full LinkedIn-side history the user
+    clicks through to the profile — fetching full conversation history
+    through the proxy is unreliable enough that we don't surface it here.
+    """
+    _get_campaign_or_404(campaign_id, current_user.id, db)
+    r = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == request_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found in this campaign")
+
+    msgs: list[InboxMessage] = []
+    if r.connection_note:
+        msgs.append(InboxMessage(
+            direction="out", text=r.connection_note,
+            sent_at=r.sent_at.isoformat() if r.sent_at else None,
+        ))
+    if r.followup_message and r.followup_sent_at:
+        msgs.append(InboxMessage(
+            direction="out", text=r.followup_message,
+            sent_at=r.followup_sent_at.isoformat(),
+        ))
+    if r.reply_text:
+        msgs.append(InboxMessage(
+            direction="in", text=r.reply_text,
+            sent_at=r.reply_received_at.isoformat() if r.reply_received_at else None,
+        ))
+
+    return InboxThreadResponse(
+        request_id=r.id, name=r.name, profile_url=r.profile_url, messages=msgs,
+    )
+
+
+@router.post("/campaigns/{campaign_id}/inbox/{request_id}/reply")
+async def inbox_reply(
+    campaign_id: int,
+    request_id: int,
+    body: InboxReplyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a manual reply on top of the daemon's automated thread.
+
+    Goes through the same Voyager + Playwright fallback used for follow-ups
+    so it doesn't tip LinkedIn off as a separate sender. We append the sent
+    message to the request's followup_message field (last-write-wins) and
+    bump followup_sent_at for inbox ordering.
+    """
+    from services.linkedin_outreach.automation_service import send_message, LinkedInAuthError
+    from services.linkedin_outreach.crypto import decrypt, decrypt_second, decrypt_single
+
+    campaign = _get_campaign_or_404(campaign_id, current_user.id, db)
+    r = (
+        db.query(LinkedInConnectionRequest)
+        .filter(
+            LinkedInConnectionRequest.id == request_id,
+            LinkedInConnectionRequest.campaign_id == campaign_id,
+        )
+        .first()
+    )
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found")
+    # Replies only make sense once they've accepted — LinkedIn rejects DMs
+    # to non-1st-degree connections anyway.
+    if r.status not in ("accepted", "followup_sent", "replied"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot send reply yet — connection status is '{r.status}'",
+        )
+
+    token = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
+    if not token:
+        raise HTTPException(status_code=400, detail="LinkedIn not connected")
+
+    try:
+        li_at = decrypt(token.li_at_enc, token.nonce)
+        jsessionid = decrypt_second(token.jsessionid_enc, token.nonce)
+    except Exception:
+        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed — reconnect")
+
+    cookies_blob = None
+    if getattr(token, "cookies_blob_enc", None) and getattr(token, "cookies_blob_nonce", None):
+        try:
+            cookies_blob = decrypt_single(token.cookies_blob_enc, token.cookies_blob_nonce)
+        except Exception:
+            cookies_blob = None
+
+    try:
+        ok = await send_message(
+            li_at, jsessionid,
+            r.profile_urn or "",
+            body.text,
+            session_id=f"user_{current_user.id}",
+            profile_url=r.profile_url,
+            cookies_blob=cookies_blob,
+        )
+    except LinkedInAuthError:
+        campaign.status = "auth_failed"
+        campaign.updated_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect first")
+
+    if not ok:
+        raise HTTPException(status_code=502, detail="LinkedIn rejected the message. Try again in a minute.")
+
+    # Treat manual reply as the latest activity on this thread.
+    r.followup_message = body.text
+    r.followup_sent_at = datetime.utcnow()
+    if r.status == "accepted":
+        r.status = "followup_sent"
+    r.updated_at = datetime.utcnow()
+
+    # Campaign-level counter
+    campaign.total_followups_sent = (campaign.total_followups_sent or 0) + 1
+    campaign.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(r)
+    return {"ok": True, "sent_at": r.followup_sent_at.isoformat()}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

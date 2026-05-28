@@ -257,6 +257,13 @@ class OutreachOrder(Base):
     campaign_paused_at      = Column(DateTime, nullable=True)
     campaign_completed_at   = Column(DateTime, nullable=True)
 
+    # LinkedIn channel
+    plan_type = Column(Text, nullable=False, default="email")  # "email" | "linkedin" | "both"
+    linkedin_campaign_id = Column(Integer, ForeignKey("linkedin_campaigns.id", ondelete="SET NULL"), nullable=True)
+    linkedin_connected_at = Column(DateTime, nullable=True)
+    linkedin_credits_reserved = Column(Integer, nullable=False, default=0)
+    linkedin_credits_used = Column(Integer, nullable=False, default=0)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -294,6 +301,7 @@ class PaymentOrder(Base):
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)
+    plan_id = Column(Text, nullable=True)  # e.g. "email_200", "linkedin_350", "both_500"
     coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
     outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="created", nullable=False)
@@ -401,7 +409,17 @@ class LinkedInCampaign(Base):
     connection_note = Column(Text)     # ≤300 chars, personalised per lead by AI
     followup_message = Column(Text)    # sent after connection accepted
     # Automation settings
-    daily_limit = Column(Integer, default=10)
+    daily_limit = Column(Integer, default=12)
+    # Acceptance rate is ~10pt higher without a connection note. Default off,
+    # surfaced in UI with a disclaimer if the user opts in.
+    send_with_note = Column(Boolean, nullable=False, default=False)
+    # Per-campaign rolling-7-day invite cap. Initialised to a random 92-97 at
+    # launch so we stay safely under LinkedIn's ~100/week soft limit without
+    # every campaign hitting the same round number.
+    weekly_invite_limit = Column(Integer, nullable=False, default=95)
+    # Optional: visit the lead's recent activity and like their latest post
+    # before sending the invite. Bumps acceptance for warm leads.
+    like_post_before_connect = Column(Boolean, nullable=False, default=False)
     # Aggregate stats (denormalised for fast reads)
     total_leads = Column(Integer, default=0)
     total_sent = Column(Integer, default=0)
@@ -426,7 +444,7 @@ class LinkedInConnectionRequest(Base):
     headline = Column(Text)
     company = Column(Text)
     location = Column(Text)
-    profile_url = Column(Text, nullable=False)
+    profile_url = Column(Text, nullable=True)   # resolved by daemon via Voyager if None
     profile_urn = Column(Text)         # fsd_profile URN for Voyager API
     profile_image_url = Column(Text)
     # Outreach content

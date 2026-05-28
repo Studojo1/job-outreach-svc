@@ -17,12 +17,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def _httpx_proxy(proxy_url: str | None) -> dict | None:
-    """Return httpx proxy dict for a given proxy URL (or settings fallback)."""
+def _httpx_proxy(proxy_url: str | None, session_id: str | None = None) -> dict | None:
+    """Return httpx proxy dict. When session_id is set, inject Evomi sticky
+    modifier into the password — keeps the user on one residential IP across
+    the call chain. See automation_service.apply_sticky_session() for why.
+    """
     from core.config import settings
+    from services.linkedin_outreach.automation_service import apply_sticky_session
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
+    url = apply_sticky_session(url, session_id)
     # Evomi host:port:user:pass format
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
         without_scheme = url[len("http://"):]
@@ -37,15 +42,16 @@ def _httpx_proxy(proxy_url: str | None) -> dict | None:
     return {"http://": url, "https://": url}
 
 
-async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None:
+async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None, session_id: str | None = None) -> str | None:
     """Obtain a fresh JSESSIONID for the current proxy IP via a lightweight httpx request.
 
-    We hit /robots.txt (no auth needed, never triggers bot detection) and then
-    the authenticated /feed/ to get LinkedIn to issue a JSESSIONID for this IP.
-    The JSESSIONID is IP-bound; injecting a fresh one prevents the redirect-loop
-    that occurs when a stale (different-IP) JSESSIONID is sent to a new proxy IP.
+    The JSESSIONID we get back is bound to whatever proxy IP this httpx call
+    landed on. When session_id is passed, we hit the SAME sticky-session IP
+    that downstream Playwright calls will use, so JSESSIONID and request IP
+    agree. Without it, JSESSIONID is bound to one IP and the actual operation
+    uses a different IP → LinkedIn rejects with redirect/999.
     """
-    proxies = _httpx_proxy(proxy_url)
+    proxies = _httpx_proxy(proxy_url, session_id)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -59,30 +65,29 @@ async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None
     try:
         async with httpx.AsyncClient(
             timeout=20,
-            follow_redirects=False,
+            follow_redirects=True,  # follow to final 200 where LinkedIn sets JSESSIONID
             proxies=proxies,
-            headers={
-                "User-Agent": ua,
-                "Cookie": f"li_at={li_at}",
-                "Accept": "text/html,application/xhtml+xml",
-            },
         ) as client:
             for canary in _CANARY_SLUGS:
                 try:
-                    resp = await client.get(f"https://www.linkedin.com/in/{canary}/")
-                    jsessionid = resp.cookies.get("JSESSIONID")
+                    resp = await client.get(
+                        f"https://www.linkedin.com/in/{canary}/",
+                        headers={
+                            "User-Agent": ua,
+                            "Cookie": f"li_at={li_at}",
+                            "Accept": "text/html,application/xhtml+xml",
+                        },
+                    )
+                    # Check jar first (populated as redirects are followed)
+                    jsessionid = client.cookies.get("JSESSIONID") or resp.cookies.get("JSESSIONID")
                     logger.info(
                         "_get_fresh_jsessionid: canary=%s status=%s jsessionid=%s",
                         canary, resp.status_code, repr(jsessionid),
                     )
                     if jsessionid:
                         return jsessionid
-                    if resp.status_code not in (200, 301, 302):
-                        continue  # blocked — try next canary
-                    # For 301/302 with no JSESSIONID yet, the cookie may be in the jar
-                    jsessionid = client.cookies.get("JSESSIONID")
-                    if jsessionid:
-                        return jsessionid
+                    if resp.status_code not in (200, 301, 302, 999):
+                        continue
                 except Exception as e:
                     logger.debug("_get_fresh_jsessionid: canary %s failed (%s)", canary, e)
             logger.warning("_get_fresh_jsessionid: all canaries exhausted, no JSESSIONID obtained")
@@ -95,12 +100,17 @@ async def _get_fresh_jsessionid(li_at: str, proxy_url: str | None) -> str | None
 _BROWSER_SEM = asyncio.Semaphore(3)
 
 
-def _parse_proxy(proxy_url: str | None) -> dict | None:
-    """Convert proxy URL to Playwright proxy dict. Handles standard and Evomi generator formats."""
+def _parse_proxy(proxy_url: str | None, session_id: str | None = None) -> dict | None:
+    """Convert proxy URL to Playwright proxy dict. Handles standard and Evomi
+    generator formats. When session_id is set, injects Evomi sticky modifier
+    into the password so the browser pins to one residential IP for the call.
+    """
     from core.config import settings
+    from services.linkedin_outreach.automation_service import apply_sticky_session
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
+    url = apply_sticky_session(url, session_id)
 
     # Evomi generator emits host:port:user:pass — convert to standard http://user:pass@host:port
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
@@ -240,45 +250,41 @@ async def _find_connect_button(page):
         """)
         logger.info("Playwright: More dropdown items: %s", dropdown_items)
 
-        # Find Connect link by vanityName from the current URL.
+        # Find Connect link by vanityName in the dropdown.
         # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
         # Scoping by vanityName avoids PYMK "Connect" links on the same page.
-        # Use Playwright locator.click(force=True) — CDP-level click generates isTrusted=true
-        # events which LinkedIn requires to open the invite modal.
         vanity = page.url.rstrip('/').split('/')[-1]
 
-        # Get the full href of the Connect link so we can navigate to it directly.
-        # Clicking the <a> (JS or CDP) opens a dropdown but LinkedIn's SPA click
-        # handler doesn't reliably open the modal in headless contexts. Direct
-        # page.goto(href) forces the SPA router to handle the invite route.
-        connect_href = await page.evaluate(f"""
+        # Click the Connect link via real CDP mouse events (not JS .click() and not
+        # page.goto to the href). JS click generates isTrusted=false which LinkedIn
+        # ignores for invite links. page.goto to /preload/custom-invite/ does a full
+        # page load, losing the SPA context, so the invite modal never renders.
+        # Getting the bounding box and using page.mouse.click fires a trusted mouse
+        # event at the element's center, letting the SPA handle it client-side.
+        connect_handle = await page.evaluate_handle(f"""
             () => {{
                 const link = document.querySelector('a[href*="custom-invite"][href*="{vanity}"]');
-                return link ? link.href : null;
+                return link || null;
             }}
         """)
-        logger.info("Playwright: Connect href for %s: %s", vanity, connect_href)
-
-        if connect_href:
-            # Navigate directly to the invite URL — the SPA router opens the modal.
-            # Do NOT click Send here; let the outer playwright_send_invitation handle it
-            # so ok=True is only set after confirmed Send click + API interception.
-            # Use wait_until="commit" (fires on first byte) so slow proxy responses
-            # don't time out the goto before the DOM has a chance to render.
-            # If it still times out, return the sentinel anyway — the outer code will
-            # wait up to 20s for the Send button modal to appear.
-            logger.info("Playwright: navigating to Connect href directly")
+        connect_elem = connect_handle.as_element()
+        if connect_elem:
             try:
-                await page.goto(connect_href, wait_until="commit", timeout=40000)
-                logger.info("Playwright: after goto Connect href, url=%s", page.url)
-            except Exception as goto_err:
-                logger.warning(
-                    "Playwright: Connect href navigation timed out (%s) — "
-                    "checking page state for Send button anyway",
-                    goto_err,
-                )
-            await page.wait_for_timeout(2000)
-            return "DROPDOWN_CONNECT_CLICKED"
+                box = await connect_elem.bounding_box()
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    logger.info("Playwright: clicking Connect link via mouse at (%.0f, %.0f) for %s", cx, cy, vanity)
+                    await page.mouse.click(cx, cy)
+                    await page.wait_for_timeout(2000)
+                    return "DROPDOWN_CONNECT_CLICKED"
+                else:
+                    logger.warning("Playwright: Connect link has no bounding box for %s — falling back to JS click", vanity)
+                    await page.evaluate("el => el.click()", connect_elem)
+                    await page.wait_for_timeout(2000)
+                    return "DROPDOWN_CONNECT_CLICKED"
+            except Exception as click_err:
+                logger.warning("Playwright: Connect link click failed for %s: %s", vanity, click_err)
 
         logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
         await page.keyboard.press("Escape")
@@ -296,6 +302,7 @@ async def playwright_send_invitation(
     proxy_url: str | None = None,
     existing_urn: str | None = None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Send a LinkedIn connection request by clicking the Connect button in a headless browser.
 
@@ -314,12 +321,14 @@ async def playwright_send_invitation(
     if not slug:
         return {"ok": False, "error": "Invalid profile URL"}
 
-    proxy = _parse_proxy(proxy_url)
+    proxy = _parse_proxy(proxy_url, session_id)
 
     # Prime the proxy IP: make an httpx request first so LinkedIn issues a fresh
     # JSESSIONID for the current proxy IP. Injecting a stale JSESSIONID (from a
-    # different IP) into the browser causes LinkedIn to redirect-loop.
-    fresh_jsessionid = await _get_fresh_jsessionid(li_at, proxy_url)
+    # different IP) into the browser causes LinkedIn to redirect-loop. Pass the
+    # session_id so the JSESSIONID-fetch lands on the SAME sticky IP the
+    # browser will use.
+    fresh_jsessionid = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
     effective_jsessionid = fresh_jsessionid or jsessionid
     jsessionid_val = effective_jsessionid if effective_jsessionid.startswith('"') else f'"{effective_jsessionid}"'
     logger.info("Playwright: %s — using %s JSESSIONID", slug, "fresh" if fresh_jsessionid else "stored")
@@ -647,6 +656,417 @@ async def playwright_send_invitation(
             except Exception as e:
                 logger.error("Playwright send failed for %s: %s", slug, e)
                 return {"ok": False, "error": str(e), "profile_urn": existing_urn}
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
+
+
+async def playwright_send_message(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    message: str,
+    proxy_url: str | None = None,
+    cookies_blob: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Send a LinkedIn DM to a 1st-degree connection via Playwright.
+
+    Navigates to the profile, finds the Message button (only visible for 1st-degree
+    connections), types the message, and clicks Send.
+
+    Returns {"ok": True} on success, {"ok": False, "error": "..."} on failure.
+    "not_connected" error means the person hasn't accepted the connection request yet.
+    """
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+    from services.linkedin_outreach.automation_service import LinkedInAuthError
+
+    slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
+    proxy_cfg = _parse_proxy(proxy_url, session_id)
+
+    # Prime the proxy IP before acquiring the browser semaphore (pure network I/O)
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
+    active_js = fresh_js or jsessionid
+    jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
+    logger.info("Playwright msg: %s — using %s JSESSIONID", slug, "fresh" if fresh_js else "stored")
+
+    async with _BROWSER_SEM:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy_cfg,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--window-size=1280,800",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="Asia/Calcutta",
+                java_script_enabled=True,
+            )
+
+            # Inject cookies before any navigation — same pattern as playwright_send_invitation
+            injected_full_jar = False
+            if cookies_blob:
+                try:
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        domain = c.get("domain") or ".linkedin.com"
+                        ss_raw = (c.get("sameSite") or "no_restriction").lower()
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": domain,
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(ss_raw, "Lax"),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                        logger.info("Playwright msg: %s — injected full cookie jar (%d cookies)", slug, len(pw_cookies))
+                except Exception as e:
+                    logger.warning("Playwright msg: could not inject cookie jar: %s", e)
+
+            if not injected_full_jar:
+                # Fallback: inject li_at (domain-wide) + fresh JSESSIONID (www-scoped)
+                await context.add_cookies([{
+                    "name": "li_at",
+                    "value": li_at,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }])
+                if fresh_js:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID",
+                        "value": jsessionid_val,
+                        "domain": "www.linkedin.com",
+                        "path": "/",
+                        "httpOnly": False,
+                        "secure": True,
+                        "sameSite": "None",
+                    }])
+
+            page = await context.new_page()
+            try:
+                target_url = profile_url if "/in/" in profile_url else f"https://www.linkedin.com/in/{slug}/"
+                try:
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(3000)
+                except PWTimeout:
+                    await page.wait_for_timeout(3000)
+
+                if "/login" in page.url or "/authwall" in page.url:
+                    raise LinkedInAuthError("Session expired — redirected to login")
+
+                title = await page.title()
+                logger.info("Playwright msg: %s loaded — title=%r url=%r", slug, title, page.url)
+
+                # Look for Message button (only appears for 1st-degree connections)
+                msg_btn = None
+                for selector in [
+                    'button:has-text("Message")',
+                    'a:has-text("Message")',
+                    '[data-control-name="message"]',
+                    'button[aria-label*="Message"]',
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=3000):
+                            msg_btn = btn
+                            logger.info("Playwright msg: found Message button via %r", selector)
+                            break
+                    except Exception:
+                        continue
+
+                if not msg_btn:
+                    # Scroll down a bit and retry
+                    await page.evaluate("window.scrollTo(0, 200)")
+                    await page.wait_for_timeout(1000)
+                    for selector in ['button:has-text("Message")', 'a:has-text("Message")']:
+                        try:
+                            btn = page.locator(selector).first
+                            if await btn.is_visible(timeout=2000):
+                                msg_btn = btn
+                                break
+                        except Exception:
+                            continue
+
+                if not msg_btn:
+                    btns = await page.evaluate("""
+                        () => Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim()).filter(t => t).slice(0, 15)
+                    """)
+                    logger.info("Playwright msg: no Message btn — buttons=%s", btns[:8])
+                    return {"ok": False, "error": "not_connected", "buttons": btns[:8]}
+
+                await msg_btn.scroll_into_view_if_needed()
+                await msg_btn.click()
+                await page.wait_for_timeout(2000)
+
+                # Find the message textarea
+                textarea = None
+                for selector in [
+                    ".msg-form__contenteditable",
+                    'div[role="textbox"][contenteditable="true"]',
+                    "div[contenteditable='true']",
+                    ".msg-form__msg-content-container div[contenteditable]",
+                ]:
+                    try:
+                        el = page.locator(selector).first
+                        if await el.is_visible(timeout=3000):
+                            textarea = el
+                            break
+                    except Exception:
+                        continue
+
+                if not textarea:
+                    return {"ok": False, "error": "message_textarea_not_found"}
+
+                await textarea.click()
+                await page.wait_for_timeout(500)
+                await textarea.fill(message)
+                await page.wait_for_timeout(800)
+
+                # Find and click Send
+                send_btn = None
+                for selector in [
+                    "button.msg-form__send-btn",
+                    'button[aria-label*="Send" i]',
+                    'button:has-text("Send")',
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=3000):
+                            send_btn = btn
+                            break
+                    except Exception:
+                        continue
+
+                if not send_btn:
+                    return {"ok": False, "error": "send_button_not_found"}
+
+                await send_btn.click()
+                await page.wait_for_timeout(1500)
+                logger.info("Playwright msg: message sent to %s", slug)
+                return {"ok": True}
+
+            except LinkedInAuthError:
+                raise
+            except PWTimeout:
+                return {"ok": False, "error": "page_timeout"}
+            except Exception as e:
+                logger.error("Playwright send_message failed for %s: %s", slug, e)
+                return {"ok": False, "error": str(e)}
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
+
+
+async def playwright_like_recent_post(
+    li_at: str,
+    jsessionid: str,
+    profile_url: str,
+    proxy_url: str | None = None,
+    cookies_blob: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Visit a profile's recent activity and like their most recent post.
+
+    Best-effort warmup before sending a connection request — LinkedIn's activity
+    feed shows that we engaged with their content, which lifts acceptance for
+    active users. Skipped silently (returns {"ok": True, "skipped": True, ...})
+    when:
+      - No posts found on the activity page (inactive profile)
+      - The latest post is already liked
+      - The Like button isn't where we expect (LinkedIn DOM drift)
+
+    Never raises — failures here must not block the actual connect step.
+    """
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+    from services.linkedin_outreach.automation_service import LinkedInAuthError
+
+    slug = profile_url.rstrip("/").split("/in/")[-1].split("?")[0] if "/in/" in profile_url else profile_url
+    proxy_cfg = _parse_proxy(proxy_url, session_id)
+
+    fresh_js = await _get_fresh_jsessionid(li_at, proxy_url, session_id)
+    active_js = fresh_js or jsessionid
+    jsessionid_val = active_js if active_js.startswith('"') else f'"{active_js}"'
+
+    async with _BROWSER_SEM:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy_cfg,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--window-size=1280,800",
+                ],
+                ignore_default_args=["--enable-automation"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+                locale="en-US",
+                timezone_id="Asia/Calcutta",
+                java_script_enabled=True,
+            )
+
+            injected_full_jar = False
+            if cookies_blob:
+                try:
+                    import json as _json
+                    _ss_map = {
+                        "no_restriction": "None", "lax": "Lax", "strict": "Strict",
+                        "none": "None", "unspecified": "Lax",
+                    }
+                    pw_cookies = []
+                    for c in _json.loads(cookies_blob):
+                        name, value = c.get("name"), c.get("value")
+                        if not name or value is None:
+                            continue
+                        pw_cookies.append({
+                            "name": name,
+                            "value": value,
+                            "domain": c.get("domain") or ".linkedin.com",
+                            "path": c.get("path") or "/",
+                            "httpOnly": bool(c.get("httpOnly")),
+                            "secure": bool(c.get("secure", True)),
+                            "sameSite": _ss_map.get(
+                                (c.get("sameSite") or "no_restriction").lower(), "Lax"
+                            ),
+                        })
+                    if pw_cookies:
+                        await context.add_cookies(pw_cookies)
+                        injected_full_jar = True
+                except Exception as e:
+                    logger.warning("Playwright like-post: jar inject failed: %s", e)
+
+            if not injected_full_jar:
+                await context.add_cookies([{
+                    "name": "li_at", "value": li_at, "domain": ".linkedin.com",
+                    "path": "/", "httpOnly": True, "secure": True, "sameSite": "None",
+                }])
+                if fresh_js:
+                    await context.add_cookies([{
+                        "name": "JSESSIONID", "value": jsessionid_val,
+                        "domain": "www.linkedin.com", "path": "/",
+                        "httpOnly": False, "secure": True, "sameSite": "None",
+                    }])
+
+            page = await context.new_page()
+            try:
+                activity_url = f"https://www.linkedin.com/in/{slug}/recent-activity/all/"
+                try:
+                    await page.goto(activity_url, wait_until="domcontentloaded", timeout=45000)
+                    await page.wait_for_timeout(3000)
+                except PWTimeout:
+                    return {"ok": False, "skipped": True, "error": "activity_page_timeout"}
+
+                if "/login" in page.url or "/authwall" in page.url:
+                    raise LinkedInAuthError("Session expired — redirected to login (like-post)")
+
+                # Find the first feed update on the activity page. LinkedIn's
+                # selectors change frequently, so try several patterns.
+                # Returns:
+                #   { found: true, alreadyLiked: bool }  on success path
+                #   { found: false, reason: 'no_posts' | 'no_like_button' }
+                result = await page.evaluate(
+                    """
+                    () => {
+                        // Anchor on the post container — multiple known class hooks.
+                        const post = document.querySelector([
+                            'div.feed-shared-update-v2',
+                            'div[data-id^="urn:li:activity"]',
+                            'div.scaffold-finite-scroll__content article',
+                            'div.profile-creator-shared-feed-update__container',
+                        ].join(', '));
+                        if (!post) return { found: false, reason: 'no_posts' };
+
+                        // Find the Like / React button inside this post.
+                        // 1st-priority: explicit React Like button (aria-label contains 'Like').
+                        // 2nd: any reactions trigger button.
+                        const candidates = Array.from(post.querySelectorAll('button')).filter((b) => {
+                            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                            const txt = (b.innerText || '').trim().toLowerCase();
+                            return (
+                                aria.includes('react like') ||
+                                aria === 'like' ||
+                                aria.startsWith('like ') ||
+                                (txt === 'like' && b.querySelector('svg, use'))
+                            );
+                        });
+                        const btn = candidates[0];
+                        if (!btn) return { found: false, reason: 'no_like_button' };
+
+                        // Detect already-liked: aria-pressed=true, or 'active' / 'reacted' class.
+                        const ariaPressed = (btn.getAttribute('aria-pressed') || '').toLowerCase();
+                        const cls = (btn.className || '').toLowerCase();
+                        const alreadyLiked = (
+                            ariaPressed === 'true' ||
+                            cls.includes('react-button--active') ||
+                            cls.includes('reactions-react-button--active')
+                        );
+
+                        if (alreadyLiked) return { found: true, alreadyLiked: true };
+
+                        // Scroll into view so the click registers, then click.
+                        btn.scrollIntoView({ block: 'center' });
+                        btn.click();
+                        return { found: true, alreadyLiked: false };
+                    }
+                    """,
+                )
+
+                if not result.get("found"):
+                    logger.info("like-post %s: no actionable post (%s) — skipping", slug, result.get("reason"))
+                    return {"ok": True, "skipped": True, "reason": result.get("reason")}
+
+                if result.get("alreadyLiked"):
+                    logger.info("like-post %s: latest post already liked — skipping", slug)
+                    return {"ok": True, "skipped": True, "reason": "already_liked"}
+
+                # Give LinkedIn's like POST a moment to land before we tear down.
+                await page.wait_for_timeout(1500)
+                logger.info("like-post %s: liked the latest post", slug)
+                return {"ok": True, "liked": True}
+
+            except LinkedInAuthError:
+                raise
+            except Exception as e:
+                logger.warning("Playwright like-post failed for %s: %s", slug, e)
+                return {"ok": False, "skipped": True, "error": str(e)}
             finally:
                 await page.close()
                 await context.close()

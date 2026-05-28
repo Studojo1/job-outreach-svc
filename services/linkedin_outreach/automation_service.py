@@ -21,20 +21,51 @@ def _is_ist_sending_window() -> bool:
     return 9 <= hour < 18
 
 
+def apply_sticky_session(proxy_url: str, session_id: str | None) -> str:
+    """Inject Evomi sticky-session modifier into the password portion of the URL.
+
+    Evomi's URL convention is `user:password_modifier1_modifier2@host:port` —
+    targeting modifiers (country, city) go in the *password* with `_key-value`
+    suffixes. Sticky sessions follow the same pattern with `_session-XXX`.
+
+    Empirically tested 2026-05-23: `_session-{token}` pins a residential IP
+    for the lifetime of the session token AND respects the preceding
+    `_country-IN_city-bengaluru` geo modifiers (got `205.254.184.6` in
+    Bengaluru across multiple requests with the same token).
+
+    Why this matters: without sticky, every httpx call gets a fresh Evomi
+    IP. LinkedIn sees the "same user" jumping across dozens of residential
+    IPs in minutes, which trips bot detection (HTTP 999 / login redirects).
+    With sticky, one user = one IP for ~30min, looks like a real session.
+    """
+    if not session_id or not proxy_url:
+        return proxy_url
+
+    import re as _re
+    m = _re.match(r"^(http://[^:]+):([^@]+)@(.+)$", proxy_url)
+    if not m:
+        return proxy_url
+
+    scheme_user, password, host_port = m.group(1), m.group(2), m.group(3)
+    # Don't double-append if a session marker is already in the password
+    if "_session-" in password:
+        return proxy_url
+    return f"{scheme_user}:{password}_session-{session_id}@{host_port}"
+
+
 def _proxy(session_id: str | None = None) -> dict:
     """Build httpx proxy kwarg for Evomi residential proxy.
 
-    Evomi sticky-session URL variants fail with 407 on HTTPS CONNECT tunneling
-    (LinkedIn). Plain credential URL works correctly and gives a fresh
-    residential IP per request. Rate-limiting (90-240s between sends) is the
-    primary anti-ban mechanism, not IP consistency. session_id is kept for
-    API compatibility but is not used.
+    Uses sticky-session URL when session_id is provided — gives this user
+    a consistent residential IP for the duration of the proxy session (we
+    use `proxy_session_id` from the LinkedInToken row, which is stable per
+    user-session). Falls back to rotating IP when no session_id.
     """
     from core.config import settings
     base_url = (settings.LINKEDIN_PROXY_URL or "").strip()
     if not base_url:
         return {}
-    return {"proxy": base_url}
+    return {"proxy": apply_sticky_session(base_url, session_id)}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
 MAX_DAILY_REQUESTS = 25
@@ -44,8 +75,25 @@ MAX_GAP_SECONDS = 240
 
 # Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
 _last_accept_check: dict[int, float] = {}
+# Consecutive auth-failure count per campaign. Reset on any success.
+# LinkedIn returns 999 / login redirects for both transient rate-limits AND
+# genuinely-expired sessions, and the bootstrap pass can't distinguish them.
+# Tolerate up to AUTH_FAIL_THRESHOLD consecutive failures before flipping the
+# campaign to auth_failed, so a brief rate-limit doesn't permanently kill it.
+_auth_fail_count: dict[int, int] = {}
+AUTH_FAIL_THRESHOLD = 5
+
+
+def reset_auth_fail_count(campaign_id: int) -> None:
+    """Clear the consecutive auth-failure counter for a campaign.
+
+    Call this whenever the user provides fresh credentials or manually resumes
+    an auth_failed campaign, so a stale count doesn't immediately re-trigger
+    the auth_failed state on the next tick.
+    """
+    _auth_fail_count.pop(campaign_id, None)
 _last_reply_check: dict[int, float] = {}
-_ACCEPT_INTERVAL = 14400  # 4 hours
+_ACCEPT_INTERVAL = 300  # 5 minutes
 _REPLY_INTERVAL = 7200    # 2 hours
 
 
@@ -153,7 +201,14 @@ async def resolve_profile_urn(
 
 
 class LinkedInAuthError(Exception):
-    """Raised when LinkedIn returns 401/403 indicating an expired or invalid session."""
+    """Raised when LinkedIn returns 401/403 indicating an expired or invalid session.
+
+    Set revoked=True when LinkedIn explicitly sends set-cookie: li_at=delete me
+    (Max-Age=0), meaning the session is permanently dead and retrying is pointless.
+    """
+    def __init__(self, message: str = "", revoked: bool = False):
+        super().__init__(message)
+        self.revoked = revoked
 
 
 async def send_connection_request(
@@ -181,8 +236,7 @@ async def send_connection_request(
     """
     # If we have no URN, skip Voyager attempts — they require profileId.
     if not profile_urn and profile_url:
-        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob)
-
+        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob, session_id=session_id)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -219,13 +273,21 @@ async def send_connection_request(
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
-            # Seed GET — the response Set-Cookies will refresh JSESSIONID/lidc for this proxy IP.
-            seed = await client.get(
-                "https://www.linkedin.com/",
-                headers={"Cookie": seed_cookie_header, "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
-                follow_redirects=True,
-            )
-            raw_csrf = client.cookies.get("JSESSIONID") or jsessionid
+            # Seed GET — send ONLY li_at (no stale JSESSIONID) so LinkedIn is forced
+            # to issue a fresh JSESSIONID for this proxy IP. Sending the stale one
+            # causes LinkedIn to accept it as-is and return no new Set-Cookie.
+            # A public profile page is used because / doesn't trigger JSESSIONID issuance.
+            _fresh_jsessionid = None
+            for _canary in ("williamhgates", "jeffweiner08", "reidhoffman"):
+                seed = await client.get(
+                    f"https://www.linkedin.com/in/{_canary}/",
+                    headers={"Cookie": f"li_at={li_at}", "User-Agent": ua, "Accept": "text/html,application/xhtml+xml"},
+                    follow_redirects=True,
+                )
+                _fresh_jsessionid = seed.cookies.get("JSESSIONID") or client.cookies.get("JSESSIONID")
+                if _fresh_jsessionid:
+                    break
+            raw_csrf = _fresh_jsessionid or jsessionid
             # LinkedIn stores JSESSIONID as "ajax:XXXX" (with surrounding quotes).
             # The csrf-token header must be the bare value; Cookie header must keep quotes.
             csrf = raw_csrf.strip('"')
@@ -291,7 +353,12 @@ async def send_connection_request(
                 if r.status_code in (200, 201):
                     return True, ""
                 if r.status_code in (401, 403):
-                    raise LinkedInAuthError(f"Session expired (status {r.status_code})")
+                    set_cookie = r.headers.get("set-cookie", "")
+                    revoked = "li_at=delete me" in set_cookie
+                    raise LinkedInAuthError(
+                        f"Session {'revoked' if revoked else 'expired'} (status {r.status_code})",
+                        revoked=revoked,
+                    )
                 res = r
 
         last_status = res.status_code if res is not None else "no_response"
@@ -307,7 +374,7 @@ async def send_connection_request(
     # Playwright fallback: click the Connect button in a real browser
     # Prefer the real profile_url if caller passed it, else reconstruct from URN.
     target_url = profile_url or f"https://www.linkedin.com/in/{profile_urn}/"
-    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob)
+    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob, session_id=session_id)
 
 
 async def _send_via_playwright(
@@ -317,6 +384,7 @@ async def _send_via_playwright(
     note: str,
     existing_urn: str | None,
     cookies_blob: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
@@ -330,6 +398,7 @@ async def _send_via_playwright(
             proxy_url=proxy_url,
             existing_urn=existing_urn,
             cookies_blob=cookies_blob,
+            session_id=session_id,
         )
         if result.get("ok"):
             logger.info("Playwright send succeeded for %s", profile_url)
@@ -350,18 +419,22 @@ async def send_message(
     profile_urn: str,
     message: str,
     session_id: str | None = None,
+    profile_url: str | None = None,
+    cookies_blob: str | None = None,
 ) -> bool:
-    """Send a LinkedIn DM to a 1st-degree connection."""
+    """Send a LinkedIn DM to a 1st-degree connection.
+
+    Tries the Voyager messaging API first; falls back to Playwright if the API
+    returns a non-2xx status (common when the session was established through a
+    different proxy IP than the current request).
+    """
     payload = {
         "keyVersion": "LEGACY_INBOX",
         "conversationCreate": {
             "eventCreate": {
                 "value": {
                     "com.linkedin.voyager.messaging.create.MessageCreate": {
-                        "attributedBody": {
-                            "text": message,
-                            "attributes": [],
-                        },
+                        "attributedBody": {"text": message, "attributes": []},
                         "attachments": [],
                     }
                 }
@@ -374,12 +447,48 @@ async def send_message(
         async with httpx.AsyncClient(timeout=20, **_proxy(session_id)) as client:
             res = await client.post(
                 "https://www.linkedin.com/voyager/api/messaging/conversations",
-                headers=_headers(li_at, jsessionid),
+                headers=_headers(li_at, jsessionid, cookies_blob),
                 json=payload,
             )
-        return res.status_code in (200, 201)
+        if res.status_code in (200, 201):
+            return True
+        logger.warning(
+            "send_message Voyager API returned %d — falling back to Playwright", res.status_code
+        )
     except Exception as e:
-        logger.error("send_message failed: %s", e)
+        logger.warning("send_message Voyager API error — falling back to Playwright: %s", e)
+
+    # Playwright fallback — more reliable when session IP differs from request IP
+    if not profile_url and profile_urn:
+        profile_url = f"https://www.linkedin.com/in/{profile_urn}/"
+    if not profile_url:
+        return False
+    try:
+        from services.linkedin_outreach.playwright_service import playwright_send_message
+        from core.config import settings as _s
+        proxy = (_s.LINKEDIN_PROXY_URL or "").strip() or None
+        result = await playwright_send_message(
+            li_at=li_at,
+            jsessionid=jsessionid,
+            profile_url=profile_url,
+            message=message,
+            proxy_url=proxy,
+            cookies_blob=cookies_blob,
+            session_id=session_id,
+        )
+        if result.get("ok"):
+            logger.info("send_message Playwright succeeded for %s", profile_url)
+            return True
+        err = result.get("error", "unknown")
+        if err == "not_connected":
+            logger.info("send_message: %s not yet connected (no Message button)", profile_url)
+        else:
+            logger.warning("send_message Playwright failed: %s", err)
+        return False
+    except LinkedInAuthError:
+        raise
+    except Exception as e:
+        logger.error("send_message Playwright fallback failed: %s", e)
         return False
 
 
@@ -389,17 +498,39 @@ async def check_connection_accepted(
     profile_urn: str,
     session_id: str | None = None,
 ) -> bool:
-    """Check if a profile is now a 1st-degree connection."""
+    """Check if a profile is now a 1st-degree connection.
+
+    LinkedIn deprecated /networkinfo (returns 410). Fall back through two
+    alternative Voyager endpoints that still expose distance info.
+    """
     try:
         async with httpx.AsyncClient(timeout=15, **_proxy(session_id)) as client:
+            # Primary: main profile endpoint — returns distance alongside profile data
             res = await client.get(
-                f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}/networkinfo",
+                f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}",
                 headers=_headers(li_at, jsessionid),
             )
-        if res.status_code == 200:
-            data = res.json()
-            distance = data.get("distance", {}).get("value") or data.get("distance", "")
-            return str(distance) == "DISTANCE_1"
+            if res.status_code == 200:
+                data = res.json()
+                dist = (data.get("distance") or {}).get("value") or data.get("distance", "")
+                if str(dist) == "DISTANCE_1":
+                    return True
+                if str(dist) in ("DISTANCE_2", "DISTANCE_3", "OUT_OF_NETWORK"):
+                    return False
+                # distance field absent — try profileView which always has it
+            if res.status_code in (200, 404, 410):
+                res2 = await client.get(
+                    f"https://www.linkedin.com/voyager/api/identity/profiles/{profile_urn}/profileView",
+                    headers=_headers(li_at, jsessionid),
+                )
+                if res2.status_code == 200:
+                    data2 = res2.json()
+                    dist2 = (
+                        (data2.get("memberRelationship") or {}).get("memberRelationshipUnion", {}).get("distance", {}).get("value")
+                        or (data2.get("distance") or {}).get("value")
+                        or ""
+                    )
+                    return str(dist2) == "DISTANCE_1"
     except Exception as e:
         logger.warning("check_connection_accepted failed for %s: %s", profile_urn, e)
     return False
@@ -999,27 +1130,55 @@ class LinkedInAutomationDaemon:
         from database.models import LinkedInConnectionRequest
 
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = datetime.utcnow() - timedelta(days=7)
 
-        # Count how many we've sent today for this campaign
+        sent_statuses = ["sent", "accepted", "followup_sent", "replied"]
+
         sent_today = (
             db.query(LinkedInConnectionRequest)
             .filter(
                 LinkedInConnectionRequest.campaign_id == campaign.id,
                 LinkedInConnectionRequest.sent_at >= today_start,
-                LinkedInConnectionRequest.status.in_(["sent", "accepted", "followup_sent", "replied"]),
+                LinkedInConnectionRequest.status.in_(sent_statuses),
+            )
+            .count()
+        )
+        sent_this_week = (
+            db.query(LinkedInConnectionRequest)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == campaign.id,
+                LinkedInConnectionRequest.sent_at >= week_start,
+                LinkedInConnectionRequest.status.in_(sent_statuses),
             )
             .count()
         )
 
         remaining_today = campaign.daily_limit - sent_today
+        weekly_limit = campaign.weekly_invite_limit or 95
+        remaining_this_week = weekly_limit - sent_this_week
+        # The lower of the two budgets wins. Weekly cap is the LinkedIn-safety
+        # cap (~100/wk soft limit); daily cap is the pacing knob.
+        budget = min(remaining_today, remaining_this_week)
+        if budget <= 0 and remaining_today > 0:
+            logger.info(
+                "Campaign %d: weekly invite limit reached (%d/%d), pausing sends until window slides",
+                campaign.id, sent_this_week, weekly_limit,
+            )
 
         # Phase 1: send pending connection requests (IST business hours only)
-        if remaining_today > 0 and _is_ist_sending_window():
+        if budget > 0 and _is_ist_sending_window():
+            remaining_today = budget  # treat the lower bound as the effective cap
+            # Only pull "pending" — NOT "error". Previously errors were re-
+            # queued every tick, creating a hot loop on unresolvable leads
+            # (one staging user burned ~200 MB Evomi bandwidth in 4 hours
+            # retrying the same 5 names). Errors now sit until the user
+            # explicitly clicks "Retry failed" (existing /retry-errors
+            # endpoint flips them back to pending).
             pending = (
                 db.query(LinkedInConnectionRequest)
                 .filter(
                     LinkedInConnectionRequest.campaign_id == campaign.id,
-                    LinkedInConnectionRequest.status.in_(["pending", "error"]),
+                    LinkedInConnectionRequest.status == "pending",
                 )
                 .limit(min(remaining_today, 5))  # max 5 per daemon tick
                 .all()
@@ -1033,31 +1192,209 @@ class LinkedInAutomationDaemon:
                     await asyncio.sleep(random.uniform(MIN_GAP_SECONDS, MAX_GAP_SECONDS))
                 first_in_batch = False
 
+                # Resolve profile_url via Voyager if not already known.
+                # Apollo search doesn't return linkedin_url for most leads, so
+                # we search by name + company just before sending.
+                if not req.profile_url:
+                    try:
+                        from services.linkedin_outreach.voyager import resolve_linkedin_url
+                        from core.config import settings as _settings
+                        _proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
+                        first_name = (req.name or "").split()[0] if req.name else ""
+                        resolved = await resolve_linkedin_url(
+                            first_name, req.company or "", req.headline or "",
+                            li_at, jsessionid,
+                            proxy_url=_proxy_url,
+                        )
+                        if resolved:
+                            req.profile_url = resolved
+                            db.commit()
+                        else:
+                            logger.warning("Campaign %d: could not resolve LinkedIn URL for '%s' at '%s', skipping", campaign.id, req.name, req.company)
+                            req.status = "error"
+                            req.error = "Could not resolve LinkedIn profile"
+                            req.updated_at = datetime.utcnow()
+                            db.commit()
+                            continue
+                    except LinkedInAuthError as _auth_err:
+                        # Voyager rejected our session during URL resolve.
+                        # Count this toward the auth-failure threshold so we
+                        # stop hammering the proxy after a few consecutive
+                        # failures (previous handler caught it as a generic
+                        # Exception, marking one lead error and continuing
+                        # the loop — burned ~200 MB Evomi bandwidth in a
+                        # single morning before we noticed).
+                        if _auth_err.revoked:
+                            logger.warning(
+                                "Campaign %d: LinkedIn explicitly revoked session — marking auth_failed immediately",
+                                campaign.id,
+                            )
+                            campaign.status = "auth_failed"
+                            campaign.updated_at = datetime.utcnow()
+                            db.commit()
+                            return
+                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                        cnt = _auth_fail_count[campaign.id]
+                        if cnt < AUTH_FAIL_THRESHOLD:
+                            logger.warning(
+                                "Campaign %d: auth failure %d/%d during resolve — will retry next tick",
+                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                            )
+                            return  # exit tick — let it cool down for 60s
+                        logger.warning(
+                            "Campaign %d: %d consecutive auth failures (during resolve), marking auth_failed",
+                            campaign.id, cnt,
+                        )
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        return
+                    except Exception as resolve_err:
+                        logger.warning("Campaign %d: Voyager resolve error for '%s': %s", campaign.id, req.name, resolve_err)
+                        req.status = "error"
+                        req.error = "Profile resolve failed"
+                        req.updated_at = datetime.utcnow()
+                        db.commit()
+                        continue
+
                 # Resolve URN best-effort (Playwright fallback works without it).
                 if not req.profile_urn:
                     try:
                         urn = await resolve_profile_urn(li_at, jsessionid, req.profile_url, session_id, cookies_blob)
-                    except LinkedInAuthError:
-                        logger.warning("Campaign %d: auth failed during URN resolve, marking auth_failed", campaign.id)
+                    except LinkedInAuthError as _auth_err:
+                        # LinkedIn returns auth-looking errors for transient
+                        # rate-limits too. Tolerate AUTH_FAIL_THRESHOLD strikes
+                        # before marking the campaign dead.
+                        if _auth_err.revoked:
+                            logger.warning(
+                                "Campaign %d: LinkedIn explicitly revoked session during URN resolve — marking auth_failed",
+                                campaign.id,
+                            )
+                            campaign.status = "auth_failed"
+                            campaign.updated_at = datetime.utcnow()
+                            db.commit()
+                            return
+                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                        cnt = _auth_fail_count[campaign.id]
+                        if cnt < AUTH_FAIL_THRESHOLD:
+                            logger.warning(
+                                "Campaign %d: auth failure %d/%d during URN resolve — will retry next tick",
+                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                            )
+                            return  # break out of this tick, try again next time
+                        logger.warning(
+                            "Campaign %d: %d consecutive auth failures, marking auth_failed",
+                            campaign.id, cnt,
+                        )
                         campaign.status = "auth_failed"
                         campaign.updated_at = datetime.utcnow()
                         db.commit()
                         return
                     if urn:
                         req.profile_urn = urn
+                        db.commit()  # persist URN now so retry ticks don't re-resolve
+
+                # Skip if we already sent an invite to this profile under any
+                # campaign for this user — it'd be a duplicate request and is
+                # the most common cause of LinkedIn flagging an account.
+                if req.profile_url:
+                    already = (
+                        db.query(LinkedInConnectionRequest)
+                        .filter(
+                            LinkedInConnectionRequest.user_id == campaign.user_id,
+                            LinkedInConnectionRequest.profile_url == req.profile_url,
+                            LinkedInConnectionRequest.id != req.id,
+                            LinkedInConnectionRequest.status.in_(sent_statuses),
+                        )
+                        .first()
+                    )
+                    if already:
+                        logger.info(
+                            "Campaign %d: %s already has a pending/sent invite (request %d), skipping",
+                            campaign.id, req.profile_url, already.id,
+                        )
+                        req.status = "skipped_duplicate"
+                        req.error = "Invite already pending from a previous campaign"
+                        req.updated_at = datetime.utcnow()
+                        db.commit()
+                        continue
+
+                # send_with_note=False (default) → LinkedIn data shows higher
+                # acceptance without a note. The user can opt in per campaign.
+                note_to_send = (req.connection_note or "") if campaign.send_with_note else ""
+
+                # Optional warmup: like the lead's most recent post before the
+                # invite lands. Best-effort, swallows all errors so we never
+                # block the actual connect on a like attempt. We only do this
+                # when we have a profile_url (need to navigate by slug).
+                if campaign.like_post_before_connect and req.profile_url:
+                    try:
+                        from services.linkedin_outreach.playwright_service import (
+                            playwright_like_recent_post,
+                        )
+                        from core.config import settings as _settings
+                        _proxy_url = (_settings.LINKEDIN_PROXY_URL or "").strip() or None
+                        like_res = await playwright_like_recent_post(
+                            li_at, jsessionid, req.profile_url,
+                            proxy_url=_proxy_url, cookies_blob=cookies_blob,
+                            session_id=session_id,
+                        )
+                        logger.info(
+                            "Campaign %d like-post for %s: %s",
+                            campaign.id, req.profile_url, like_res,
+                        )
+                        # Small human-like pause between liking and connecting
+                        # so the actions don't look back-to-back-scripted.
+                        await asyncio.sleep(random.uniform(8, 18))
+                    except LinkedInAuthError:
+                        # Do NOT bubble up. Like-post runs before the send; if we
+                        # bubble, the LinkedInAuthError escapes _process_campaign
+                        # and lands in the outer bare `except Exception` logger
+                        # without incrementing _auth_fail_count or setting req.error.
+                        # Just skip the like — the send step runs next and will
+                        # independently detect the dead session and handle it properly.
+                        logger.warning(
+                            "Campaign %d like-post auth error for %s — skipping like, proceeding to connect",
+                            campaign.id, req.profile_url,
+                        )
+                    except Exception as like_err:
+                        logger.warning(
+                            "Campaign %d like-post errored (continuing to connect): %s",
+                            campaign.id, like_err,
+                        )
 
                 # Send — pass profile_url so Playwright works even if URN is empty
                 try:
                     ok, send_error = await send_connection_request(
                         li_at, jsessionid,
                         req.profile_urn or "",
-                        req.connection_note or "",
+                        note_to_send,
                         session_id,
                         profile_url=req.profile_url,
                         cookies_blob=cookies_blob,
                     )
-                except LinkedInAuthError:
-                    logger.warning("Campaign %d: LinkedIn session expired, marking auth_failed", campaign.id)
+                except LinkedInAuthError as _auth_err:
+                    if _auth_err.revoked:
+                        logger.warning(
+                            "Campaign %d: LinkedIn explicitly revoked session on send — marking auth_failed immediately",
+                            campaign.id,
+                        )
+                        campaign.status = "auth_failed"
+                        campaign.updated_at = datetime.utcnow()
+                        db.commit()
+                        return
+                    _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
+                    cnt = _auth_fail_count[campaign.id]
+                    if cnt < AUTH_FAIL_THRESHOLD:
+                        logger.warning(
+                            "Campaign %d: auth failure %d/%d on send — will retry next tick",
+                            campaign.id, cnt, AUTH_FAIL_THRESHOLD,
+                        )
+                        return
+                    logger.warning(
+                        "Campaign %d: %d consecutive auth failures, marking auth_failed",
+                        campaign.id, cnt,
+                    )
                     campaign.status = "auth_failed"
                     campaign.updated_at = datetime.utcnow()
                     db.commit()
@@ -1070,6 +1407,8 @@ class LinkedInAutomationDaemon:
                     req.status = "sent"
                     req.sent_at = datetime.utcnow()
                     campaign.total_sent += 1
+                    # Reset the consecutive-failure counter on any success.
+                    _auth_fail_count.pop(campaign.id, None)
                 else:
                     req.status = "error"
                     req.error = send_error or "Send failed"
@@ -1099,30 +1438,61 @@ class LinkedInAutomationDaemon:
             )
 
             for req in sent_requests:
-                if not req.profile_urn:
+                if not req.profile_url and not req.profile_urn:
                     continue
-                try:
-                    accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
-                except Exception as e:
-                    logger.warning("Campaign %d: acceptance check error for %s: %s", campaign.id, req.profile_urn, e)
-                    continue
-                if accepted:
-                    req.status = "accepted"
-                    req.accepted_at = datetime.utcnow()
-                    campaign.total_accepted += 1
-                    db.commit()
 
-                    # Send follow-up 2–3 minutes after acceptance (human-like delay)
-                    if campaign.followup_message and req.followup_message:
-                        await asyncio.sleep(random.uniform(120, 180))
-                        ok = await send_message(
-                            li_at, jsessionid, req.profile_urn, req.followup_message, session_id
+                # Generate follow-up message if needed (before attempting to send)
+                followup_msg = req.followup_message
+                if not followup_msg and campaign.followup_message:
+                    try:
+                        from services.linkedin_outreach.message_gen import generate_followup_message
+                        followup_msg = await generate_followup_message(
+                            person_name=req.name or "",
+                            person_headline=req.headline or "",
+                            person_company=req.company or "",
+                            target_role=campaign.target_role or "the role",
+                            student_name=None,
                         )
-                        if ok:
-                            req.status = "followup_sent"
-                            req.followup_sent_at = datetime.utcnow()
-                            campaign.total_followups_sent += 1
-                            db.commit()
+                        req.followup_message = followup_msg
+                        db.commit()
+                        logger.info("Campaign %d: generated followup for %s", campaign.id, req.name)
+                    except Exception as gen_err:
+                        logger.warning("Campaign %d: followup gen failed for %s: %s", campaign.id, req.name, gen_err)
+                        followup_msg = None
+
+                if not followup_msg or not campaign.followup_message:
+                    # Try Voyager-only acceptance check (lightweight) if no follow-up to send
+                    if req.profile_urn:
+                        try:
+                            accepted = await check_connection_accepted(li_at, jsessionid, req.profile_urn, session_id)
+                            if accepted:
+                                req.status = "accepted"
+                                req.accepted_at = datetime.utcnow()
+                                campaign.total_accepted += 1
+                                db.commit()
+                        except Exception as e:
+                            logger.warning("Campaign %d: acceptance check error for %s: %s", campaign.id, req.profile_urn, e)
+                    continue
+
+                # Attempt to send the follow-up. Playwright's Message button check
+                # implicitly confirms the connection was accepted — no separate check needed.
+                await asyncio.sleep(random.uniform(5, 15))  # brief human-like pause
+                ok = await send_message(
+                    li_at, jsessionid,
+                    req.profile_urn or "",
+                    followup_msg,
+                    session_id,
+                    profile_url=req.profile_url,
+                    cookies_blob=cookies_blob,
+                )
+                if ok:
+                    req.status = "followup_sent"
+                    req.accepted_at = req.accepted_at or datetime.utcnow()
+                    req.followup_sent_at = datetime.utcnow()
+                    campaign.total_accepted = max(campaign.total_accepted, 0) + 1
+                    campaign.total_followups_sent += 1
+                    db.commit()
+                    logger.info("Campaign %d: follow-up sent to %s", campaign.id, req.name)
 
         # Phase 3: detect replies — independent 2h timer so it runs even when Phase 2 is cooling down
         should_check_replies = (now_ts - _last_reply_check.get(campaign.id, 0) >= _REPLY_INTERVAL)
