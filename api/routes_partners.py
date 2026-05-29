@@ -10,7 +10,7 @@ import hmac
 import hashlib
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 
 from core.config import settings
@@ -26,7 +26,7 @@ router = APIRouter(prefix="/partners", tags=["Partners"])
 D2C_PRICE_PER_LEAD_INR = 850  # paise — Rs 8.50/lead
 LEADS_PER_CANDIDATE = 200
 
-BULK_DISCOUNT_CODE = "preplaced sahil"
+BULK_DISCOUNT_CODE = "preplaced"
 
 # plan_key → (candidates, d2c_rate_paise, bulk_rate_paise, label)
 PARTNER_PLANS = {
