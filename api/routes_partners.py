@@ -11,7 +11,9 @@ import hashlib
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
+import re
+
+from pydantic import BaseModel
 
 from core.config import settings
 
@@ -98,15 +100,22 @@ async def get_partner_pricing(code: Optional[str] = None):
 class CreatePartnerOrderRequest(BaseModel):
     plan_key: str
     discount_code: Optional[str] = None
-    buyer_email: EmailStr
+    buyer_email: str
     buyer_name: str
     organisation: str
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 @router.post("/create-order")
 async def create_partner_order(body: CreatePartnerOrderRequest):
     if body.plan_key not in PARTNER_PLANS:
         raise HTTPException(status_code=400, detail="Invalid plan")
+    if not _EMAIL_RE.match(body.buyer_email or ""):
+        raise HTTPException(status_code=400, detail="Invalid buyer email")
+    if not (body.buyer_name or "").strip() or not (body.organisation or "").strip():
+        raise HTTPException(status_code=400, detail="Buyer name and organisation are required")
 
     discount_applied = (body.discount_code or "").strip().lower() == BULK_DISCOUNT_CODE
     amount_paise = _calc_amount_paise(body.plan_key, discount_applied)
