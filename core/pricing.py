@@ -18,12 +18,14 @@ class PlanTier:
 # Production plans — 9 tiers (email x3, linkedin x3, both x3)
 PLANS: list[PlanTier] = [
     # ── Email-only ──────────────────────────────────────────────────────────
-    PlanTier("email_200",    "email",    "Starter", 200, 0,   2000,  177500),
-    PlanTier("email_350",    "email",    "Growth",  350, 0,   2700,  229500),
+    # INR anchors (for visual "save X%") live in routes_payment.py:
+    #   ₹2500 → ₹1825 (27% off) · ₹3500 → ₹2325 (34% off) · ₹5000 → ₹3465 (31% off)
+    PlanTier("email_200",    "email",    "Starter", 200, 0,   2000,  182500),
+    PlanTier("email_350",    "email",    "Growth",  350, 0,   2700,  232500),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   5000,  346500),
     # ── LinkedIn-only ───────────────────────────────────────────────────────
-    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   2000,  177500),
-    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   2700,  229500),
+    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   2000,  182500),
+    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   2700,  232500),
     PlanTier("linkedin_500", "linkedin", "Scale",   0, 500,   5000,  346500),
     # ── Both channels ───────────────────────────────────────────────────────
     PlanTier("both_200",     "both",     "Starter", 200, 200, 3500,  299900),
@@ -73,8 +75,8 @@ class TierPricing:
 
 TIERS: dict[int, TierPricing] = {
     5:   TierPricing(tier=5,   price_usd=0,    price_inr=0,      label="Test"),
-    200: TierPricing(tier=200, price_usd=2000, price_inr=177500, label="Starter"),
-    350: TierPricing(tier=350, price_usd=2700, price_inr=229500, label="Growth"),
+    200: TierPricing(tier=200, price_usd=2000, price_inr=182500, label="Starter"),
+    350: TierPricing(tier=350, price_usd=2700, price_inr=232500, label="Growth"),
     500: TierPricing(tier=500, price_usd=5000, price_inr=346500, label="Scale"),
 }
 
