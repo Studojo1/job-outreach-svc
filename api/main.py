@@ -16,6 +16,7 @@ from api.routes_linkedin import router as linkedin_router
 from api.routes_leadstest import router as leadstest_router
 from api.routes_linkedin_automation import router as linkedin_automation_router
 from api.routes_partners import router as partners_router
+from api.routes_marketing import router as marketing_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -75,6 +76,7 @@ app.include_router(linkedin_router, prefix="/api/v1")
 app.include_router(leadstest_router, prefix="/api/v1")
 app.include_router(linkedin_automation_router, prefix="/api/v1")
 app.include_router(partners_router, prefix="/api/v1")
+app.include_router(marketing_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
