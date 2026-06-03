@@ -49,22 +49,103 @@ def _normalise(s: str) -> str:
     return (s or "").strip()
 
 
-def _do_apollo_search(company: str, position: str) -> list:
-    """Run one api_search call. Returns the raw `people` list or raises."""
-    resp = apollo_post(
-        APOLLO_SEARCH_URL,
-        json={
-            "q_organization_name": company,
-            "person_titles": [position],
-            "per_page": 5,
-            "page": 1,
-        },
-        timeout=30,
-    )
+# Map common exec/role keywords → Apollo seniority codes. Apollo's
+# `person_titles` filter is an EXACT-substring match; "ceo" misses the real
+# CEO of Bain whose title is "Worldwide Managing Partner". For exec-level
+# queries we fall back to a seniority filter that catches all such titles.
+_SENIORITY_BY_KEYWORD = [
+    # (keyword that appears in user input, apollo seniority code)
+    ("ceo", "c_suite"),
+    ("chief executive", "c_suite"),
+    ("cto", "c_suite"),
+    ("cfo", "c_suite"),
+    ("coo", "c_suite"),
+    ("cmo", "c_suite"),
+    ("cpo", "c_suite"),
+    ("chro", "c_suite"),
+    ("ciso", "c_suite"),
+    ("president", "c_suite"),
+    ("founder", "founder"),
+    ("co-founder", "founder"),
+    ("cofounder", "founder"),
+    ("managing partner", "partner"),
+    ("partner", "partner"),
+    ("svp", "vp"),
+    ("evp", "vp"),
+    ("vp", "vp"),
+    ("vice president", "vp"),
+    ("head of", "head"),
+    ("director", "director"),
+    ("manager", "manager"),
+]
+
+
+def _infer_seniority(position: str) -> str | None:
+    p = position.lower()
+    for kw, sen in _SENIORITY_BY_KEYWORD:
+        if kw in p:
+            return sen
+    return None
+
+
+def _apollo_call(payload: dict) -> list:
+    payload.setdefault("per_page", 5)
+    payload.setdefault("page", 1)
+    resp = apollo_post(APOLLO_SEARCH_URL, json=payload, timeout=30)
     if resp.status_code != 200:
         logger.warning("[MARKETING] Apollo search %d: %s", resp.status_code, resp.text[:200])
         raise HTTPException(status_code=502, detail="Search failed. Try a different company or role.")
     return (resp.json() or {}).get("people", []) or []
+
+
+def _org_variants(name: str) -> list[str]:
+    """Return ordered variants of an org name to try in cascade.
+
+    Apollo's canonical records use "&" not " and " ("Bain & Company"), so
+    when the user types the spelled-out form we retry with the symbol. We
+    deliberately don't strip suffix words like "Inc" because Apollo's
+    q_organization_name already does substring matching ("razorpay" matches
+    "Razorpay Inc"), and stripping creates ugly fragments ("bain &").
+    """
+    n = (name or "").strip()
+    if not n:
+        return []
+    variants = [n]
+    if re.search(r"\band\b", n, re.IGNORECASE):
+        variants.append(re.sub(r"\band\b", "&", n, flags=re.IGNORECASE).strip())
+    # Dedupe preserving order
+    seen, out = set(), []
+    for v in variants:
+        k = v.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(v)
+    return out
+
+
+def _do_apollo_search(company: str, position: str) -> list:
+    """Cascade through org name variants × (exact title → seniority fallback).
+
+    Stops at the first variant that returns results. Each Apollo call is
+    free on the api_search endpoint so the worst case (4 calls) costs us
+    only latency, not credits.
+    """
+    seniority = _infer_seniority(position)
+    for org in _org_variants(company):
+        # Tier 1 — exact title substring match
+        people = _apollo_call({"q_organization_name": org, "person_titles": [position]})
+        if people:
+            logger.info("[MARKETING] Hit via title at org variant %r", org)
+            return people
+        # Tier 2 — seniority fallback for executive/role keywords
+        if seniority:
+            people = _apollo_call({"q_organization_name": org, "person_seniorities": [seniority]})
+            if people:
+                logger.info(
+                    "[MARKETING] Hit via seniority=%s at org variant %r", seniority, org,
+                )
+                return people
+    return []
 
 
 @router.post("/find-lead")
@@ -106,8 +187,17 @@ async def find_lead(body: FindLeadRequest):
             pass
 
 
+    # Tokenise the query company for forgiving match against Apollo's canonical
+    # name. "bain and company" → {"bain", "company"}; "Bain & Company" → {"bain", "company"}.
+    # We accept the lead if any significant token overlaps.
+    _stop = {"and", "&", "the", "of", "inc", "llc", "ltd", "limited", "corp",
+             "corporation", "company", "co", "pvt", "gmbh"}
+    def _tokens(s: str) -> set[str]:
+        return {t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _stop}
+
     lead = None
     company_lower = company.lower()
+    company_tokens = _tokens(company)
     for p in people:
         first = (p.get("first_name") or "").strip()
         if not first:
@@ -116,8 +206,12 @@ async def find_lead(body: FindLeadRequest):
         org_name = (org.get("name") or p.get("organization_name") or "").strip()
         if not org_name:
             continue
-        # Loose match — Apollo sometimes returns "Razorpay Inc" for "Razorpay"
-        if company_lower not in org_name.lower() and org_name.lower() not in company_lower:
+        org_lower = org_name.lower()
+        # Accept if either is a substring OR if significant tokens overlap
+        # (handles "bain and company" ↔ "Bain & Company", "Razorpay" ↔ "Razorpay Inc")
+        substring_match = company_lower in org_lower or org_lower in company_lower
+        token_match = bool(company_tokens & _tokens(org_name))
+        if not (substring_match or token_match):
             continue
         last_obf = (p.get("last_name_obfuscated") or "").strip()
         lead = {
