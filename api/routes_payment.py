@@ -56,7 +56,27 @@ async def get_pricing(req: Request):
             "currency": currency,
             "display_price": f"{sym}{amount / 100:.0f}",
         })
-    return {"plans": result, "test_mode": settings.RAZORPAY_TEST_MODE, "currency": currency}
+    # Legacy `tiers` shape — the pre-merge enrichment page reads this. Kept
+    # alongside `plans` so both the old (email-only) and new (9-plan) frontends
+    # render the right pricing in INR/USD without a frontend rebuild.
+    tiers = [
+        {
+            "tier": p["email_credits"],
+            "label": p["label"],
+            "amount_cents": p["amount_cents"],
+            "currency": p["currency"],
+            "display_price": p["display_price"],
+        }
+        for p in result
+        if p["plan_type"] == "email"
+    ]
+
+    return {
+        "plans": result,
+        "tiers": tiers,
+        "test_mode": settings.RAZORPAY_TEST_MODE,
+        "currency": currency,
+    }
 
 
 # ── Coupon Validation ─────────────────────────────────────────────────────────
