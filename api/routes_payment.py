@@ -61,6 +61,27 @@ async def get_pricing(req: Request):
 
 # ── Coupon Validation ─────────────────────────────────────────────────────────
 
+# ── Checkout failure diagnostics ──────────────────────────────────────────────
+# In June 2026 we saw 20 customer orders created with razorpay_order_id but
+# zero payment attempts on Razorpay's side — meaning the checkout modal never
+# opened. This unauth'd endpoint just captures the client-side state so we can
+# diagnose: missing global, constructor throw, open() throw, etc.
+
+@router.post("/checkout-diag")
+async def checkout_diagnostic(body: dict, req: Request):
+    logger.warning(
+        "[CHECKOUT-DIAG] stage=%s rzp_loaded=%s order=%s amount=%s plan=%s ua=%s err=%s",
+        body.get("stage"),
+        body.get("razorpay_loaded"),
+        body.get("order_id"),
+        body.get("amount"),
+        body.get("plan_id"),
+        (body.get("user_agent") or "")[:120],
+        body.get("error"),
+    )
+    return {"ok": True}
+
+
 class CouponCheckRequest(BaseModel):
     code: str
     tier: Optional[int] = None
