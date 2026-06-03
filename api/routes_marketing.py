@@ -353,10 +353,25 @@ async def enrich_email(
         raise HTTPException(status_code=502, detail="Enrichment service unavailable. No credit was used.")
 
     if resp.status_code != 200:
+        body_text = resp.text[:300]
         logger.warning(
             "[MARKETING-ENRICH] Apollo /people/match %d: %s",
-            resp.status_code, resp.text[:200],
+            resp.status_code, body_text,
         )
+        # Surface Apollo's specific failure mode so the UI can be informative
+        # rather than a generic "HTTP 502". The most common one we hit is the
+        # account running out of enrichment credits.
+        low_body = body_text.lower()
+        if "insufficient credits" in low_body:
+            raise HTTPException(
+                status_code=402,
+                detail="Email enrichment is temporarily unavailable — our Apollo credit pool is empty. The team has been notified. No credit was charged.",
+            )
+        if resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=502,
+                detail="Apollo authentication failed. The team has been notified. No credit was charged.",
+            )
         raise HTTPException(
             status_code=502,
             detail="Could not enrich this contact. Apollo returned an error — no credit charged.",
