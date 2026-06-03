@@ -17,9 +17,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
-from api.dependencies import get_current_user, get_db
+from api.dependencies import get_current_user
 from database.models import User
 from services.shared.apollo_key_manager import apollo_post
 
@@ -27,8 +26,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/marketing", tags=["Marketing Dojo"])
 
 
-APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
-APOLLO_COMPANY_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_companies/search"
+# Apollo has two people-search endpoints:
+#   /mixed_people/search    — UI/preview, charges credits on most plans
+#   /mixed_people/api_search — free, but returns OBFUSCATED last names and
+#                              omits LinkedIn URL / city / email (all the
+#                              good stuff lives behind /people/match)
+# We use api_search for free discovery, then /people/match (1 credit) to
+# reveal the contact when the user explicitly clicks Enrich.
+APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 
 
@@ -54,8 +59,9 @@ async def find_lead(body: FindLeadRequest):
         raise HTTPException(status_code=400, detail="Position is required")
 
     # 1) Find ONE person at <company> with title matching <position>.
-    #    mixed_people/search is the free endpoint — returns name/title/linkedin
-    #    but NOT the email (which would require /people/match → 1 credit).
+    #    api_search returns first_name, title, and org.name in the clear; the
+    #    last name is obfuscated as "Da***a" and LinkedIn/email are hidden
+    #    behind /people/match (which costs 1 credit).
     try:
         resp = apollo_post(
             APOLLO_SEARCH_URL,
@@ -78,13 +84,10 @@ async def find_lead(body: FindLeadRequest):
     data = resp.json() or {}
     people = data.get("people", []) or []
 
-    # Pick the best match — the first person who has both a name and looks
-    # like they actually work at the requested company.
     lead = None
     company_lower = company.lower()
     for p in people:
         first = (p.get("first_name") or "").strip()
-        last = (p.get("last_name") or "").strip()
         if not first:
             continue
         org = p.get("organization") or {}
@@ -94,56 +97,47 @@ async def find_lead(body: FindLeadRequest):
         # Loose match — Apollo sometimes returns "Razorpay Inc" for "Razorpay"
         if company_lower not in org_name.lower() and org_name.lower() not in company_lower:
             continue
+        last_obf = (p.get("last_name_obfuscated") or "").strip()
         lead = {
             "apollo_person_id": p.get("id"),
-            "name": f"{first} {last}".strip(),
             "first_name": first,
-            "last_name": last,
+            "last_name_obfuscated": last_obf,  # e.g. "Da***a" — full name on enrich
+            "display_name": f"{first} {last_obf}".strip() if last_obf else first,
             "title": p.get("title") or "",
-            "linkedin_url": p.get("linkedin_url"),
-            "headline": p.get("headline") or "",
             "company": org_name,
-            "company_domain": org.get("primary_domain") or org.get("website_url"),
-            "company_logo_url": org.get("logo_url"),
-            "city": p.get("city"),
-            "country": p.get("country"),
+            "has_email": bool(p.get("has_email")),
+            "last_refreshed_at": p.get("last_refreshed_at"),
         }
         break
 
     if not lead:
         return {"lead": None, "similar_companies": []}
 
-    # 2) Suggest similar companies — same industry/keyword tags as the found
-    #    company. Also free; no credit burn.
+    # 2) Similar companies — broader api_search with the same role but no
+    #    company filter. Collect distinct organisation names from the results.
+    #    Free; uses the same endpoint we already know works on this plan.
     similar_companies: list[dict] = []
     try:
-        org = (people[0] or {}).get("organization") or {}
-        industry = org.get("industry")
-        keywords = org.get("keywords") or []
-        # Build a similarity query — industry first, fall back to top keyword
-        sim_payload: dict = {"per_page": 6, "page": 1}
-        if industry:
-            sim_payload["q_organization_keyword_tags"] = [industry]
-        elif keywords:
-            sim_payload["q_organization_keyword_tags"] = [keywords[0]]
-        if sim_payload.get("q_organization_keyword_tags"):
-            sim_resp = apollo_post(APOLLO_COMPANY_SEARCH_URL, json=sim_payload, timeout=20)
-            if sim_resp.status_code == 200:
-                orgs = (sim_resp.json() or {}).get("organizations") or (sim_resp.json() or {}).get("accounts") or []
-                seen_lower = {company_lower, (lead.get("company") or "").lower()}
-                for o in orgs:
-                    name = (o.get("name") or "").strip()
-                    if not name or name.lower() in seen_lower:
-                        continue
-                    seen_lower.add(name.lower())
-                    similar_companies.append({
-                        "name": name,
-                        "domain": o.get("primary_domain") or o.get("website_url"),
-                        "logo_url": o.get("logo_url"),
-                        "industry": o.get("industry"),
-                    })
-                    if len(similar_companies) >= 5:
-                        break
+        sim_resp = apollo_post(
+            APOLLO_SEARCH_URL,
+            json={
+                "person_titles": [position],
+                "per_page": 25,
+                "page": 1,
+            },
+            timeout=20,
+        )
+        if sim_resp.status_code == 200:
+            seen_lower = {company_lower, (lead.get("company") or "").lower()}
+            for p in (sim_resp.json() or {}).get("people") or []:
+                org = p.get("organization") or {}
+                name = (org.get("name") or "").strip()
+                if not name or name.lower() in seen_lower:
+                    continue
+                seen_lower.add(name.lower())
+                similar_companies.append({"name": name, "domain": None, "logo_url": None, "industry": None})
+                if len(similar_companies) >= 6:
+                    break
     except Exception as e:
         logger.warning("[MARKETING] Similar-companies lookup failed (non-fatal): %s", e)
 
@@ -166,7 +160,6 @@ class EnrichEmailRequest(BaseModel):
 async def enrich_email(
     body: EnrichEmailRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
     """Reveal a verified email via Apollo /people/match.
 
