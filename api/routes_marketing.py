@@ -44,6 +44,7 @@ APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 class FindLeadRequest(BaseModel):
     company: str
     position: str
+    location: Optional[str] = None  # optional — e.g. "India", "San Francisco", "London"
 
 
 def _normalise(s: str) -> str:
@@ -124,28 +125,52 @@ def _org_variants(name: str) -> list[str]:
     return out
 
 
-def _do_apollo_search(company: str, position: str) -> list:
+def _do_apollo_search(company: str, position: str, location: Optional[str] = None) -> list:
     """Cascade through org name variants × (exact title → seniority fallback).
 
     Stops at the first variant that returns results. Each Apollo call is
     free on the api_search endpoint so the worst case (4 calls) costs us
     only latency, not credits.
+
+    Location is optional. When supplied, narrows by person_locations on the
+    first pass; if that returns nothing we drop the location filter and try
+    again so the user always gets *some* answer rather than a brick wall.
     """
     seniority = _infer_seniority(position)
-    for org in _org_variants(company):
-        # Tier 1 — exact title substring match
-        people = _apollo_call({"q_organization_name": org, "person_titles": [position]})
+    loc_filter: dict = {"person_locations": [location]} if location else {}
+
+    def _try(org: str, with_location: bool) -> list:
+        people: list = []
+        loc = loc_filter if with_location else {}
+        # Tier 1 — exact title
+        people = _apollo_call({"q_organization_name": org, "person_titles": [position], **loc})
         if people:
-            logger.info("[MARKETING] Hit via title at org variant %r", org)
+            logger.info(
+                "[MARKETING] Hit via title at org=%r (location=%s)",
+                org, location if with_location else "off",
+            )
             return people
-        # Tier 2 — seniority fallback for executive/role keywords
+        # Tier 2 — seniority fallback
         if seniority:
-            people = _apollo_call({"q_organization_name": org, "person_seniorities": [seniority]})
+            people = _apollo_call({"q_organization_name": org, "person_seniorities": [seniority], **loc})
             if people:
                 logger.info(
-                    "[MARKETING] Hit via seniority=%s at org variant %r", seniority, org,
+                    "[MARKETING] Hit via seniority=%s at org=%r (location=%s)",
+                    seniority, org, location if with_location else "off",
                 )
                 return people
+        return []
+
+    for org in _org_variants(company):
+        # First pass — with location filter (if provided)
+        if location:
+            people = _try(org, with_location=True)
+            if people:
+                return people
+        # Second pass — without location, in case Apollo doesn't tag this person
+        people = _try(org, with_location=False)
+        if people:
+            return people
     return []
 
 
@@ -153,6 +178,7 @@ def _do_apollo_search(company: str, position: str) -> list:
 async def find_lead(body: FindLeadRequest):
     company = _normalise(body.company)
     position = _normalise(body.position)
+    location = _normalise(body.location or "") or None
     if not company:
         raise HTTPException(status_code=400, detail="Company name is required")
     if not position:
@@ -163,7 +189,7 @@ async def find_lead(body: FindLeadRequest):
     #    last name is obfuscated as "Da***a" and LinkedIn/email are hidden
     #    behind /people/match (which costs 1 credit).
     try:
-        people = _do_apollo_search(company, position)
+        people = _do_apollo_search(company, position, location)
     except HTTPException:
         raise
     except Exception as e:
@@ -175,7 +201,7 @@ async def find_lead(body: FindLeadRequest):
         # Auto-swap fallback: maybe the user filled the fields backwards
         # ("analyst" in Company, "bain" in Position). Try the inverted query.
         try:
-            swapped_people = _do_apollo_search(position, company)
+            swapped_people = _do_apollo_search(position, company, location)
             if swapped_people:
                 logger.info(
                     "[MARKETING] Empty result for %r at %r — succeeded with swap: %r at %r",
