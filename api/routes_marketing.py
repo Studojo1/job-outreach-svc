@@ -49,6 +49,24 @@ def _normalise(s: str) -> str:
     return (s or "").strip()
 
 
+def _do_apollo_search(company: str, position: str) -> list:
+    """Run one api_search call. Returns the raw `people` list or raises."""
+    resp = apollo_post(
+        APOLLO_SEARCH_URL,
+        json={
+            "q_organization_name": company,
+            "person_titles": [position],
+            "per_page": 5,
+            "page": 1,
+        },
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        logger.warning("[MARKETING] Apollo search %d: %s", resp.status_code, resp.text[:200])
+        raise HTTPException(status_code=502, detail="Search failed. Try a different company or role.")
+    return (resp.json() or {}).get("people", []) or []
+
+
 @router.post("/find-lead")
 async def find_lead(body: FindLeadRequest):
     company = _normalise(body.company)
@@ -63,26 +81,30 @@ async def find_lead(body: FindLeadRequest):
     #    last name is obfuscated as "Da***a" and LinkedIn/email are hidden
     #    behind /people/match (which costs 1 credit).
     try:
-        resp = apollo_post(
-            APOLLO_SEARCH_URL,
-            json={
-                "q_organization_name": company,
-                "person_titles": [position],
-                "per_page": 5,
-                "page": 1,
-            },
-            timeout=30,
-        )
+        people = _do_apollo_search(company, position)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("[MARKETING] Apollo search failed: %s", e)
         raise HTTPException(status_code=502, detail="Search service is unavailable. Try again in a moment.")
 
-    if resp.status_code != 200:
-        logger.warning("[MARKETING] Apollo search %d: %s", resp.status_code, resp.text[:200])
-        raise HTTPException(status_code=502, detail="Search failed. Try a different company or role.")
+    swapped_used = False
+    if not people:
+        # Auto-swap fallback: maybe the user filled the fields backwards
+        # ("analyst" in Company, "bain" in Position). Try the inverted query.
+        try:
+            swapped_people = _do_apollo_search(position, company)
+            if swapped_people:
+                logger.info(
+                    "[MARKETING] Empty result for %r at %r — succeeded with swap: %r at %r",
+                    position, company, company, position,
+                )
+                people = swapped_people
+                company, position = position, company
+                swapped_used = True
+        except Exception:
+            pass
 
-    data = resp.json() or {}
-    people = data.get("people", []) or []
 
     lead = None
     company_lower = company.lower()
@@ -111,7 +133,13 @@ async def find_lead(body: FindLeadRequest):
         break
 
     if not lead:
-        return {"lead": None, "similar_companies": []}
+        return {
+            "lead": None,
+            "similar_companies": [],
+            "searched_company": company,
+            "searched_position": position,
+            "swapped": swapped_used,
+        }
 
     # 2) Similar companies — broader api_search with the same role but no
     #    company filter. Collect distinct organisation names from the results.
@@ -141,7 +169,13 @@ async def find_lead(body: FindLeadRequest):
     except Exception as e:
         logger.warning("[MARKETING] Similar-companies lookup failed (non-fatal): %s", e)
 
-    return {"lead": lead, "similar_companies": similar_companies}
+    return {
+        "lead": lead,
+        "similar_companies": similar_companies,
+        "searched_company": company,
+        "searched_position": position,
+        "swapped": swapped_used,
+    }
 
 
 # ── Enrich email (BURNS 1 Apollo credit — requires auth) ───────────────────────
