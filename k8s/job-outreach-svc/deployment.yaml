@@ -44,6 +44,12 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: apollo-api-key
+            - name: APOLLO_API_KEY_2
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: apollo-api-key-2
+                  optional: true
             - name: GMAIL_CLIENT_ID
               valueFrom:
                 secretKeyRef:

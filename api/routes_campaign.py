@@ -160,12 +160,15 @@ async def api_create_campaign(
         from sqlalchemy import text
         credits = db.query(UserCredit).filter_by(user_id=current_user.id).with_for_update().first()
         available = (credits.total_credits - credits.used_credits) if credits else 0
-        required = request.lead_limit or 200  # default campaign size
-        if available < required:
+        requested = request.lead_limit or 200  # default campaign size
+        if available < 200:
             raise HTTPException(
                 status_code=402,
-                detail=f"Insufficient credits. You need {required} credits to start a campaign but only have {available} available.",
+                detail=f"Insufficient credits. You need at least 200 credits to start a campaign but only have {available} available.",
             )
+        # Cap at available credits — prevents error when setup was done at a higher tier than paid
+        required = min(requested, available)
+        request.lead_limit = required
         # Reserve credits immediately so concurrent requests see the updated balance
         if credits:
             credits.used_credits += required

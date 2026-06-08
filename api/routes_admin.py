@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from api.dependencies import get_admin_user
 from database.models import (
     Campaign,
+    Candidate,
     Coupon,
     EmailSent,
     Lead,
+    LeadScore,
     OutreachOrder,
     PaymentOrder,
     User,
@@ -822,3 +824,261 @@ async def admin_campaign_emails(
         },
         "emails": result,
     }
+
+
+# ---------------------------------------------------------------------------
+# Paid-user funnel — single endpoint that powers the Campaign Health dashboard.
+# Returns every real paying user (amount_cents > 0, non-coupon) with:
+#   • funnel stage timestamps collapsed across all their orders
+#   • candidate profile (resume_profile, psychometric, target_roles/industries)
+#   • campaign health stats per active/latest campaign
+#   • lead quality summary
+# ---------------------------------------------------------------------------
+
+_EXCLUDED_FUNNEL_EMAILS = {
+    "businessconnect.pranav@gmail.com",
+    "pranav.hegde126@gmail.com",
+    "pranavshastry4@gmail.com",
+    "studojo@gmail.com",
+    "benjenstark.578239@gmail.com",
+    "pranavs.hegde@bbafeh.christuniversity.in",
+}
+
+_FUNNEL_STAGE_COLS = [
+    ("resume_uploaded",      "resume_uploaded_at"),
+    ("quiz_completed",       "quiz_completed_at"),
+    ("leads_generated",      "leads_generated_at"),
+    ("gmail_connected",      "gmail_connected_at"),
+    ("email_style_selected", "email_style_selected_at"),
+    ("campaign_launched",    "campaign_launched_at"),
+    ("campaign_paused",      "campaign_paused_at"),
+    ("campaign_completed",   "campaign_completed_at"),
+]
+
+
+@router.get("/paid-funnel")
+async def paid_funnel(
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """
+    All real paid users with full funnel timestamps, candidate profile,
+    and campaign health — powers the Campaign Health admin page.
+    """
+    # One row per payment order so we get the exact paid-at timestamp,
+    # then we enrich with the user's latest outreach order + campaign.
+    paid_payments = (
+        db.query(PaymentOrder, User)
+        .join(User, PaymentOrder.user_id == User.id)
+        .filter(
+            PaymentOrder.status == "paid",
+            PaymentOrder.amount_cents > 0,
+            PaymentOrder.provider != "coupon",
+            User.email.notin_(_EXCLUDED_FUNNEL_EMAILS),
+        )
+        .order_by(PaymentOrder.created_at.desc())
+        .all()
+    )
+
+    # Deduplicate: one entry per user (keep earliest payment for paid_at,
+    # and collect all payment amounts for total).
+    seen: dict[str, dict] = {}
+    for po, u in paid_payments:
+        if u.id not in seen:
+            seen[u.id] = {
+                "user": u,
+                "payments": [],
+            }
+        seen[u.id]["payments"].append(po)
+
+    result = []
+    for user_id, bucket in seen.items():
+        u: User = bucket["user"]
+        payments = bucket["payments"]
+        # Earliest payment date = when they first paid
+        first_paid_at = min(p.created_at for p in payments)
+        total_paid_cents = sum(p.amount_cents for p in payments)
+        currency = payments[0].currency
+
+        # All outreach orders for this user
+        orders = (
+            db.query(OutreachOrder)
+            .filter(OutreachOrder.user_id == user_id)
+            .order_by(OutreachOrder.updated_at.desc().nullslast())
+            .all()
+        )
+
+        # Collapse funnel timestamps across all orders (earliest wins)
+        stage_ts: dict[str, str | None] = {}
+        for key, col in _FUNNEL_STAGE_COLS:
+            best = None
+            for o in orders:
+                v = getattr(o, col, None)
+                if v and (best is None or v < best):
+                    best = v
+            stage_ts[key] = best.isoformat() if best else None
+
+        # Best campaign: prefer running > paused > most-recently-updated
+        all_campaigns: list[Campaign] = []
+        for o in orders:
+            if o.campaign_id:
+                c = db.query(Campaign).filter(Campaign.id == o.campaign_id).first()
+                if c:
+                    all_campaigns.append(c)
+
+        def _campaign_priority(c: Campaign) -> int:
+            return {"running": 0, "paused": 1, "cancelled": 2, "completed": 3, "draft": 4}.get(c.status, 5)
+
+        best_campaign = min(all_campaigns, key=_campaign_priority, default=None)
+
+        campaign_data = None
+        if best_campaign:
+            e_stats = (
+                db.query(EmailSent.status, func.count())
+                .filter(EmailSent.campaign_id == best_campaign.id)
+                .group_by(EmailSent.status)
+                .all()
+            )
+            em = {s: c for s, c in e_stats}
+            sent = em.get("sent", 0) + em.get("replied", 0)
+            replied = em.get("replied", 0)
+            bounced = em.get("bounced", 0)
+            failed = em.get("failed", 0)
+            queued = em.get("queued", 0)
+            last_sent = (
+                db.query(func.max(EmailSent.sent_at))
+                .filter(EmailSent.campaign_id == best_campaign.id)
+                .scalar()
+            )
+            # All campaigns for this user (for summary across all)
+            all_sent = sum(
+                (db.query(func.count()).select_from(EmailSent)
+                 .filter(EmailSent.campaign_id == c.id,
+                         EmailSent.status.in_(["sent", "replied"])).scalar() or 0)
+                for c in all_campaigns
+            )
+            all_replied = sum(
+                (db.query(func.count()).select_from(EmailSent)
+                 .filter(EmailSent.campaign_id == c.id,
+                         EmailSent.status == "replied").scalar() or 0)
+                for c in all_campaigns
+            )
+            campaign_data = {
+                "id": best_campaign.id,
+                "name": best_campaign.name,
+                "status": best_campaign.status,
+                "daily_limit": best_campaign.daily_limit,
+                "started_at": best_campaign.started_at.isoformat() if best_campaign.started_at else None,
+                "stats": {
+                    "sent": sent,
+                    "replied": replied,
+                    "bounced": bounced,
+                    "failed": failed,
+                    "queued": queued,
+                    "reply_rate": round(replied / sent * 100, 1) if sent > 0 else 0,
+                    "last_email_sent": last_sent.isoformat() if last_sent else None,
+                },
+                "all_campaigns_sent": all_sent,
+                "all_campaigns_replied": all_replied,
+            }
+
+        # Candidate profile
+        candidate = next(
+            (db.query(Candidate).filter(Candidate.id == o.candidate_id).first()
+             for o in orders if o.candidate_id),
+            None,
+        )
+        profile_data = None
+        lead_quality = None
+        if candidate:
+            profile_data = {
+                "target_roles": candidate.target_roles or [],
+                "target_industries": candidate.target_industries or [],
+                "dream_companies": candidate.dream_companies or [],
+                "resume_profile": candidate.resume_profile or {},
+                "psychometric_profile": candidate.psychometric_profile or {},
+                "flex_notes": candidate.flex_notes or {},
+            }
+            # Lead quality
+            total_leads = (
+                db.query(func.count()).select_from(Lead)
+                .filter(Lead.candidate_id == candidate.id).scalar()
+            ) or 0
+            leads_with_email = (
+                db.query(func.count()).select_from(Lead)
+                .filter(Lead.candidate_id == candidate.id, Lead.email.isnot(None)).scalar()
+            ) or 0
+            leads_verified = (
+                db.query(func.count()).select_from(Lead)
+                .filter(Lead.candidate_id == candidate.id, Lead.email_verified == True).scalar()
+            ) or 0
+            avg_score = (
+                db.query(func.avg(LeadScore.overall_score))
+                .join(Lead, Lead.id == LeadScore.lead_id)
+                .filter(Lead.candidate_id == candidate.id)
+                .scalar()
+            )
+            # Industry breakdown of leads
+            industry_rows = (
+                db.query(Lead.industry, func.count())
+                .filter(Lead.candidate_id == candidate.id, Lead.industry.isnot(None))
+                .group_by(Lead.industry)
+                .order_by(func.count().desc())
+                .limit(8)
+                .all()
+            )
+            # Title breakdown
+            title_rows = (
+                db.query(Lead.title, func.count())
+                .filter(Lead.candidate_id == candidate.id, Lead.title.isnot(None))
+                .group_by(Lead.title)
+                .order_by(func.count().desc())
+                .limit(8)
+                .all()
+            )
+            lead_quality = {
+                "total": total_leads,
+                "with_email": leads_with_email,
+                "email_verified": leads_verified,
+                "avg_score": round(float(avg_score), 1) if avg_score else None,
+                "email_rate": round(leads_with_email / total_leads * 100, 1) if total_leads > 0 else 0,
+                "verified_rate": round(leads_verified / leads_with_email * 100, 1) if leads_with_email > 0 else 0,
+                "top_industries": [{"label": r[0], "count": r[1]} for r in industry_rows],
+                "top_titles": [{"label": r[0], "count": r[1]} for r in title_rows],
+            }
+
+        # Determine overall funnel status
+        if stage_ts.get("campaign_completed"):
+            funnel_status = "completed"
+        elif campaign_data and campaign_data["status"] == "running":
+            funnel_status = "running"
+        elif campaign_data and campaign_data["status"] == "paused":
+            funnel_status = "paused"
+        elif campaign_data and campaign_data["status"] == "cancelled":
+            funnel_status = "cancelled"
+        elif stage_ts.get("campaign_launched"):
+            funnel_status = "launched"
+        elif stage_ts.get("gmail_connected"):
+            funnel_status = "gmail_connected"
+        elif stage_ts.get("leads_generated"):
+            funnel_status = "leads_generated"
+        elif stage_ts.get("resume_uploaded"):
+            funnel_status = "resume_uploaded"
+        else:
+            funnel_status = "paid_only"
+
+        result.append({
+            "user_id": user_id,
+            "name": u.name,
+            "email": u.email,
+            "paid_at": first_paid_at.isoformat(),
+            "total_paid_cents": total_paid_cents,
+            "currency": currency,
+            "funnel_status": funnel_status,
+            "stage_timestamps": stage_ts,
+            "campaign": campaign_data,
+            "profile": profile_data,
+            "lead_quality": lead_quality,
+        })
+
+    return {"users": result, "total": len(result)}
