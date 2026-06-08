@@ -11,6 +11,7 @@ from database.models import (
     Campaign,
     Candidate,
     Coupon,
+    EmailAccount,
     EmailSent,
     Lead,
     LeadScore,
@@ -918,6 +919,17 @@ async def paid_funnel(
                     best = v
             stage_ts[key] = best.isoformat() if best else None
 
+        # Fix: gmail_connected_at was not written for early users. Fall back to
+        # the earliest email_accounts row for this user if the timestamp is missing.
+        if not stage_ts.get("gmail_connected"):
+            earliest_account = (
+                db.query(func.min(EmailAccount.created_at))
+                .filter(EmailAccount.user_id == user_id)
+                .scalar()
+            )
+            if earliest_account:
+                stage_ts["gmail_connected"] = earliest_account.isoformat()
+
         # Best campaign: prefer running > paused > most-recently-updated
         all_campaigns: list[Campaign] = []
         for o in orders:
@@ -933,36 +945,52 @@ async def paid_funnel(
 
         campaign_data = None
         if best_campaign:
-            e_stats = (
-                db.query(EmailSent.status, func.count())
-                .filter(EmailSent.campaign_id == best_campaign.id)
-                .group_by(EmailSent.status)
-                .all()
+            # Count only INITIAL emails (followup_number IS NULL or 0) for
+            # "unique leads contacted". Follow-ups are shown separately.
+            # This prevents inflation where 1 lead with 3 follow-ups = 4 "sent".
+            initial_filter = (
+                (EmailSent.followup_number == None) | (EmailSent.followup_number == 0)
             )
-            em = {s: c for s, c in e_stats}
-            sent = em.get("sent", 0) + em.get("replied", 0)
-            replied = em.get("replied", 0)
-            bounced = em.get("bounced", 0)
-            failed = em.get("failed", 0)
-            queued = em.get("queued", 0)
+            followup_filter = (
+                EmailSent.followup_number.isnot(None) & (EmailSent.followup_number > 0)
+            )
+
+            def _email_stats(campaign_id, extra_filter=None):
+                q = db.query(EmailSent.status, func.count()).filter(
+                    EmailSent.campaign_id == campaign_id
+                )
+                if extra_filter is not None:
+                    q = q.filter(extra_filter)
+                return {s: c for s, c in q.group_by(EmailSent.status).all()}
+
+            init_stats = _email_stats(best_campaign.id, initial_filter)
+            fup_stats  = _email_stats(best_campaign.id, followup_filter)
+
+            # Initial email counts (unique leads reached)
+            leads_contacted = init_stats.get("sent", 0) + init_stats.get("replied", 0)
+            replied          = init_stats.get("replied", 0)
+            bounced          = init_stats.get("bounced", 0)
+            failed           = init_stats.get("failed", 0)
+            # queued/pending covers leads not yet emailed at all
+            queued = (
+                db.query(func.count()).select_from(EmailSent)
+                .filter(
+                    EmailSent.campaign_id == best_campaign.id,
+                    EmailSent.status.in_(["queued", "pending_enrichment"]),
+                    initial_filter,
+                ).scalar() or 0
+            )
+
+            # Follow-up totals
+            fup_sent    = fup_stats.get("sent", 0) + fup_stats.get("replied", 0)
+            fup_replied = fup_stats.get("replied", 0)
+
             last_sent = (
                 db.query(func.max(EmailSent.sent_at))
                 .filter(EmailSent.campaign_id == best_campaign.id)
                 .scalar()
             )
-            # All campaigns for this user (for summary across all)
-            all_sent = sum(
-                (db.query(func.count()).select_from(EmailSent)
-                 .filter(EmailSent.campaign_id == c.id,
-                         EmailSent.status.in_(["sent", "replied"])).scalar() or 0)
-                for c in all_campaigns
-            )
-            all_replied = sum(
-                (db.query(func.count()).select_from(EmailSent)
-                 .filter(EmailSent.campaign_id == c.id,
-                         EmailSent.status == "replied").scalar() or 0)
-                for c in all_campaigns
-            )
+
             campaign_data = {
                 "id": best_campaign.id,
                 "name": best_campaign.name,
@@ -970,16 +998,16 @@ async def paid_funnel(
                 "daily_limit": best_campaign.daily_limit,
                 "started_at": best_campaign.started_at.isoformat() if best_campaign.started_at else None,
                 "stats": {
-                    "sent": sent,
+                    "leads_contacted": leads_contacted,   # unique leads (initial only)
                     "replied": replied,
                     "bounced": bounced,
                     "failed": failed,
                     "queued": queued,
-                    "reply_rate": round(replied / sent * 100, 1) if sent > 0 else 0,
+                    "reply_rate": round(replied / leads_contacted * 100, 1) if leads_contacted > 0 else 0,
+                    "followups_sent": fup_sent,
+                    "followups_replied": fup_replied,
                     "last_email_sent": last_sent.isoformat() if last_sent else None,
                 },
-                "all_campaigns_sent": all_sent,
-                "all_campaigns_replied": all_replied,
             }
 
         # Candidate profile
