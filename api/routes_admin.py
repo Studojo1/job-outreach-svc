@@ -930,9 +930,7 @@ async def paid_funnel(
                     best = v
             stage_ts[key] = best.isoformat() if best else None
 
-        # ── Gmail connected — authoritative source: email_accounts row ─────
-        # gmail_connected_at was not written for early users; email_accounts
-        # is always created on OAuth completion and is the reliable check.
+        # ── Gmail — authoritative source: email_accounts table ────────────
         email_accounts: list[EmailAccount] = (
             db.query(EmailAccount)
             .filter(EmailAccount.user_id == user_id)
@@ -943,9 +941,7 @@ async def paid_funnel(
         if gmail_connected and not stage_ts.get("gmail_connected"):
             stage_ts["gmail_connected"] = email_accounts[0].created_at.isoformat()
 
-        # ── Best campaign across all orders ────────────────────────────────
-        # Collect unique campaigns (avoid duplicates from multiple orders
-        # pointing at the same campaign_id).
+        # ── Collect unique campaigns ───────────────────────────────────────
         seen_campaign_ids: set[int] = set()
         all_campaigns: list[Campaign] = []
         for o in orders:
@@ -955,43 +951,52 @@ async def paid_funnel(
                     all_campaigns.append(c)
                     seen_campaign_ids.add(c.id)
 
-        # ── Back-fill missing stage timestamps from campaign facts ──────────
-        # For early users, several outreach_orders timestamp columns were never
-        # written. But if a campaign exists, those stages MUST have happened.
-        # Derive them from the campaign rows themselves so every dot is accurate.
-        if all_campaigns:
-            if not stage_ts.get("email_style_selected"):
-                earliest = min(
-                    (c.created_at for c in all_campaigns if c.created_at), default=None
-                )
-                if earliest:
-                    stage_ts["email_style_selected"] = earliest.isoformat()
+        # ── Back-fill ALL missing timestamps from campaign + account facts ─
+        #
+        # Many outreach_orders timestamp columns were never written for early
+        # users. The campaign table and email_accounts are always written by
+        # the system (not the user flow), so they are the authoritative source.
+        #
+        # Rule: if a campaign exists for the user, every stage UP TO AND
+        # INCLUDING campaign_launched definitively happened. Back-fill any
+        # missing timestamps using the earliest campaign's dates as a proxy.
+        #
+        # For resume/quiz/leads: if the user has a campaign, they passed those
+        # gates — use the earliest outreach_order.created_at as the timestamp
+        # since that's when they started the flow.
+        if all_campaigns or gmail_connected:
+            # The earliest order created_at is the best proxy for when the
+            # user first started the outreach flow
+            earliest_order_ts = (
+                min((o.created_at for o in orders if o.created_at), default=None)
+            )
+            earliest_campaign = (
+                min(all_campaigns, key=lambda c: c.created_at or datetime.min, default=None)
+            )
 
-            if not stage_ts.get("campaign_launched"):
-                earliest = min(
-                    (c.started_at or c.created_at
-                     for c in all_campaigns if c.started_at or c.created_at),
-                    default=None,
-                )
-                if earliest:
-                    stage_ts["campaign_launched"] = earliest.isoformat()
+            # resume, quiz, leads: if missing and user got to campaign, infer from order start
+            if earliest_order_ts:
+                for key in ("resume_uploaded", "quiz_completed", "leads_generated"):
+                    if not stage_ts.get(key):
+                        stage_ts[key] = earliest_order_ts.isoformat()
 
-            if not stage_ts.get("campaign_paused"):
-                paused_ts = min(
-                    (c.paused_at for c in all_campaigns if getattr(c, "paused_at", None)),
-                    default=None,
-                )
-                if paused_ts:
-                    stage_ts["campaign_paused"] = paused_ts.isoformat()
+            # gmail: already handled above via email_accounts
 
-            if not stage_ts.get("campaign_completed"):
-                completed_ts = min(
-                    (c.completed_at for c in all_campaigns
-                     if getattr(c, "completed_at", None)),
-                    default=None,
-                )
-                if completed_ts:
-                    stage_ts["campaign_completed"] = completed_ts.isoformat()
+            # style, launch: derive from campaign.created_at / started_at
+            if earliest_campaign:
+                if not stage_ts.get("email_style_selected") and earliest_campaign.created_at:
+                    stage_ts["email_style_selected"] = earliest_campaign.created_at.isoformat()
+                if not stage_ts.get("campaign_launched"):
+                    ts = earliest_campaign.started_at or earliest_campaign.created_at
+                    if ts:
+                        stage_ts["campaign_launched"] = ts.isoformat()
+
+            # paused / completed: derive from campaign.paused_at / completed_at
+            for c in all_campaigns:
+                if not stage_ts.get("campaign_paused") and getattr(c, "paused_at", None):
+                    stage_ts["campaign_paused"] = c.paused_at.isoformat()
+                if not stage_ts.get("campaign_completed") and getattr(c, "completed_at", None):
+                    stage_ts["campaign_completed"] = c.completed_at.isoformat()
 
         best_campaign: Campaign | None = (
             min(all_campaigns, key=lambda c: _CAMPAIGN_PRIORITY.get(c.status, 5), default=None)
