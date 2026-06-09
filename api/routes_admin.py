@@ -921,8 +921,16 @@ async def paid_funnel(
         )
 
         # ── Funnel timestamps (earliest across all orders) ─────────────────
+        # campaign_paused_at and campaign_completed_at on outreach_orders are
+        # unreliable — they can be set on old/dummy orders whose campaign is
+        # now in a different state. We derive these from campaign rows instead
+        # (done below) so we exclude them from the order-level collapse here.
+        _SKIP_FROM_ORDERS = {"campaign_paused", "campaign_completed"}
         stage_ts: dict[str, str | None] = {}
         for key, col in _FUNNEL_STAGE_COLS:
+            if key in _SKIP_FROM_ORDERS:
+                stage_ts[key] = None  # will be set from campaign rows below
+                continue
             best = None
             for o in orders:
                 v = getattr(o, col, None)
@@ -991,12 +999,18 @@ async def paid_funnel(
                     if ts:
                         stage_ts["campaign_launched"] = ts.isoformat()
 
-            # paused / completed: derive from campaign.paused_at / completed_at
+            # paused / completed: only trust campaign.paused_at/completed_at
+            # when the campaign is actually in that state. A campaign that was
+            # paused then resumed will have paused_at set but status='running' —
+            # we still show Pause dot for that. A campaign with completed_at
+            # must have status='completed' to count as done.
             for c in all_campaigns:
-                if not stage_ts.get("campaign_paused") and getattr(c, "paused_at", None):
-                    stage_ts["campaign_paused"] = c.paused_at.isoformat()
-                if not stage_ts.get("campaign_completed") and getattr(c, "completed_at", None):
-                    stage_ts["campaign_completed"] = c.completed_at.isoformat()
+                if getattr(c, "paused_at", None):
+                    if not stage_ts.get("campaign_paused"):
+                        stage_ts["campaign_paused"] = c.paused_at.isoformat()
+                if getattr(c, "completed_at", None) and c.status == "completed":
+                    if not stage_ts.get("campaign_completed"):
+                        stage_ts["campaign_completed"] = c.completed_at.isoformat()
 
         best_campaign: Campaign | None = (
             min(all_campaigns, key=lambda c: _CAMPAIGN_PRIORITY.get(c.status, 5), default=None)
@@ -1129,7 +1143,7 @@ async def paid_funnel(
             funnel_status = "running"
         elif any_paused:
             funnel_status = "paused"
-        elif any_cancelled and not any_launched:
+        elif any_cancelled:
             funnel_status = "cancelled"
         elif any_launched:
             funnel_status = "launched"
