@@ -941,7 +941,6 @@ async def paid_funnel(
         )
         gmail_connected = len(email_accounts) > 0
         if gmail_connected and not stage_ts.get("gmail_connected"):
-            # Back-fill the timestamp from account creation for display
             stage_ts["gmail_connected"] = email_accounts[0].created_at.isoformat()
 
         # ── Best campaign across all orders ────────────────────────────────
@@ -955,6 +954,44 @@ async def paid_funnel(
                 if c:
                     all_campaigns.append(c)
                     seen_campaign_ids.add(c.id)
+
+        # ── Back-fill missing stage timestamps from campaign facts ──────────
+        # For early users, several outreach_orders timestamp columns were never
+        # written. But if a campaign exists, those stages MUST have happened.
+        # Derive them from the campaign rows themselves so every dot is accurate.
+        if all_campaigns:
+            if not stage_ts.get("email_style_selected"):
+                earliest = min(
+                    (c.created_at for c in all_campaigns if c.created_at), default=None
+                )
+                if earliest:
+                    stage_ts["email_style_selected"] = earliest.isoformat()
+
+            if not stage_ts.get("campaign_launched"):
+                earliest = min(
+                    (c.started_at or c.created_at
+                     for c in all_campaigns if c.started_at or c.created_at),
+                    default=None,
+                )
+                if earliest:
+                    stage_ts["campaign_launched"] = earliest.isoformat()
+
+            if not stage_ts.get("campaign_paused"):
+                paused_ts = min(
+                    (c.paused_at for c in all_campaigns if getattr(c, "paused_at", None)),
+                    default=None,
+                )
+                if paused_ts:
+                    stage_ts["campaign_paused"] = paused_ts.isoformat()
+
+            if not stage_ts.get("campaign_completed"):
+                completed_ts = min(
+                    (c.completed_at for c in all_campaigns
+                     if getattr(c, "completed_at", None)),
+                    default=None,
+                )
+                if completed_ts:
+                    stage_ts["campaign_completed"] = completed_ts.isoformat()
 
         best_campaign: Campaign | None = (
             min(all_campaigns, key=lambda c: _CAMPAIGN_PRIORITY.get(c.status, 5), default=None)
