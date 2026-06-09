@@ -39,7 +39,7 @@ from services.email_campaign.gmail_inbox_service import (
     extract_bounce_reason,
 )
 from services.email_campaign.reply_classifier_service import classify_reply_sentiment
-from services.shared.ai.azure_openai_client import ContentFilterError
+from services.shared.ai.azure_openai_client import ContentFilterError, PermanentAPIError
 
 logger = get_logger(__name__)
 
@@ -609,12 +609,17 @@ def _process_followups(db) -> tuple:
 
         try:
             body = generate_followup_email(lead, candidate, parent.body or "", fu.followup_number)
-        except Exception as e:
-            logger.error("[FOLLOWUP] Generation failed for %d: %s", fu.id, e)
+        except PermanentAPIError as e:
+            # 4xx / content filter — retrying the same prompt will never succeed.
+            logger.warning("[FOLLOWUP] Permanent failure for %d: %s", fu.id, e)
             fu.status = "failed"
-            fu.error_message = f"Generation failed: {str(e)[:300]}"
+            fu.error_message = f"Generation failed (permanent): {str(e)[:300]}"
             db.commit()
             failed_count += 1
+            continue
+        except Exception as e:
+            # Transient (429 rate limit, 5xx, network) — leave pending so next cycle retries.
+            logger.warning("[FOLLOWUP] Transient failure for %d (will retry next cycle): %s", fu.id, e)
             continue
 
         # Refresh token
