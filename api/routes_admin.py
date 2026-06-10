@@ -1164,12 +1164,25 @@ async def paid_funnel(
                 db.query(func.count()).select_from(Lead)
                 .filter(Lead.candidate_id == candidate.id, Lead.email_verified == True).scalar()
             ) or 0
-            avg_score = (
-                db.query(func.avg(LeadScore.overall_score))
+            score_agg = (
+                db.query(
+                    func.avg(LeadScore.overall_score).label("avg"),
+                    func.avg(LeadScore.title_relevance).label("avg_title"),
+                    func.avg(LeadScore.department_relevance).label("avg_dept"),
+                    func.avg(LeadScore.industry_relevance).label("avg_industry"),
+                    func.avg(LeadScore.seniority_relevance).label("avg_seniority"),
+                    func.avg(LeadScore.location_relevance).label("avg_location"),
+                    func.sum(case((LeadScore.overall_score >= 80, 1), else_=0)).label("high"),
+                    func.sum(case(
+                        ((LeadScore.overall_score >= 60) & (LeadScore.overall_score < 80), 1), else_=0
+                    )).label("medium"),
+                    func.sum(case((LeadScore.overall_score < 60, 1), else_=0)).label("low"),
+                )
                 .join(Lead, Lead.id == LeadScore.lead_id)
                 .filter(Lead.candidate_id == candidate.id)
-                .scalar()
+                .first()
             )
+            avg_score = score_agg.avg if score_agg else None
             industry_rows = (
                 db.query(Lead.industry, func.count())
                 .filter(Lead.candidate_id == candidate.id, Lead.industry.isnot(None))
@@ -1180,11 +1193,26 @@ async def paid_funnel(
                 .filter(Lead.candidate_id == candidate.id, Lead.title.isnot(None))
                 .group_by(Lead.title).order_by(func.count().desc()).limit(8).all()
             )
+            def _r(v) -> float | None:
+                return round(float(v), 1) if v is not None else None
+
             lead_quality = {
                 "total": total_leads,
                 "with_email": leads_with_email,
                 "email_verified": leads_verified,
-                "avg_score": round(float(avg_score), 1) if avg_score else None,
+                "avg_score": _r(avg_score),
+                "score_breakdown": {
+                    "title":      _r(score_agg.avg_title)      if score_agg else None,
+                    "department": _r(score_agg.avg_dept)       if score_agg else None,
+                    "industry":   _r(score_agg.avg_industry)   if score_agg else None,
+                    "seniority":  _r(score_agg.avg_seniority)  if score_agg else None,
+                    "location":   _r(score_agg.avg_location)   if score_agg else None,
+                },
+                "score_distribution": {
+                    "high":   int(score_agg.high   or 0) if score_agg else 0,
+                    "medium": int(score_agg.medium or 0) if score_agg else 0,
+                    "low":    int(score_agg.low    or 0) if score_agg else 0,
+                },
                 "email_rate": round(leads_with_email / total_leads * 100, 1) if total_leads > 0 else 0,
                 "verified_rate": round(leads_verified / leads_with_email * 100, 1) if leads_with_email > 0 else 0,
                 "top_industries": [{"label": r[0], "count": r[1]} for r in industry_rows],
