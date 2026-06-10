@@ -1054,12 +1054,67 @@ async def paid_funnel(
                 .filter(EmailSent.campaign_id == best_campaign.id)
                 .scalar()
             )
+            # ── Failure breakdown (for breaking campaign detail panel) ──────
+            from sqlalchemy import or_ as sa_or, and_ as sa_and
+            def _fail_count(condition) -> int:
+                return (
+                    db.query(func.count()).select_from(EmailSent)
+                    .filter(EmailSent.campaign_id == best_campaign.id, condition)
+                    .scalar() or 0
+                )
+
+            enrichment_failures = _fail_count(
+                sa_and(EmailSent.status == "failed",
+                       EmailSent.error_message.ilike("%enrichment failed%"))
+            )
+            auth_failures = _fail_count(
+                sa_and(EmailSent.status == "failed",
+                       sa_or(
+                           EmailSent.error_message.ilike("%invalid authentication%"),
+                           EmailSent.error_message.ilike("%authError%"),
+                           EmailSent.error_message.ilike("%401%"),
+                       ))
+            )
+            bad_email_failures = _fail_count(
+                sa_and(EmailSent.status == "failed",
+                       sa_or(
+                           EmailSent.error_message.ilike("%does not exist%"),
+                           EmailSent.error_message.ilike("%not found%"),
+                           EmailSent.error_message.ilike("%inactive%"),
+                           EmailSent.error_message.ilike("%user unknown%"),
+                       ))
+            )
+            # Sample error messages (top 3 distinct)
+            sample_errors = [
+                r[0] for r in
+                db.query(EmailSent.error_message)
+                .filter(
+                    EmailSent.campaign_id == best_campaign.id,
+                    EmailSent.status == "failed",
+                    EmailSent.error_message.isnot(None),
+                )
+                .group_by(EmailSent.error_message)
+                .order_by(func.count().desc())
+                .limit(3)
+                .all()
+                if r[0]
+            ]
+            # Get email account token expiry
+            from database.models import EmailAccount as EA
+            email_account = (
+                db.query(EA).filter(EA.id == best_campaign.email_account_id).first()
+                if best_campaign.email_account_id else None
+            )
+            token_expiry = email_account.token_expiry.isoformat() if email_account and email_account.token_expiry else None
+
             campaign_data = {
                 "id": best_campaign.id,
                 "name": best_campaign.name,
                 "status": best_campaign.status,
                 "daily_limit": best_campaign.daily_limit,
                 "started_at": best_campaign.started_at.isoformat() if best_campaign.started_at else None,
+                "gmail_account": email_account.email_address if email_account else None,
+                "token_expiry": token_expiry,
                 "stats": {
                     "leads_contacted": leads_contacted,
                     "replied": replied,
@@ -1070,6 +1125,13 @@ async def paid_funnel(
                     "followups_sent": fups.get("sent", 0) + fups.get("replied", 0),
                     "followups_replied": fups.get("replied", 0),
                     "last_email_sent": last_sent.isoformat() if last_sent else None,
+                    "failure_breakdown": {
+                        "enrichment": enrichment_failures,
+                        "auth": auth_failures,
+                        "bad_email": bad_email_failures,
+                        "other": max(0, failed - enrichment_failures - auth_failures - bad_email_failures),
+                    },
+                    "sample_errors": sample_errors,
                 },
             }
 
