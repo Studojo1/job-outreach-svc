@@ -328,7 +328,10 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 db_save.close()
 
             # Kick off LLM web research for uncached companies in a daemon thread.
-            _launch_web_research_bg(top_companies)
+            # Cap at 40 unique companies (same ceiling as B2B). Top-20 are already
+            # researched inline above, so background effectively adds companies 21-40
+            # only — maximum 20 new Bing calls per run instead of 130-180.
+            _launch_web_research_bg(unique_companies[:40])
 
         except Exception as e:
             logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)

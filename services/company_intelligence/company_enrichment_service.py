@@ -28,7 +28,7 @@ from .web_scraper import scrape_many
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL = timedelta(days=30)
+CACHE_TTL = timedelta(days=90)
 
 
 def get_or_create_profile(db: Session, domain: str) -> CompanyProfile:
