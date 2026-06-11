@@ -256,6 +256,7 @@ def _llm_clean_locations(raw_locations: List[str]) -> List[str]:
         return []
 
     try:
+        from core.config import settings
         from services.shared.ai.azure_openai_client import generate_json
     except Exception as e:
         logger.warning("LLM client unavailable for location cleaning: %s", e)
@@ -289,7 +290,10 @@ def _llm_clean_locations(raw_locations: List[str]) -> List[str]:
     )
 
     try:
-        result = generate_json(prompt, schema, temperature=0.0)
+        result = generate_json(
+            prompt, schema, temperature=0.0,
+            deployment=settings.AZURE_OPENAI_FAST_DEPLOYMENT,
+        )
         cities = result.get("cities", []) if isinstance(result, dict) else []
         cities = [c.strip() for c in cities if isinstance(c, str) and c.strip()]
         logger.info("LLM cleaned locations %s → %s", raw_locations, cities)

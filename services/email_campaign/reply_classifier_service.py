@@ -6,6 +6,7 @@ Uses the existing generate_json() function for consistency with the rest of the 
 
 from typing import Dict, Any
 
+from core.config import settings
 from core.logger import get_logger
 from services.shared.ai.azure_openai_client import generate_json
 
@@ -67,7 +68,10 @@ def classify_reply_sentiment(reply_text: str) -> Dict[str, Any]:
 
     try:
         prompt = CLASSIFICATION_PROMPT.replace("{reply_text}", truncated)
-        result = generate_json(prompt=prompt, schema=SENTIMENT_SCHEMA, temperature=0.0)
+        result = generate_json(
+            prompt=prompt, schema=SENTIMENT_SCHEMA, temperature=0.0,
+            deployment=settings.AZURE_OPENAI_FAST_DEPLOYMENT,
+        )
         logger.info("[REPLY_CLASSIFIER] sentiment=%s — %s",
                     result.get("sentiment"), result.get("summary"))
         return result

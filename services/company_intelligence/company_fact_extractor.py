@@ -28,6 +28,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
+from core.config import settings
 from services.shared.ai.azure_openai_client import generate_json
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,10 @@ def _extract_batch(batch: Dict[str, dict]) -> Dict[str, dict]:
     prompt = _build_batch_prompt(batch)
     schema = _build_batch_schema(list(batch.keys()))
     try:
-        result = generate_json(prompt, schema, temperature=TEMPERATURE)
+        result = generate_json(
+            prompt, schema, temperature=TEMPERATURE,
+            deployment=settings.AZURE_OPENAI_FAST_DEPLOYMENT,
+        )
     except Exception as e:
         logger.warning("[FACTS] batch failed (%d companies): %s", len(batch), e)
         return {}

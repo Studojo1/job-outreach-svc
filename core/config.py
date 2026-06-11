@@ -26,7 +26,12 @@ class Settings(BaseSettings):
     AZURE_OPENAI_ENDPOINT: str
     AZURE_OPENAI_API_VERSION: str = "2025-04-01-preview"
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT: str = "text-embedding-ada-002"
+    # Reasoning-capable model used for quality-critical tasks: Bing web research,
+    # profiler agent, career strategist, quality probe, email generation, resume parsing.
     AZURE_OPENAI_LLM_DEPLOYMENT: str = "gpt-5-mini"
+    # Cheap/fast model used for batch & pattern tasks: justifier, company fit scoring,
+    # fact extractor, reply classifier, role/location normalization. ~17x cheaper.
+    AZURE_OPENAI_FAST_DEPLOYMENT: str = "gpt-4o-mini"
     AZURE_OPENAI_KEY: str
 
     # RAZORPAY

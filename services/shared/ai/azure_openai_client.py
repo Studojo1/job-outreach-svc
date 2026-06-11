@@ -33,6 +33,7 @@ def generate_json(
     schema: Dict[str, Any],
     temperature: float = 0.0,
     system_prompt: Optional[str] = None,
+    deployment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send a prompt to Azure OpenAI and return parsed, validated JSON.
 
@@ -43,6 +44,9 @@ def generate_json(
         system_prompt: Optional system-role instructions. When provided, moves all
             instruction/rule content to the system message so the user message
             contains only context data — avoids Azure jailbreak false positives.
+        deployment: Override the default LLM deployment. Pass
+            settings.AZURE_OPENAI_FAST_DEPLOYMENT for batch/pattern tasks
+            that don't need a reasoning model (~17x cheaper).
 
     Returns:
         A dictionary containing the parsed and validated JSON response.
@@ -54,7 +58,7 @@ def generate_json(
     """
     endpoint = settings.AZURE_OPENAI_ENDPOINT
     api_version = settings.AZURE_OPENAI_API_VERSION
-    deployment = settings.AZURE_OPENAI_LLM_DEPLOYMENT
+    deployment = deployment or settings.AZURE_OPENAI_LLM_DEPLOYMENT
     api_key = settings.AZURE_OPENAI_KEY
 
     if not all([endpoint, api_version, deployment, api_key]):

@@ -85,6 +85,18 @@ spec:
                 configMapKeyRef:
                   name: app-config
                   key: INTERNREACH_AZURE_OPENAI_DEPLOYMENT
+            # Reasoning model for quality-critical tasks (Bing research, profiler,
+            # career strategist, quality probe, email gen, resume parsing)
+            - name: AZURE_OPENAI_LLM_DEPLOYMENT
+              value: "gpt-5-mini"
+            # Cheap model for batch/pattern tasks (justifier, company fit, fact
+            # extractor, reply classifier, role/location normalization) — ~17x cheaper
+            - name: AZURE_OPENAI_FAST_DEPLOYMENT
+              value: "gpt-4o-mini"
+            - name: AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+              value: "text-embedding-3-small"
+            - name: AZURE_OPENAI_API_VERSION
+              value: "2025-04-01-preview"
             - name: FRONTEND_URL
               valueFrom:
                 configMapKeyRef:

@@ -120,7 +120,7 @@ def _call_llm_batch(companies: list[dict], candidate_context: str) -> dict[str, 
         api_version=settings.AZURE_OPENAI_API_VERSION,
     )
     response = client.chat.completions.create(
-        model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
+        model=settings.AZURE_OPENAI_FAST_DEPLOYMENT,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

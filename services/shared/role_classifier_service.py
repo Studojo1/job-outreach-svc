@@ -218,6 +218,7 @@ def _llm_clean_roles(raw_roles: List[str]) -> List[str]:
         return []
 
     try:
+        from core.config import settings
         from services.shared.ai.azure_openai_client import generate_json
     except Exception as e:
         logger.warning("LLM client unavailable for role cleaning: %s", e)
@@ -251,7 +252,10 @@ def _llm_clean_roles(raw_roles: List[str]) -> List[str]:
     )
 
     try:
-        result = generate_json(prompt, schema, temperature=0.0)
+        result = generate_json(
+            prompt, schema, temperature=0.0,
+            deployment=settings.AZURE_OPENAI_FAST_DEPLOYMENT,
+        )
         roles = result.get("roles", []) if isinstance(result, dict) else []
         roles = [r.strip() for r in roles if isinstance(r, str) and r.strip()]
         logger.info("LLM cleaned roles %s → %s", raw_roles, roles)
