@@ -199,7 +199,7 @@ def _enrich_upcoming(db) -> int:
 
     Returns number of leads successfully enriched.
     """
-    from services.enrichment.enrichment_service import _enrich_single_lead
+    from services.enrichment.enrichment_service import enrich_single_lead_classified
 
     now = datetime.utcnow()
     lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
@@ -243,47 +243,58 @@ def _enrich_upcoming(db) -> int:
             enriched_count += 1
             continue
 
-        try:
-            result = _enrich_single_lead(lead)
+        result = enrich_single_lead_classified(lead)
 
-            if result:
-                # Update lead
-                lead.email = result["email"]
-                if result.get("name"):
-                    lead.name = result["name"]
-                lead.email_verified = True
-                lead.status = "enriched"
+        if result.success:
+            lead.email = result.data["email"]
+            if result.data.get("name"):
+                lead.name = result.data["name"]
+            lead.email_verified = True
+            lead.status = "enriched"
 
-                # Update email record. Credits are reserved up-front at
-                # campaign creation; no per-send deduction is needed.
-                email.to_email = result["email"]
-                email.enrichment_status = "enriched"
+            email.to_email = result.data["email"]
+            email.enrichment_status = "enriched"
 
-                db.commit()
-                enriched_count += 1
-                logger.info("[JIT-ENRICH] Enriched lead %d (%s) -> %s for email %d",
-                            lead.id, lead.name, result["email"], email.id)
-            else:
-                # Enrichment returned no email
-                lead.enrichment_fail_count += 1
-                if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
-                    email.enrichment_status = "skipped"
-                    email.status = "failed"
-                    email.error_message = f"Enrichment failed after {MAX_ENRICHMENT_FAILURES} attempts"
-                    logger.warning("[JIT-ENRICH] Skipping lead %d (%s) after %d failures",
-                                   lead.id, lead.name, lead.enrichment_fail_count)
-                db.commit()
+            db.commit()
+            enriched_count += 1
+            logger.info("[JIT-ENRICH] Enriched lead %d (%s) -> %s for email %d",
+                        lead.id, lead.name, result.data["email"], email.id)
 
-            time.sleep(0.2)  # Apollo rate limit
+        elif result.error_type in ("credit_exhausted", "rate_limited", "apollo_down"):
+            # Transient failure — do NOT increment fail_count. Pause this email
+            # so the credit-restored requeue (Bundle C3) can pick it back up.
+            email.enrichment_status = "credit_paused"
+            email.error_message = f"Apollo {result.error_type}: {result.error_detail[:200]}"
+            db.commit()
+            logger.warning("[JIT-ENRICH] Paused lead %d (%s): %s",
+                           lead.id, lead.name, result.error_type)
 
-        except Exception as e:
+        elif result.error_type == "no_match":
+            # Apollo cannot find an email for this person. Permanent for this lead.
             lead.enrichment_fail_count += 1
             if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
                 email.enrichment_status = "skipped"
                 email.status = "failed"
-                email.error_message = f"Enrichment error: {str(e)[:200]}"
+                email.error_message = "Apollo could not find email for this contact"
+                logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
+                               lead.id, lead.name, lead.enrichment_fail_count)
+            else:
+                email.error_message = (
+                    f"Apollo no match (attempt {lead.enrichment_fail_count}/"
+                    f"{MAX_ENRICHMENT_FAILURES})"
+                )
             db.commit()
-            logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, e)
+
+        else:  # exception or unknown
+            lead.enrichment_fail_count += 1
+            if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+                email.enrichment_status = "skipped"
+                email.status = "failed"
+                email.error_message = f"Enrichment error: {result.error_detail[:200]}"
+            db.commit()
+            logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
+
+        time.sleep(0.2)  # Apollo rate limit
 
     return enriched_count
 
