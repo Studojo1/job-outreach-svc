@@ -1055,7 +1055,12 @@ async def paid_funnel(
                 .scalar()
             )
             # ── Failure breakdown (for breaking campaign detail panel) ──────
+            # Auth failures scoped to last 7 days so reconnected users drop off the alert.
+            # Enrichment scoped to initial emails only to stay consistent with the displayed `failed` stat.
+            # Bad-email category removed — was misclassifying Gmail API "Requested entity was not found"
+            # as a recipient bounce.
             from sqlalchemy import or_ as sa_or, and_ as sa_and
+            _recent_window = datetime.utcnow() - timedelta(days=7)
             def _fail_count(condition) -> int:
                 return (
                     db.query(func.count()).select_from(EmailSent)
@@ -1065,23 +1070,16 @@ async def paid_funnel(
 
             enrichment_failures = _fail_count(
                 sa_and(EmailSent.status == "failed",
+                       is_initial,
                        EmailSent.error_message.ilike("%enrichment failed%"))
             )
             auth_failures = _fail_count(
                 sa_and(EmailSent.status == "failed",
+                       EmailSent.created_at > _recent_window,
                        sa_or(
                            EmailSent.error_message.ilike("%invalid authentication%"),
                            EmailSent.error_message.ilike("%authError%"),
-                           EmailSent.error_message.ilike("%401%"),
-                       ))
-            )
-            bad_email_failures = _fail_count(
-                sa_and(EmailSent.status == "failed",
-                       sa_or(
-                           EmailSent.error_message.ilike("%does not exist%"),
-                           EmailSent.error_message.ilike("%not found%"),
-                           EmailSent.error_message.ilike("%inactive%"),
-                           EmailSent.error_message.ilike("%user unknown%"),
+                           EmailSent.error_message.ilike('%"code": 401%'),
                        ))
             )
             # Sample error messages (top 3 distinct)
@@ -1128,8 +1126,7 @@ async def paid_funnel(
                     "failure_breakdown": {
                         "enrichment": enrichment_failures,
                         "auth": auth_failures,
-                        "bad_email": bad_email_failures,
-                        "other": max(0, failed - enrichment_failures - auth_failures - bad_email_failures),
+                        "other": max(0, failed - enrichment_failures - auth_failures),
                     },
                     "sample_errors": sample_errors,
                 },
