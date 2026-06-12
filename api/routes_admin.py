@@ -1,5 +1,6 @@
 """Admin endpoints for outreach order monitoring dashboard."""
 
+import math
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1105,6 +1106,32 @@ async def paid_funnel(
             )
             token_expiry = email_account.token_expiry.isoformat() if email_account and email_account.token_expiry else None
 
+            # Replacement counts for auto-replenishment dashboard
+            cid = best_campaign.id
+            replacements_bounce = (
+                db.query(func.count(EmailSent.id))
+                .filter(EmailSent.campaign_id == cid,
+                        EmailSent.replacement_reason == "bounce")
+                .scalar()
+            ) or 0
+            replacements_enrichment = (
+                db.query(func.count(EmailSent.id))
+                .filter(EmailSent.campaign_id == cid,
+                        EmailSent.replacement_reason == "enrichment_exhausted")
+                .scalar()
+            ) or 0
+            initial_lead_count = (
+                db.query(func.count(EmailSent.id))
+                .filter(
+                    EmailSent.campaign_id == cid,
+                    EmailSent.replacement_for_id.is_(None),
+                    sa_or(EmailSent.followup_number == 0, EmailSent.followup_number.is_(None)),
+                )
+                .scalar()
+            ) or 0
+            replacement_cap = math.ceil(initial_lead_count * 0.25)
+            replacements_total = replacements_bounce + replacements_enrichment
+
             campaign_data = {
                 "id": best_campaign.id,
                 "name": best_campaign.name,
@@ -1129,6 +1156,9 @@ async def paid_funnel(
                         "other": max(0, failed - enrichment_failures - auth_failures),
                     },
                     "sample_errors": sample_errors,
+                    "replacements_bounce": replacements_bounce,
+                    "replacements_enrichment": replacements_enrichment,
+                    "replacement_cap_remaining": max(0, replacement_cap - replacements_total),
                 },
             }
 

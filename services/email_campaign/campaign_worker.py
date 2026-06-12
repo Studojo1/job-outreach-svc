@@ -278,6 +278,9 @@ def _enrich_upcoming(db) -> int:
                 email.error_message = "Apollo could not find email for this contact"
                 logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
                                lead.id, lead.name, lead.enrichment_fail_count)
+                if email.replacement_for_id is None:
+                    from services.email_campaign.replenishment import add_replacement_lead
+                    add_replacement_lead(db, email.campaign_id, email.id, reason="enrichment_exhausted")
             else:
                 email.error_message = (
                     f"Apollo no match (attempt {lead.enrichment_fail_count}/"
@@ -880,6 +883,9 @@ def _check_replies(db):
                     if is_bounce_message(detail["from_email"]):
                         email_row.status = "bounced"
                         email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
+                        if email_row.replacement_for_id is None:
+                            from services.email_campaign.replenishment import add_replacement_lead
+                            add_replacement_lead(db, email_row.campaign_id, email_row.id, reason="bounce")
                         db.commit()
                         bounces_found += 1
                         logger.info("[REPLY_CHECK] Bounce detected for email %d: %s",
@@ -963,6 +969,10 @@ def _process_cycle():
         # Post-cycle checks (after reply check so replies cancel follow-ups promptly)
         _check_campaign_completion(db)
         _check_credit_exhaustion(db)
+
+        # Phase 5: Re-queue emails paused on Apollo credit exhaustion (throttled)
+        from services.email_campaign.replenishment import requeue_credit_paused
+        requeue_credit_paused(db)
 
     finally:
         db.close()

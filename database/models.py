@@ -206,6 +206,12 @@ class EmailSent(Base):
     followup_number = Column(Integer, nullable=False, default=0)  # 0 = Touch 1, 1 = Touch 2, 2 = Touch 3
     parent_email_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="CASCADE"))  # Points to Touch 1 for follow-ups
     message_id_header = Column(String(500))            # Gmail RFC 5322 Message-ID header for In-Reply-To threading
+    # Auto-replenishment lineage. NULL on the original row, set on a replacement
+    # row to the id of the row that triggered it. enrichment_status may also use
+    # the value 'credit_paused' when an Apollo credit/rate-limit error pauses an
+    # email instead of advancing it toward the 3-attempt cap.
+    replacement_for_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="SET NULL"))
+    replacement_reason = Column(String(40))             # 'bounce' | 'enrichment_exhausted'
     created_at = Column(DateTime, default=datetime.utcnow)
 
     campaign = relationship("Campaign", back_populates="emails_sent")
