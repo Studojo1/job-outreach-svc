@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from database.models import CompanyProfile
 
 from .llm_company_research import research_companies_bulk
+from .apollo_company_resolver import resolve_canonical_domain
 
 from .web_scraper import scrape_many
 
@@ -143,6 +144,7 @@ def bulk_enrich_top_companies(
     companies: Iterable[Any],
     enable_scrape: bool = True,
     enable_llm_research: bool = True,
+    location_hint: Optional[List[str]] = None,
 ) -> Dict[str, CompanyProfile]:
     """Enrich every company in the input via cache + optional LLM web search.
 
@@ -151,6 +153,10 @@ def bulk_enrich_top_companies(
       - List of {"domain": str|None, "name": str|None} dicts (new)
 
     Cache strategy:
+      0. Resolve canonical domain via Apollo /mixed_companies/search (free)
+         when we have a name. Uses `location_hint` to disambiguate common
+         short names (Comet, Swish, ...) to the right org. Runs only when
+         we'd otherwise do fresh research (enable_llm_research=True).
       1. If domain is known → check CompanyProfile by domain (30-day TTL)
       2. If only name is known → check CompanyProfile by normalised name field
       3. Cache miss → call LLM web search only if enable_llm_research=True
@@ -158,6 +164,11 @@ def bulk_enrich_top_companies(
 
     Set enable_llm_research=False and enable_scrape=False for cache-only mode
     (scoring pipeline uses this to stay fast; web research runs separately).
+
+    Args:
+        location_hint: Optional list of locations (e.g. ["Bangalore", "India"])
+            inherited from the user's lead filter. Passed to Apollo company
+            search so ambiguous names resolve to the org actually in scope.
 
     Returns {key: CompanyProfile} where key is domain OR original name.
     """
@@ -184,6 +195,36 @@ def bulk_enrich_top_companies(
         deduped.append(c)
 
     logger.info("[ENRICH] starting bulk enrich for %d unique companies", len(deduped))
+
+    # ── Phase 0: resolve canonical domain via Apollo /mixed_companies/search ─
+    # FREE Apollo call. Disambiguates ambiguous short names (Comet, Swish, …)
+    # to the right org by combining the user's location filter with the org
+    # name. Whatever domain Apollo's free people search left us with (often
+    # wrong because the people endpoint doesn't actually return a domain) gets
+    # overridden by the canonical primary_domain from the search hit.
+    # Only run when we'd otherwise do fresh research — cache-only callers
+    # skip this to stay fast.
+    if enable_llm_research:
+        resolved_count = 0
+        for c in deduped:
+            if not c.get("name"):
+                continue
+            resolved = resolve_canonical_domain(c["name"], location_hint=location_hint)
+            if not resolved:
+                continue
+            new_domain = resolved.get("primary_domain")
+            if not new_domain:
+                continue
+            old_domain = c.get("domain")
+            if old_domain and old_domain != new_domain:
+                logger.info(
+                    "[ENRICH] corrected domain for %r: %s → %s (Apollo search disambiguation)",
+                    c["name"], old_domain, new_domain,
+                )
+            c["domain"] = new_domain
+            resolved_count += 1
+        logger.info("[ENRICH] phase 0: resolved canonical domain for %d/%d companies via Apollo search",
+                    resolved_count, len(deduped))
 
     profiles: Dict[str, CompanyProfile] = {}   # keyed by canonical domain
     name_alias: Dict[str, CompanyProfile] = {} # original name → profile

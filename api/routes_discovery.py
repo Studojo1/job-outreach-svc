@@ -34,12 +34,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
 
 
-def _launch_web_research_bg(top_companies: list) -> None:
+def _launch_web_research_bg(top_companies: list, location_hint: Optional[list] = None) -> None:
     """Spawn a daemon thread to run LLM web research for uncached companies.
 
     Runs after justification is committed so it never blocks the scoring pipeline.
     Populates CompanyProfile cache so the next run for any of these companies
     gets company-specific bullets instead of generic ones.
+
+    `location_hint` is forwarded to Apollo /mixed_companies/search inside
+    bulk_enrich so ambiguous names resolve to the right org.
     """
     import threading
     from services.company_intelligence.company_enrichment_service import bulk_enrich_top_companies
@@ -47,7 +50,11 @@ def _launch_web_research_bg(top_companies: list) -> None:
     def _run():
         db = SessionLocal()
         try:
-            bulk_enrich_top_companies(db, top_companies, enable_scrape=False, enable_llm_research=True)
+            bulk_enrich_top_companies(
+                db, top_companies,
+                enable_scrape=False, enable_llm_research=True,
+                location_hint=location_hint,
+            )
             db.commit()
         except Exception as exc:
             logger.warning("[WEB_RESEARCH_BG] failed: %s", exc)
@@ -60,7 +67,8 @@ def _launch_web_research_bg(top_companies: list) -> None:
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    logger.info("[WEB_RESEARCH_BG] launched for %d companies", len(top_companies))
+    logger.info("[WEB_RESEARCH_BG] launched for %d companies (location_hint=%s)",
+                len(top_companies), location_hint)
 
 
 class DiscoveryRequest(BaseModel):
@@ -193,7 +201,8 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             # Apollo's people search returns near-zero org data on our plan
             # (no domain, no industry), so most leads have company_domain=None
             # but always have a company name. Pass both — the orchestrator
-            # resolves missing domains via name-based Apollo lookup.
+            # resolves missing/wrong domains via Apollo /mixed_companies/search
+            # using `location_hint` to disambiguate common short names.
             top_companies = [
                 {"domain": ld.get("company_domain"), "name": ld.get("company")}
                 for ld in top_leads if ld.get("company") or ld.get("company_domain")
@@ -206,8 +215,15 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                     unique_keys.append(k)
                     unique_companies.append(c)
 
-            logger.info("[JUSTIFY] enriching %d unique companies for top %d leads",
-                        len(unique_companies), len(top_leads))
+            # Pull the candidate's location preferences as a hint for the
+            # Apollo company-search disambiguation. Without this, ambiguous
+            # names like "Comet" or "Swish" resolve to the most-indexed
+            # global brand instead of the actual Indian / regional company
+            # the contact works at.
+            location_hint = prefs.get("locations") or []
+
+            logger.info("[JUSTIFY] enriching %d unique companies for top %d leads (location_hint=%s)",
+                        len(unique_companies), len(top_leads), location_hint)
 
             # Warm cache for top-20 unique companies via inline LLM web research.
             # First-time candidates have no cached company profiles → justifier
@@ -219,7 +235,8 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             if top_20:
                 logger.info("[JUSTIFY] inline LLM research for top-%d companies", len(top_20))
                 bulk_enrich_top_companies(
-                    db, top_20, enable_scrape=False, enable_llm_research=True
+                    db, top_20, enable_scrape=False, enable_llm_research=True,
+                    location_hint=location_hint,
                 )
 
             # Cache-only pass for all companies — top-20 are now cached.
@@ -228,20 +245,32 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             )
             company_payloads = {d: profile_to_llm_dict(p) for d, p in profiles.items()}
 
-            # Backfill discovered domains onto Lead rows so subsequent runs
-            # skip the name-resolution step.
+            # Backfill / correct discovered domains onto Lead rows so subsequent
+            # runs use the right domain (and we self-heal previously-wrong ones
+            # written before the Apollo company-search disambiguation existed).
             backfilled = 0
+            corrected = 0
             lead_id_to_obj = {l.id: l for l in unscored}
             for ld in top_leads:
                 lead_obj = lead_id_to_obj.get(ld.get("id"))
-                if not lead_obj or lead_obj.company_domain:
+                if not lead_obj:
                     continue
-                profile = profiles.get(lead_obj.company)  # name-keyed lookup first
-                if profile and profile.domain and profile.domain != (lead_obj.company or "").lower():
+                profile = profiles.get(lead_obj.company)  # name-keyed lookup
+                if not (profile and profile.domain):
+                    continue
+                if profile.domain == (lead_obj.company or "").lower():
+                    continue  # avoid setting domain = company-name fallback
+                if not lead_obj.company_domain:
                     lead_obj.company_domain = profile.domain
                     backfilled += 1
-            if backfilled:
-                logger.info("[ENRICH] backfilled company_domain on %d leads", backfilled)
+                elif lead_obj.company_domain != profile.domain:
+                    logger.info("[ENRICH] corrected lead %d domain %s → %s",
+                                lead_obj.id, lead_obj.company_domain, profile.domain)
+                    lead_obj.company_domain = profile.domain
+                    corrected += 1
+            if backfilled or corrected:
+                logger.info("[ENRICH] domain writeback: backfilled %d, corrected %d leads",
+                            backfilled, corrected)
 
             # ── Domain-affinity adjustment (round-2) ─────────────────────────
             # Now that fact extraction has run during enrichment, compare each
@@ -331,7 +360,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             # Cap at 40 unique companies (same ceiling as B2B). Top-20 are already
             # researched inline above, so background effectively adds companies 21-40
             # only — maximum 20 new Bing calls per run instead of 130-180.
-            _launch_web_research_bg(unique_companies[:40])
+            _launch_web_research_bg(unique_companies[:40], location_hint=location_hint)
 
         except Exception as e:
             logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)

@@ -193,8 +193,10 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
 
     company_description = (organization.get("short_description") or "")[:500] or None
 
-    # Capture domain — preferred for company-level enrichment (Apollo /organizations/enrich,
-    # site scrape). Apollo returns it as primary_domain or website_url; normalize.
+    # Capture domain if Apollo's free people search happens to return one.
+    # In practice the free /mixed_people/api_search response keeps `primary_domain`
+    # paywalled, so this is usually None — the real disambiguation happens
+    # later via Apollo /mixed_companies/search in company_enrichment_service.
     company_domain = _extract_domain(organization)
 
     return {
