@@ -563,6 +563,7 @@ async def get_candidate_leads(
             "name": lead.name,
             "title": lead.title,
             "company": lead.company,
+            "company_domain": lead.company_domain,
             "industry": lead.industry,
             "location": lead.location,
             "linkedin_url": lead.linkedin_url,
