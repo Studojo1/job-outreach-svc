@@ -46,6 +46,9 @@ async def get_pricing(req: Request):
     result = []
     for p in plans:
         amount = p.price_inr if currency == "INR" else p.price_usd
+        # Skip plans that have no price for this currency (e.g. email_50 is India-only)
+        if amount == 0 and not (p.email_credits == 0 and p.linkedin_credits == 0):
+            continue
         result.append({
             "plan_id": p.plan_id,
             "plan_type": p.plan_type,
@@ -55,6 +58,7 @@ async def get_pricing(req: Request):
             "amount_cents": amount,
             "currency": currency,
             "display_price": f"{sym}{amount / 100:.0f}",
+            "duration_days": p.duration_days,
         })
     # Legacy `tiers` shape — the pre-merge enrichment page reads this. Kept
     # alongside `plans` so both the old (email-only) and new (9-plan) frontends
@@ -85,6 +89,7 @@ async def get_pricing(req: Request):
             "display_price": p["display_price"],
             "anchor_display": anchor_display,   # e.g. "₹2500", or null
             "discount_pct": discount_pct,        # e.g. 27, or null
+            "duration_days": p["duration_days"], # 0 = unlimited
         })
 
     return {
@@ -208,6 +213,10 @@ async def create_order(
         resolved_tier = body.tier
     else:
         raise HTTPException(status_code=400, detail="plan_id or tier required")
+
+    # email_50 is India-only (no USD price); block non-India orders
+    if resolved_plan_id == "email_50" and not is_india(req):
+        raise HTTPException(status_code=400, detail="This plan is only available in India.")
 
     # Detect geo for gateway routing
     country = detect_country(req)
@@ -727,13 +736,15 @@ def _grant_credits(db: Session, user_id: str, amount: int):
 
 
 def _set_plan_on_order(db: Session, outreach_order_id: int | None, plan) -> None:
-    """Set plan_type + linkedin_credits_reserved on the linked OutreachOrder."""
+    """Set plan_type, leads_target, and linkedin_credits_reserved on the linked OutreachOrder."""
     if not outreach_order_id:
         return
     oo = db.query(OutreachOrder).filter_by(id=outreach_order_id).first()
     if not oo:
         return
     oo.plan_type = plan.plan_type
+    if plan.email_credits:
+        oo.leads_target = plan.email_credits
     if plan.linkedin_credits:
         oo.linkedin_credits_reserved = plan.linkedin_credits
 
