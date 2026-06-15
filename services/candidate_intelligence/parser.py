@@ -4,29 +4,133 @@ Extracts text from PDF/DOCX resumes. NO LLM summarization during upload.
 The raw text is passed directly to the chat agent for contextual understanding.
 """
 
+import base64
 import fitz  # PyMuPDF
 import logging
 import re
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Threshold below which we treat PyMuPDF's text extraction as a failure and
+# fall back to OCR. Canva/scanned/image-PDFs typically yield 0–10 chars even
+# when the resume looks fully populated.
+_OCR_FALLBACK_THRESHOLD = 50
+# Hard cap on pages we OCR — most resumes are 1–2 pages, anything past 5
+# is almost certainly not a resume and would burn vision tokens.
+_OCR_MAX_PAGES = 5
+# Render PDF pages at ~150 DPI for OCR (2.0x zoom on default 72 DPI). Higher
+# is more accurate but pushes vision input tokens up fast.
+_OCR_PAGE_ZOOM = 2.0
+
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract raw text from a PDF file using PyMuPDF (< 1 second)."""
+    """Extract raw text from a PDF.
+
+    Fast path: PyMuPDF reads the embedded text layer (< 1 second).
+    Fallback: Azure OpenAI vision OCR when the text layer is empty/sparse —
+    handles image-based PDFs (Canva exports, scans, screenshot-to-PDF).
+    """
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         text_parts = []
         for page in doc:
             text_parts.append(page.get_text())
         num_pages = len(doc)
-        doc.close()
         text = "\n".join(text_parts).strip()
-        logger.info(f"PDF parsed: {len(text)} chars from {num_pages} pages")
+        logger.info(f"PDF parsed (text layer): {len(text)} chars from {num_pages} pages")
+
+        if len(text) >= _OCR_FALLBACK_THRESHOLD:
+            doc.close()
+            return text
+
+        # Text layer empty/sparse — almost certainly an image-based PDF.
+        logger.info(
+            f"PDF text layer below threshold ({len(text)} < {_OCR_FALLBACK_THRESHOLD}); "
+            f"falling back to Azure vision OCR."
+        )
+        try:
+            ocr_text = _ocr_pdf_via_azure_vision(doc, num_pages)
+        finally:
+            doc.close()
+
+        if ocr_text and len(ocr_text.strip()) >= _OCR_FALLBACK_THRESHOLD:
+            logger.info(f"OCR recovered {len(ocr_text)} chars from image-based PDF")
+            return ocr_text.strip()
+        # OCR also yielded nothing useful — return whatever text layer we had.
         return text
     except Exception as e:
         logger.error(f"Error parsing PDF: {e}")
         raise ValueError(f"Could not parse PDF file: {str(e)}")
+
+
+def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
+    """Render PDF pages to PNGs and ask gpt-4o (vision) to extract text.
+
+    Uses the same Azure OpenAI deployment the rest of the codebase uses.
+    Caps page count to keep vision token cost bounded.
+    """
+    from core.config import settings
+
+    endpoint = (settings.AZURE_OPENAI_ENDPOINT or "").rstrip("/")
+    api_version = settings.AZURE_OPENAI_API_VERSION
+    # gpt-4o-mini is vision-capable and ~5x cheaper than gpt-4o; fine for OCR
+    deployment = getattr(settings, "AZURE_OPENAI_FAST_DEPLOYMENT", None) or "gpt-4o-mini"
+    api_key = settings.AZURE_OPENAI_KEY
+    if not all([endpoint, api_version, deployment, api_key]):
+        logger.warning("Azure OpenAI config missing — cannot run vision OCR fallback")
+        return ""
+
+    pages_to_ocr = min(num_pages, _OCR_MAX_PAGES)
+    image_blocks = []
+    for i in range(pages_to_ocr):
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=fitz.Matrix(_OCR_PAGE_ZOOM, _OCR_PAGE_ZOOM))
+        png_bytes = pix.tobytes("png")
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        image_blocks.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}"},
+        })
+
+    url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+    prompt_text = (
+        "This is a resume. Extract ALL visible text exactly as written — "
+        "names, contact info, headers, bullets, dates, every line. "
+        "Preserve reading order. Do NOT summarise, paraphrase, or add commentary. "
+        "Output the raw text only."
+    )
+    payload = {
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": prompt_text}, *image_blocks],
+        }],
+        "temperature": 0.0,
+        "max_tokens": 4000,
+    }
+    try:
+        resp = requests.post(
+            url,
+            headers={"api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+    except Exception as e:
+        logger.error(f"Azure vision OCR request failed: {e}")
+        return ""
+
+    if not resp.ok:
+        logger.error(f"Azure vision OCR HTTP {resp.status_code}: {resp.text[:300]}")
+        return ""
+
+    data = resp.json() or {}
+    try:
+        content = data["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        logger.error(f"Azure vision OCR returned unexpected shape: {str(data)[:300]}")
+        return ""
+    return content
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
