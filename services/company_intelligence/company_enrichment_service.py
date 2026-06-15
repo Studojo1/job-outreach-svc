@@ -244,8 +244,12 @@ def bulk_enrich_top_companies(
                     name_alias[name] = existing
                 continue
 
-        # Try name-based cache hit (fixes the null-domain miss bug)
-        if name:
+        # Name-based fallback — ONLY when we have no domain at all. If Phase 0
+        # gave us a canonical domain (or one was already on the lead), the
+        # domain is authoritative; name-based cache lookup would re-use a stale
+        # CompanyProfile for a same-named-but-different company (e.g. cache
+        # for 'Swish'@swish.nu hijacking a fresh resolver hit on justswish.in).
+        if name and not domain:
             existing = (
                 db.query(CompanyProfile)
                 .filter(CompanyProfile.name.ilike(name))
