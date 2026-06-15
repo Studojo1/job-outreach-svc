@@ -175,6 +175,7 @@ class Campaign(Base):
     paused_at = Column(DateTime, nullable=True)
     started_at = Column(DateTime, nullable=True)     # set when status → running
     completed_at = Column(DateTime, nullable=True)   # set when status → completed
+    expires_at = Column(DateTime, nullable=True)     # set for duration-limited plans (e.g. email_50 = 8 days)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("Candidate", back_populates="campaigns")

@@ -6,13 +6,13 @@ Handles campaign creation, state transitions, email queuing,
 and metrics computation. Supports both AI-generated and template-based emails.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate
+from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate, OutreachOrder, PaymentOrder
 from core.logger import get_logger
 from core.metrics import CAMPAIGNS_RUNNING, EMAILS_SENT_TOTAL
 from services.email_campaign.email_generator_service import assign_style
@@ -213,7 +213,27 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
         # First time the campaign actually launches — record started_at
         # (kept across pause/resume cycles so we always know the original launch).
         if campaign.started_at is None:
-            campaign.started_at = datetime.utcnow()
+            now = datetime.utcnow()
+            campaign.started_at = now
+            # Set expiry for duration-limited plans (e.g. email_50 = 8 days)
+            try:
+                outreach_order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+                if outreach_order:
+                    payment_order = (
+                        db.query(PaymentOrder)
+                        .filter_by(outreach_order_id=outreach_order.id, status="paid")
+                        .order_by(PaymentOrder.created_at.desc())
+                        .first()
+                    )
+                    if payment_order and payment_order.plan_id:
+                        from core.pricing import get_plan as _get_plan
+                        plan = _get_plan(payment_order.plan_id)
+                        if plan.duration_days > 0:
+                            campaign.expires_at = now + timedelta(days=plan.duration_days)
+                            logger.info("[CAMPAIGN] Campaign #%d expires_at set to %s (%d-day plan)",
+                                        campaign_id, campaign.expires_at, plan.duration_days)
+            except Exception as e:
+                logger.warning("[CAMPAIGN] Could not set expires_at for campaign #%d: %s", campaign_id, e)
             db.commit()
     elif old_status == "running":
         CAMPAIGNS_RUNNING.dec()

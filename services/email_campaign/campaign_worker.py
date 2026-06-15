@@ -717,9 +717,21 @@ def _process_followups(db) -> tuple:
 # ── Campaign Completion ──────────────────────────────────────────────────────
 
 def _check_campaign_completion(db):
-    """Mark campaigns as completed if no pending_enrichment or queued emails remain."""
+    """Mark campaigns as completed if no pending_enrichment or queued emails remain,
+    or if the campaign has exceeded its duration limit (expires_at)."""
     running_campaigns = db.query(Campaign).filter_by(status="running").all()
+    now = datetime.utcnow()
     for campaign in running_campaigns:
+        # Auto-complete campaigns that have exceeded their duration limit
+        if campaign.expires_at and now >= campaign.expires_at:
+            campaign.status = "completed"
+            if campaign.completed_at is None:
+                campaign.completed_at = now
+            db.commit()
+            logger.info("[SENDER] Campaign %d auto-completed: duration limit reached (expires_at=%s)",
+                        campaign.id, campaign.expires_at)
+            continue
+
         # Flush any pending changes and expire cached attributes to get fresh counts
         db.flush()
         db.expire_all()
