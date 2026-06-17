@@ -161,10 +161,14 @@ async def api_create_campaign(
         credits = db.query(UserCredit).filter_by(user_id=current_user.id).with_for_update().first()
         available = (credits.total_credits - credits.used_credits) if credits else 0
         requested = request.lead_limit or 200  # default campaign size
-        if available < 200:
+        # Minimum credits to start a campaign — set to the smallest plan (50) so
+        # 50-credit plan users can launch. Campaign size is still capped at the
+        # user's available balance below.
+        MIN_CAMPAIGN_CREDITS = 50
+        if available < MIN_CAMPAIGN_CREDITS:
             raise HTTPException(
                 status_code=402,
-                detail=f"Insufficient credits. You need at least 200 credits to start a campaign but only have {available} available.",
+                detail=f"Insufficient credits. You need at least {MIN_CAMPAIGN_CREDITS} credits to start a campaign but only have {available} available.",
             )
         # Cap at available credits — prevents error when setup was done at a higher tier than paid
         required = min(requested, available)
