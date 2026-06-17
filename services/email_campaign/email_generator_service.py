@@ -12,9 +12,10 @@ import random
 import re
 from typing import Tuple, Dict
 
+from core.config import settings
+from core.logger import get_logger
 from database.models import Lead, Candidate
 from services.shared.ai.azure_openai_client import generate_json, ContentFilterError
-from core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -786,7 +787,10 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         logger.info("[EmailGen] Generating for %s (%s) at %s, style=%s",
                     lead.name, lead.title, lead.company, style)
 
-        result = generate_json(prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT)
+        result = generate_json(
+            prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
+            deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
+        )
         body = result.get("body", "").strip()
 
         # Subject: always "quick question {first name}" — ignore LLM output
@@ -953,7 +957,10 @@ Bad examples (do NOT write like this):
 "perhaps there's an opportunity to connect"
 "hopefully our paths align someday" """
 
-    result = generate_json(prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT)
+    result = generate_json(
+        prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
+        deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
+    )
     body = (result.get("body") or "").strip()
     body = clean_tone(body)
 
