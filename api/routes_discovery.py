@@ -5,6 +5,7 @@ import logging
 import time
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -757,6 +758,107 @@ async def scoring_ready(
         "scored": scored,
         "with_bullets": with_bullets,
     }
+
+
+class ImportFromOutreachRequest(BaseModel):
+    candidate_id: int                    # target (LinkedIn) candidate to import INTO
+    source_candidate_id: Optional[int] = None  # specific source; else newest other candidate with leads
+
+
+@router.get("/outreach-sources/{candidate_id}")
+async def outreach_sources(
+    candidate_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List this user's OTHER candidates that have discovered leads, so the
+    LinkedIn flow can offer 'Export from Outreach'."""
+    target = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    rows = (
+        db.query(Candidate.id, Candidate.created_at, func.count(Lead.id).label("lead_count"))
+        .join(Lead, Lead.candidate_id == Candidate.id)
+        .filter(Candidate.user_id == current_user.id, Candidate.id != candidate_id)
+        .group_by(Candidate.id, Candidate.created_at)
+        .order_by(Candidate.created_at.desc())
+        .all()
+    )
+    return {
+        "sources": [
+            {"candidate_id": r.id, "lead_count": r.lead_count,
+             "created_at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows if r.lead_count > 0
+        ]
+    }
+
+
+@router.post("/import-from-outreach")
+async def import_from_outreach(
+    body: ImportFromOutreachRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Copy already-discovered leads (and their scores) from one of the user's
+    outreach candidates into the target LinkedIn candidate. Dedupes by apollo_id /
+    linkedin_url. Lets users reuse Outreach leads in the LinkedIn flow without
+    re-running discovery."""
+    target = db.query(Candidate).filter_by(id=body.candidate_id, user_id=current_user.id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target candidate not found")
+
+    # Pick the source candidate: explicit, else newest OTHER candidate with leads.
+    src_q = (
+        db.query(Candidate.id)
+        .join(Lead, Lead.candidate_id == Candidate.id)
+        .filter(Candidate.user_id == current_user.id, Candidate.id != body.candidate_id)
+    )
+    if body.source_candidate_id:
+        src_q = src_q.filter(Candidate.id == body.source_candidate_id)
+    src_q = src_q.group_by(Candidate.id, Candidate.created_at).order_by(Candidate.created_at.desc())
+    src_row = src_q.first()
+    if not src_row:
+        raise HTTPException(status_code=404, detail="No outreach leads found to import.")
+    source_id = src_row.id
+
+    # Existing dedupe keys on the target
+    existing = db.query(Lead.apollo_id, Lead.linkedin_url).filter_by(candidate_id=body.candidate_id).all()
+    seen_apollo = {a for a, _ in existing if a}
+    seen_li = {u for _, u in existing if u}
+
+    src_leads = db.query(Lead).filter_by(candidate_id=source_id).all()
+    imported = 0
+    for sl in src_leads:
+        if sl.apollo_id and sl.apollo_id in seen_apollo:
+            continue
+        if sl.linkedin_url and sl.linkedin_url in seen_li:
+            continue
+        new_lead = Lead(
+            candidate_id=body.candidate_id,
+            apollo_id=sl.apollo_id, name=sl.name, title=sl.title, company=sl.company,
+            industry=sl.industry, location=sl.location, linkedin_url=sl.linkedin_url,
+            email=sl.email, company_size=sl.company_size, email_verified=sl.email_verified,
+            company_description=sl.company_description, company_domain=sl.company_domain,
+            status=sl.status or "new",
+        )
+        db.add(new_lead)
+        db.flush()  # get new_lead.id
+        # copy the best score row if present
+        src_score = db.query(LeadScore).filter_by(lead_id=sl.id).first()
+        if src_score:
+            db.add(LeadScore(
+                lead_id=new_lead.id,
+                overall_score=src_score.overall_score, title_relevance=src_score.title_relevance,
+                department_relevance=src_score.department_relevance, industry_relevance=src_score.industry_relevance,
+                seniority_relevance=src_score.seniority_relevance, location_relevance=src_score.location_relevance,
+                explanation=src_score.explanation, justification_json=src_score.justification_json,
+            ))
+        if sl.apollo_id: seen_apollo.add(sl.apollo_id)
+        if sl.linkedin_url: seen_li.add(sl.linkedin_url)
+        imported += 1
+    db.commit()
+    return {"imported": imported, "source_candidate_id": source_id, "total_now":
+            db.query(Lead).filter_by(candidate_id=body.candidate_id).count()}
 
 
 # NOTE: GET /candidate/{id}/leads endpoint moved to routes_candidate.py
