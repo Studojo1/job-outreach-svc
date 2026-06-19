@@ -15,6 +15,7 @@ Cache rules:
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -28,6 +29,18 @@ from .apollo_company_resolver import resolve_canonical_domain
 from .web_scraper import scrape_many
 
 logger = logging.getLogger(__name__)
+
+
+def _apollo_company_search_enabled() -> bool:
+    """Apollo /mixed_companies/search domain disambiguation (Phase 0).
+
+    OFF by default: despite older "free" notes, this call burns Apollo credits
+    on the current plan and was the source of the logo/company-intel credit
+    drain. With it off, company logos + LLM research use the domain already on
+    the lead (from the free people search) or a name-only lookup — no Apollo
+    credits. Set APOLLO_COMPANY_SEARCH_ENABLED=true to re-enable.
+    """
+    return os.getenv("APOLLO_COMPANY_SEARCH_ENABLED", "false").strip().lower() in ("1", "true", "yes")
 
 CACHE_TTL = timedelta(days=90)
 
@@ -203,8 +216,10 @@ def bulk_enrich_top_companies(
     # wrong because the people endpoint doesn't actually return a domain) gets
     # overridden by the canonical primary_domain from the search hit.
     # Only run when we'd otherwise do fresh research — cache-only callers
-    # skip this to stay fast.
-    if enable_llm_research:
+    # skip this to stay fast. Gated OFF by default: this Apollo call burns
+    # credits (it powered the logo/company-intel domain lookup). When disabled
+    # we keep whatever domain the free people search gave us, or go name-only.
+    if enable_llm_research and _apollo_company_search_enabled():
         resolved_count = 0
         for c in deduped:
             if not c.get("name"):

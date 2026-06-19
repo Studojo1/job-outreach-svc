@@ -1,0 +1,166 @@
+---
+# Campaign email-failure alerter.
+#
+# Every 5 hours: find campaigns with >= FAIL_THRESHOLD (6) emails in status
+# 'failed'. To avoid nagging about historical failures, it tracks the
+# last-alerted failed count per campaign in a small state table and only emails
+# when a campaign's failed count has GROWN since the previous run (i.e. emails
+# are *actively* failing right now). On the very first run it seeds state
+# silently (no email). Sends via Azure Communication Services to the founders.
+#
+# Self-contained: runs the public python:3.11-slim image, talks to Postgres and
+# ACS directly using existing app-secrets. No dependency on the job-outreach-svc
+# image or its release pipeline.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: campaign-failure-alert-script
+  namespace: studojo
+data:
+  alert.py: |
+    import os, sys
+    import psycopg2
+    from azure.communication.email import EmailClient
+
+    DB = os.environ["DATABASE_URL"].replace("+psycopg2", "").replace("+asyncpg", "")
+    ACS = os.environ["ACS_CONNECTION_STRING"]
+    SENDER = os.environ.get("ALERT_SENDER", "pranav@support.studojo.com")
+    RECIPIENTS = [e.strip() for e in os.environ.get(
+        "ALERT_RECIPIENTS", "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+    ).split(",") if e.strip()]
+    THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "6"))
+
+    conn = psycopg2.connect(DB)
+    conn.autocommit = True
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_failure_alerts (
+            campaign_id integer PRIMARY KEY,
+            last_alerted_count integer NOT NULL DEFAULT 0,
+            last_alerted_at timestamptz
+        )
+    """)
+
+    # campaigns with >= THRESHOLD failed emails
+    cur.execute("""
+        SELECT c.id, COALESCE(NULLIF(c.name, ''), '(unnamed)'), c.status, COUNT(*)::int AS failed
+        FROM emails_sent e
+        JOIN campaigns c ON c.id = e.campaign_id
+        WHERE e.status = 'failed'
+        GROUP BY c.id, c.name, c.status
+        HAVING COUNT(*) >= %s
+        ORDER BY failed DESC
+    """, (THRESHOLD,))
+    rows = cur.fetchall()
+
+    # First run? Seed state silently so we never blast about historical failures.
+    cur.execute("SELECT 1 FROM campaign_failure_alerts WHERE campaign_id = 0")
+    initialized = cur.fetchone() is not None
+    if not initialized:
+        for cid, name, status, failed in rows:
+            cur.execute("""
+                INSERT INTO campaign_failure_alerts (campaign_id, last_alerted_count, last_alerted_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (campaign_id) DO UPDATE SET last_alerted_count = EXCLUDED.last_alerted_count
+            """, (cid, failed))
+        cur.execute("INSERT INTO campaign_failure_alerts (campaign_id, last_alerted_count) VALUES (0, 0)")
+        print(f"Seeded state for {len(rows)} campaigns (first run, no email).")
+        sys.exit(0)
+
+    # Alert only on campaigns whose failed count GREW since last run.
+    to_alert = []
+    for cid, name, status, failed in rows:
+        cur.execute("SELECT last_alerted_count FROM campaign_failure_alerts WHERE campaign_id = %s", (cid,))
+        r = cur.fetchone()
+        prev = r[0] if r else 0
+        if failed > prev:
+            to_alert.append((cid, name, status, failed, failed - prev))
+
+    if not to_alert:
+        print("No campaigns with new failures. Nothing to send.")
+        sys.exit(0)
+
+    text = "Campaigns with 6+ failed emails (new failures since last check):\n\n" + "\n".join(
+        f"- {name} (id {cid}, {status}): {failed} failed total (+{delta} new)"
+        for cid, name, status, failed, delta in to_alert
+    ) + "\n\nReview: https://admin.studojo.com/campaign-health"
+    html = (
+        "<h3>Campaigns with failing emails</h3><ul>"
+        + "".join(
+            f"<li><b>{name}</b> (id {cid}, {status}): <b>{failed}</b> failed total (+{delta} new)</li>"
+            for cid, name, status, failed, delta in to_alert
+        )
+        + "</ul><p>Review on <a href='https://admin.studojo.com/campaign-health'>Campaign Health</a>.</p>"
+    )
+
+    client = EmailClient.from_connection_string(ACS)
+    message = {
+        "senderAddress": SENDER,
+        "recipients": {"to": [{"address": a} for a in RECIPIENTS]},
+        "content": {
+            "subject": f"⚠ {len(to_alert)} campaign(s) with failing emails",
+            "plainText": text,
+            "html": html,
+        },
+    }
+    poller = client.begin_send(message)
+    poller.result()
+    print(f"Alert sent for {len(to_alert)} campaign(s) to {RECIPIENTS}.")
+
+    for cid, name, status, failed, delta in to_alert:
+        cur.execute("""
+            INSERT INTO campaign_failure_alerts (campaign_id, last_alerted_count, last_alerted_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (campaign_id) DO UPDATE SET last_alerted_count = EXCLUDED.last_alerted_count, last_alerted_at = now()
+        """, (cid, failed))
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: campaign-failure-alerter
+  namespace: studojo
+spec:
+  schedule: "0 */5 * * *"   # every 5 hours
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: alerter
+              image: python:3.11-slim
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  pip install --quiet --no-cache-dir azure-communication-email psycopg2-binary && \
+                  python /script/alert.py
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: database-url
+                - name: ACS_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: acs-email-connection-string   # ACS resource with support.studojo.com linked
+                - name: ALERT_SENDER
+                  value: "pranav@support.studojo.com"
+                - name: ALERT_RECIPIENTS
+                  value: "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+                - name: FAIL_THRESHOLD
+                  value: "6"
+              volumeMounts:
+                - name: script
+                  mountPath: /script
+          volumes:
+            - name: script
+              configMap:
+                name: campaign-failure-alert-script
