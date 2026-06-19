@@ -20,6 +20,30 @@ logger = get_logger(__name__)
 APOLLO_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 
 
+def _record_apollo_reveal() -> None:
+    """Increment today's (IST) Apollo reveal counter — 1 credit per reveal.
+
+    Best-effort and self-contained: opens its own short-lived session and never
+    raises, so a counter hiccup can never break enrichment. The emailer-service
+    reads apollo_usage_daily and pages ops if a day's reveals cross the threshold.
+    """
+    try:
+        from database.session import SessionLocal
+        from sqlalchemy import text
+        db = SessionLocal()
+        try:
+            db.execute(text(
+                "INSERT INTO apollo_usage_daily (day, reveals) "
+                "VALUES ((now() AT TIME ZONE 'Asia/Kolkata')::date, 1) "
+                "ON CONFLICT (day) DO UPDATE SET reveals = apollo_usage_daily.reveals + 1"
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001 — counter is non-essential
+        logger.warning("[ENRICHMENT] apollo reveal counter failed: %s", e)
+
+
 # Classified result from a single enrichment attempt. Lets the JIT worker
 # distinguish "Apollo cannot find this person" (permanent for this lead) from
 # "Apollo credits exhausted / rate-limited / API down" (retry when recovered).
@@ -210,6 +234,7 @@ def enrich_single_lead_classified(lead: Lead) -> EnrichmentResult:
     full_name = f"{first} {last}".strip()
     if full_name:
         result_dict["name"] = full_name
+    _record_apollo_reveal()  # 1 successful reveal = 1 Apollo credit burned
     return EnrichmentResult(success=True, data=result_dict)
 
 
