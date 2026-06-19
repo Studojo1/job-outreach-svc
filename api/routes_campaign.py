@@ -88,6 +88,55 @@ class CampaignTransitionRequest(BaseModel):
     target_status: str
 
 
+def _resolve_effective_candidate(db: Session, user_id: str, candidate_id: int) -> int:
+    """Resolve the candidate a campaign op should actually use.
+
+    Re-onboarding (and the Rs.499 launch flow) can leave a user pointed at a
+    freshly-created candidate that never finished the quiz (no career_analysis),
+    which dead-ended launch with "complete the career quiz" even though the user
+    HAD completed it on another record. If the requested candidate is incomplete
+    but the user has a more-recent complete candidate that has leads, switch to
+    it and rebind the active order so the whole flow follows. Falls back to the
+    requested id when there's no better candidate (preserves original behaviour).
+    """
+    from database.models import Candidate, Lead
+
+    def _complete(c) -> bool:
+        return bool(c and c.parsed_json and c.parsed_json.get("career_analysis"))
+
+    requested = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
+    if _complete(requested):
+        return candidate_id
+
+    candidates = (
+        db.query(Candidate)
+        .filter(Candidate.user_id == user_id)
+        .order_by(Candidate.created_at.desc())
+        .all()
+    )
+    for c in candidates:
+        if c.id == candidate_id or not _complete(c):
+            continue
+        if db.query(Lead).filter(Lead.candidate_id == c.id).count() == 0:
+            continue
+        logger.warning(
+            "[CAMPAIGN] candidate %s is incomplete for user %s; auto-rebinding to "
+            "complete candidate %s (with leads)", candidate_id, user_id, c.id,
+        )
+        try:
+            from services.stage_tracking import get_or_create_active_order
+            order = get_or_create_active_order(db, str(user_id))
+            if order and order.candidate_id != c.id:
+                order.candidate_id = c.id
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("[CAMPAIGN] failed to rebind active order to candidate %s", c.id)
+        return c.id
+
+    return candidate_id
+
+
 @router.get("/templates")
 async def get_templates(current_user: User = Depends(get_current_user)):
     """Return pre-built email templates."""
@@ -103,6 +152,9 @@ async def validate_campaign_readiness(
 ):
     """Pre-launch validation: check leads, Gmail, and profile are ready."""
     from database.models import Candidate, Lead, EmailAccount
+
+    # Auto-rebind to a complete candidate if the bound one never finished the quiz.
+    candidate_id = _resolve_effective_candidate(db, current_user.id, candidate_id)
 
     # Check candidate profile exists
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
@@ -152,6 +204,11 @@ async def api_create_campaign(
     Otherwise, uses legacy template substitution.
     """
     try:
+        # Auto-rebind to a complete candidate if the bound one never finished the
+        # quiz (re-onboarding / Rs.499 dup-candidate case). Keeps the whole create
+        # flow on the candidate that actually has a profile + leads.
+        request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
+
         # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
         # where two simultaneous requests both read the same balance and both pass.
         # This allows multiple campaigns (e.g. 3x200 with 600 credits) but blocks double-clicks.
@@ -298,6 +355,7 @@ async def preview_email(
         generate_email_for_lead,
     )
 
+    request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
     candidate = db.query(Candidate).filter_by(id=request.candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -508,6 +566,7 @@ async def test_launch_preview(
     from database.models import Candidate, Lead
     from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
 
+    request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
     candidate = db.query(Candidate).filter_by(
         id=request.candidate_id, user_id=current_user.id
     ).first()
@@ -643,6 +702,7 @@ async def test_launch_campaign(
     from database.models import Candidate, Lead, EmailAccount
 
     # Validate inputs before spawning background job
+    request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
     candidate = db.query(Candidate).filter_by(
         id=request.candidate_id, user_id=current_user.id
     ).first()
