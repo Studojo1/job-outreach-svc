@@ -137,6 +137,26 @@ def _resolve_effective_candidate(db: Session, user_id: str, candidate_id: int) -
     return candidate_id
 
 
+def _test_leads(db: Session, candidate_id: int, limit: int = 5):
+    """Leads to use for the deliverability test.
+
+    Prefer leads with a verified email, but fall back to ANY leads when none are
+    verified yet. The deliverability test sends to the user's OWN inbox (the lead
+    is only used to generate sample content), so a verified lead email isn't
+    required. Without this fallback, fresh setups whose JIT enrichment hadn't run
+    dead-ended with 'No leads with verified emails found'.
+    """
+    from database.models import Lead
+    q = db.query(Lead).filter(Lead.candidate_id == candidate_id)
+    verified = (
+        q.filter(Lead.email.isnot(None), Lead.email_verified == True)
+        .limit(limit).all()
+    )
+    if verified:
+        return verified
+    return q.limit(limit).all()
+
+
 @router.get("/templates")
 async def get_templates(current_user: User = Depends(get_current_user)):
     """Return pre-built email templates."""
@@ -573,13 +593,9 @@ async def test_launch_preview(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    leads = (
-        db.query(Lead)
-        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
-        .limit(5).all()
-    )
+    leads = _test_leads(db, request.candidate_id, 5)
     if not leads:
-        raise HTTPException(status_code=400, detail="No leads with verified emails found")
+        raise HTTPException(status_code=400, detail="No leads found yet. Run lead discovery first.")
 
     emails = []
     for idx, lead in enumerate(leads):
@@ -625,22 +641,20 @@ def _run_test_launch_in_background(
             job["error"] = "Candidate or email account not found"
             return
 
-        leads_db = (
-            db.query(Lead)
-            .filter(Lead.candidate_id == candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
-            .limit(5).all()
-        )
+        leads_db = _test_leads(db, candidate_id, 5)
         if not leads_db:
             job["status"] = "failed"
-            job["error"] = "No leads with verified emails found"
+            job["error"] = "No leads found yet. Run lead discovery first."
             return
 
         access_token = _refresh_token_sync(account, db)
 
-        # Populate the leads list with real data (the POST handler pre-populated placeholders)
+        # Test emails go to the user's own inbox. Use the override if set, else the
+        # lead's email, else fall back to the connected account so the test always
+        # delivers somewhere valid (raw, un-enriched leads have no email).
         job["leads"] = []
         for idx, lead in enumerate(leads_db):
-            to_email = override_map.get(idx, lead.email)
+            to_email = override_map.get(idx) or lead.email or account.email_address
             job["leads"].append({
                 "lead_name": lead.name or "Unknown",
                 "company": lead.company or "",
@@ -652,7 +666,7 @@ def _run_test_launch_in_background(
         job["total"] = len(leads_db)
 
         for idx, lead in enumerate(leads_db):
-            to_email = override_map.get(idx, lead.email)
+            to_email = override_map.get(idx) or lead.email or account.email_address
             job["progress"] = f"Sending {idx + 1}/{len(leads_db)}"
             job["leads"][idx]["status"] = "sending"
 
@@ -713,13 +727,9 @@ async def test_launch_campaign(
     if not account or not account.access_token:
         raise HTTPException(status_code=400, detail="Gmail account not connected or token missing")
 
-    leads_count = (
-        db.query(Lead)
-        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
-        .count()
-    )
-    if leads_count == 0:
-        raise HTTPException(status_code=400, detail="No leads with verified emails found")
+    leads_preview = _test_leads(db, request.candidate_id, 5)
+    if not leads_preview:
+        raise HTTPException(status_code=400, detail="No leads found yet. Run lead discovery first.")
 
     # Build override map
     override_map = {}
@@ -727,16 +737,9 @@ async def test_launch_campaign(
         for ov in request.overrides:
             override_map[ov.lead_index] = ov.override_email
 
-    # Pre-load leads so the dashboard can show them immediately
-    leads_preview = (
-        db.query(Lead)
-        .filter(Lead.candidate_id == request.candidate_id, Lead.email.isnot(None), Lead.email_verified == True)
-        .limit(5).all()
-    )
-
     initial_leads = []
     for idx, lead in enumerate(leads_preview):
-        to_email = override_map.get(idx, lead.email)
+        to_email = override_map.get(idx) or lead.email or account.email_address
         initial_leads.append({
             "lead_name": lead.name or "Unknown",
             "company": lead.company or "",
