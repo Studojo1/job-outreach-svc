@@ -589,7 +589,7 @@ def _build_generation_prompt(
         "Use it as the basis for one concrete sentence about their work and impact."
         + (
             " SENDER MOTIVATION explains why they are specifically targeting this type of role — "
-            "weave it naturally into the closing or the ask, so the email feels intentional not opportunistic."
+            "weave it naturally into the closing or the ask so the email feels intentional, not opportunistic."
             if why_now else ""
         )
         if has_flex else
