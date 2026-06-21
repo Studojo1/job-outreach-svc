@@ -276,6 +276,8 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     else:
         signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
+    why_now = flex.get("why_now", "").strip()
+
     return {
         "candidate_name": name,
         "education": education,
@@ -287,6 +289,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         "short_candidate_signal": signal,
         "has_flex_notes": bool(flex.get("best_project")),
         "candidate_city": candidate_city,
+        "why_now": why_now,
     }
 
 
@@ -584,6 +587,11 @@ def _build_generation_prompt(
         "SENDER SIGNAL describes something the sender BUILT or DID — it is NOT their job title. "
         "Frame it as 'I built...' or 'I worked on...' — never as identity ('I am a...'). "
         "Use it as the basis for one concrete sentence about their work and impact."
+        + (
+            " SENDER MOTIVATION explains why they are specifically targeting this type of role — "
+            "weave it naturally into the closing or the ask, so the email feels intentional not opportunistic."
+            if why_now else ""
+        )
         if has_flex else
         "Reference a specific skill or project from SENDER SIGNAL — not generic phrases like 'background in X'."
     )
@@ -643,6 +651,8 @@ def _build_generation_prompt(
 
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
+    why_now = candidate_profile.get("why_now") or ""
+    why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
 
     # ── Round-2 facts: include the structured per-company facts when we have
     # them. These come from the company_fact_extractor LLM and contain the
@@ -670,7 +680,7 @@ SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
 SENDER FIELD: {candidate_profile['primary_field']}
 SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{city_line}
+SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{city_line}{why_now_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
