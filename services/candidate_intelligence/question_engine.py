@@ -817,10 +817,7 @@ def build_question_sequence(state: dict) -> list[dict]:
     if clarity in ("medium", "high"):
         sequence.append(_build_niche_question(resume_profile))
 
-    # Flex (email-fuel) questions — always asked, role-adaptive copy
-    flex_key = _flex_copy_key(answers, resume_profile)
-    sequence.append(_build_flex_project_question(flex_key, resume_profile))
-    sequence.append(_build_flex_outcome_question(flex_key))
+    # Flex project + outcome moved to post-Gmail debrief form (/outreach/connect/debrief)
 
     return sequence
 
