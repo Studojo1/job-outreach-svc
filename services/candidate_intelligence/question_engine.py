@@ -13,6 +13,10 @@ Always-on questions:
   Q8  target_role          MCQ   options from resume_profile.likely_roles if available
   Q9  work_mode            MCQ   always (drives organization_job_locations decision)
 
+Clarity-gated extras (asked based on the user's own clarity answer):
+  Q10 niche_keywords       MCQ multi   asked unless clarity == "still figuring out"
+  Q11 tech_stack           MCQ multi   asked when clarity == "exact" AND cluster is technical
+
 State passed to get_next_question():
   {
     "answers": {"career_stage": "...", "job_type": "...", ...},  # keyed by q_key
@@ -346,6 +350,12 @@ def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profil
         if "open to all" in al:
             return "Open to all, we'll match on fit first and setup second."
         return "Got it."
+
+    if prev_q_key == "niche_keywords":
+        return "Those spaces have a lot of action right now. Good picks."
+
+    if prev_q_key == "tech_stack":
+        return "Stack noted, we'll weight companies that use those tools."
 
     return "Got it."
 
@@ -790,6 +800,12 @@ def build_question_sequence(state: dict) -> list[dict]:
     sequence.append(_build_dream_companies_question(answers, resume_profile))
     sequence.append(_build_target_role_question(resume_profile, parsed_json))
     sequence.append(_Q8_WORK_MODE)
+
+    clarity = _clarity_level(answers)
+
+    # Niche keywords — asked for medium + high (skipped only on "still figuring out")
+    if clarity in ("medium", "high"):
+        sequence.append(_build_niche_question(resume_profile))
 
     return sequence
 
