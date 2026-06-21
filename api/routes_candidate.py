@@ -599,18 +599,16 @@ async def get_candidate_leads(
 class FlexNotesRequest(BaseModel):
     best_project: str
     outcome: str
-    why_now: str = ""
 
 
 @router.put("/{candidate_id}/flex")
-@router.patch("/{candidate_id}/flex-notes")
 async def save_flex_notes(
     candidate_id: int,
     request: FlexNotesRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Save post-Gmail debrief flex notes used to personalise email copy."""
+    """Save post-payment flex notes (best project + outcome) used to personalise email copy."""
     candidate = db.query(Candidate).filter(
         Candidate.id == candidate_id,
         Candidate.user_id == current_user.id,
@@ -621,7 +619,6 @@ async def save_flex_notes(
     candidate.flex_notes = {
         "best_project": request.best_project.strip(),
         "outcome": request.outcome.strip(),
-        "why_now": request.why_now.strip(),
     }
     db.commit()
     return {"ok": True}
