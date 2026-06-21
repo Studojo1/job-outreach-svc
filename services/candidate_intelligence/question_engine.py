@@ -17,10 +17,6 @@ Clarity-gated extras (asked based on the user's own clarity answer):
   Q10 niche_keywords       MCQ multi   asked unless clarity == "still figuring out"
   Q11 tech_stack           MCQ multi   asked when clarity == "exact" AND cluster is technical
 
-Email-personalization questions (always asked at the end of the quiz, role-adaptive):
-  Q12 flex_best_project    TEXT  always  → persisted to candidate.flex_notes
-  Q13 flex_outcome         TEXT  always  → persisted to candidate.flex_notes
-
 State passed to get_next_question():
   {
     "answers": {"career_stage": "...", "job_type": "...", ...},  # keyed by q_key
@@ -360,12 +356,6 @@ def build_contextual_ack(prev_q_key: str, prev_answer: str | None, resume_profil
 
     if prev_q_key == "tech_stack":
         return "Stack noted, we'll weight companies that use those tools."
-
-    if prev_q_key == "flex_best_project":
-        return "That's a strong signal, exactly the kind of thing that lands well in outreach."
-
-    if prev_q_key == "flex_outcome":
-        return "Numbers make the story concrete. Good."
 
     return "Got it."
 
@@ -816,11 +806,6 @@ def build_question_sequence(state: dict) -> list[dict]:
     # Niche keywords — asked for medium + high (skipped only on "still figuring out")
     if clarity in ("medium", "high"):
         sequence.append(_build_niche_question(resume_profile))
-
-    # Flex (email-fuel) questions — always asked, role-adaptive copy
-    flex_key = _flex_copy_key(answers, resume_profile)
-    sequence.append(_build_flex_project_question(flex_key, resume_profile))
-    sequence.append(_build_flex_outcome_question(flex_key))
 
     return sequence
 
