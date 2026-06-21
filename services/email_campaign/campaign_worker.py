@@ -356,6 +356,29 @@ def _generate_pending(db) -> int:
         user = db.query(User).filter_by(id=candidate.user_id).first()
         user_name = user.name if user else ""
 
+        # Template mode: send the campaign's exact copy with only the blanks filled
+        # ({name}, {company}, {title}). Never invoke the AI generator — this guarantees
+        # the author's wording is preserved verbatim for every lead.
+        if (campaign.generation_mode or "").lower() == "template" and (campaign.body_template or "").strip():
+            def _fill(text):
+                return (
+                    (text or "")
+                    .replace("{name}", lead.name or "")
+                    .replace("{company}", lead.company or "")
+                    .replace("{title}", lead.title or "")
+                )
+
+            email.subject = _fill(campaign.subject_template)
+            email.body = _fill(campaign.body_template)
+            email.status = "queued"  # Ready for Phase 3 (send)
+            db.commit()
+            generated_count += 1
+            logger.info(
+                "[JIT-GENERATE] Rendered TEMPLATE email %d for lead %d (%s) - AI skipped",
+                email.id, lead.id, lead.name,
+            )
+            continue
+
         style = email.assigned_style or "warm_intro"
 
         try:
