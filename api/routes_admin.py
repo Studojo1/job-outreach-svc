@@ -1148,7 +1148,7 @@ async def paid_funnel(
                     "bounced": bounced,
                     "failed": failed,
                     "queued": queued,
-                    "reply_rate": round(replied / leads_contacted * 100, 1) if leads_contacted > 0 else 0,
+                    "reply_rate": round((replied + fups.get("replied", 0)) / leads_contacted * 100, 1) if leads_contacted > 0 else 0,
                     "followups_sent": fups.get("sent", 0) + fups.get("replied", 0),
                     "followups_replied": fups.get("replied", 0),
                     "last_email_sent": last_sent.isoformat() if last_sent else None,
