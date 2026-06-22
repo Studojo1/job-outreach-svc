@@ -574,10 +574,10 @@ def _build_generation_prompt(
 
     Each style gets its own structural skeleton — not just a tone change.
     """
-    greeting = random.choice(GREETINGS).replace("{name}", lead_profile["lead_name"].split()[0])
+    greeting = random.choice(GREETINGS).replace("{name}", ((lead_profile["lead_name"] or "").split() or ["there"])[0])
     closing = random.choice(CLOSINGS)
     signoff = random.choice(SIGNOFFS).replace(
-        "{name}", candidate_profile["candidate_name"].split()[0] if candidate_profile["candidate_name"] else "Me"
+        "{name}", ((candidate_profile["candidate_name"] or "").split() or ["Me"])[0]
     )
 
     has_flex = candidate_profile.get("has_flex_notes", False)
@@ -615,7 +615,7 @@ def _build_generation_prompt(
         why_this_person=lead_profile["why_this_person"],
         company=lead_profile["company_name"],
         lead_role=lead_profile["lead_role"],
-        lead_name=lead_profile["lead_name"].split()[0],
+        lead_name=((lead_profile["lead_name"] or "").split() or ["there"])[0],
         job_interest=candidate_profile["job_interest"],
     )
 

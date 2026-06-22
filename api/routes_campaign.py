@@ -570,10 +570,46 @@ class TestLaunchRequest(BaseModel):
     selected_styles: list[str] = ["value_prop"]
 
 
-# ── In-memory store for async test-launch jobs ────────────────────────────────
+# ── Postgres-backed store for async test-launch jobs ──────────────────────────
+# Persisted (not in-memory) so the replica running the background thread and the
+# replica serving the status poll agree. The service runs multiple replicas, and
+# an in-memory dict made GET /test-launch/{id}/status 404 ~half the time.
 import uuid
 import threading
-_test_launch_jobs: dict = {}  # job_id -> {status, results, ...}
+import json as _json
+from sqlalchemy import text as _sql_text
+
+
+def _save_test_launch_job(db, job_id: str, job: dict) -> None:
+    db.execute(
+        _sql_text(
+            "INSERT INTO test_launch_jobs (job_id, data, updated_at) "
+            "VALUES (:jid, CAST(:data AS jsonb), now()) "
+            "ON CONFLICT (job_id) DO UPDATE SET data = CAST(:data AS jsonb), updated_at = now()"
+        ),
+        {"jid": job_id, "data": _json.dumps(job)},
+    )
+    db.commit()
+
+
+def _load_test_launch_job(db, job_id: str):
+    row = db.execute(
+        _sql_text("SELECT data FROM test_launch_jobs WHERE job_id = :jid"),
+        {"jid": job_id},
+    ).fetchone()
+    if not row:
+        return None
+    data = row[0]
+    return data if isinstance(data, dict) else _json.loads(data)
+
+
+def _cleanup_old_test_launch_jobs(db) -> None:
+    """Best-effort purge of finished jobs so the table doesn't grow unbounded."""
+    try:
+        db.execute(_sql_text("DELETE FROM test_launch_jobs WHERE updated_at < now() - interval '2 days'"))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 @router.post("/test-launch/preview")
@@ -631,7 +667,14 @@ def _run_test_launch_in_background(
     from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 
     db = SessionLocal()
-    job = _test_launch_jobs[job_id]
+    job = _load_test_launch_job(db, job_id) or {
+        "status": "processing", "progress": "Starting...", "leads": [],
+        "total": 0, "emails_sent": 0, "emails_failed": 0, "error": "",
+    }
+
+    def _persist():
+        _save_test_launch_job(db, job_id, job)
+
     try:
         candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
         account = db.query(EmailAccount).filter_by(id=email_account_id).first()
@@ -639,12 +682,14 @@ def _run_test_launch_in_background(
         if not candidate or not account or not account.access_token:
             job["status"] = "failed"
             job["error"] = "Candidate or email account not found"
+            _persist()
             return
 
         leads_db = _test_leads(db, candidate_id, 5)
         if not leads_db:
             job["status"] = "failed"
             job["error"] = "No leads found yet. Run lead discovery first."
+            _persist()
             return
 
         access_token = _refresh_token_sync(account, db)
@@ -664,11 +709,13 @@ def _run_test_launch_in_background(
                 "schedule_offset": idx * 20,
             })
         job["total"] = len(leads_db)
+        _persist()
 
         for idx, lead in enumerate(leads_db):
             to_email = override_map.get(idx) or lead.email or account.email_address
             job["progress"] = f"Sending {idx + 1}/{len(leads_db)}"
             job["leads"][idx]["status"] = "sending"
+            _persist()
 
             try:
                 style = assign_style(lead, selected_styles)
@@ -686,17 +733,23 @@ def _run_test_launch_in_background(
                 logger.error("[TEST_LAUNCH] Failed email %d to %s: %s", idx + 1, to_email, e, exc_info=True)
                 job["leads"][idx].update({"status": "failed", "error": str(e)})
                 job["emails_failed"] += 1
+            _persist()
 
             if idx < len(leads_db) - 1:
                 time.sleep(20)
 
         job["status"] = "completed"
+        _persist()
         logger.info("[TEST_LAUNCH] Job %s completed: %d sent, %d failed", job_id, job["emails_sent"], job["emails_failed"])
 
     except Exception as e:
         logger.error("[TEST_LAUNCH] Job %s crashed: %s", job_id, e, exc_info=True)
         job["status"] = "failed"
         job["error"] = str(e)
+        try:
+            _persist()
+        except Exception:
+            pass
     finally:
         db.close()
 
@@ -753,7 +806,8 @@ async def test_launch_campaign(
     import math
     from datetime import datetime as _dt
     job_id = str(uuid.uuid4())[:8]
-    _test_launch_jobs[job_id] = {
+    _cleanup_old_test_launch_jobs(db)
+    _save_test_launch_job(db, job_id, {
         "status": "processing",
         "progress": "Starting...",
         "started_at": _dt.utcnow().isoformat(),
@@ -762,7 +816,7 @@ async def test_launch_campaign(
         "emails_sent": 0,
         "emails_failed": 0,
         "error": "",
-    }
+    })
 
     thread = threading.Thread(
         target=_run_test_launch_in_background,
@@ -789,9 +843,9 @@ async def test_launch_campaign(
 
 
 @router.get("/test-launch/{job_id}/status")
-async def test_launch_status(job_id: str):
+async def test_launch_status(job_id: str, db: Session = Depends(get_db)):
     """Poll for test-launch job results with per-lead status."""
-    job = _test_launch_jobs.get(job_id)
+    job = _load_test_launch_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
