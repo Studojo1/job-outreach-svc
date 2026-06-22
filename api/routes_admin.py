@@ -153,12 +153,9 @@ async def outreach_overview(
         .scalar()
     ) or 0
 
-    # Email stats
+    # Email stats — raw counts kept for the Email Trend chart (volume metric)
     email_stats = (
-        db.query(
-            EmailSent.status,
-            func.count(),
-        )
+        db.query(EmailSent.status, func.count())
         .group_by(EmailSent.status)
         .all()
     )
@@ -166,7 +163,51 @@ async def outreach_overview(
     total_sent = email_map.get("sent", 0) + email_map.get("replied", 0)
     total_replied = email_map.get("replied", 0)
     total_bounced = email_map.get("bounced", 0)
-    reply_rate_pct = round((total_replied / total_sent * 100), 1) if total_sent > 0 else 0.0
+
+    # Correct reply rate: unique leads replied / unique leads contacted (initial only,
+    # paid non-internal campaigns, excl bounced from denominator)
+    _STATS_EXCL = {
+        "businessconnect.pranav@gmail.com",
+        "pranav.hegde126@gmail.com",
+        "pranavshastry4@gmail.com",
+        "studojo@gmail.com",
+        "benjenstark.578239@gmail.com",
+        "pranavs.hegde@bbafeh.christuniversity.in",
+    }
+    leads_contacted_total = (
+        db.query(func.count(func.distinct(EmailSent.lead_id)))
+        .select_from(EmailSent)
+        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
+        .join(User, User.id == OutreachOrder.user_id)
+        .join(PaymentOrder, PaymentOrder.user_id == User.id)
+        .filter(
+            EmailSent.followup_number == 0,
+            EmailSent.status.in_(["sent", "replied"]),
+            ~EmailSent.is_test,
+            EmailSent.lead_id.isnot(None),
+            PaymentOrder.status == "paid",
+            PaymentOrder.amount_cents > 0,
+            User.email.notin_(_STATS_EXCL),
+        )
+        .scalar()
+    ) or 0
+    leads_replied_total = (
+        db.query(func.count(func.distinct(EmailSent.lead_id)))
+        .select_from(EmailSent)
+        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
+        .join(User, User.id == OutreachOrder.user_id)
+        .join(PaymentOrder, PaymentOrder.user_id == User.id)
+        .filter(
+            EmailSent.reply_received_at.isnot(None),
+            ~EmailSent.is_test,
+            EmailSent.lead_id.isnot(None),
+            PaymentOrder.status == "paid",
+            PaymentOrder.amount_cents > 0,
+            User.email.notin_(_STATS_EXCL),
+        )
+        .scalar()
+    ) or 0
+    reply_rate_pct = round((leads_replied_total / leads_contacted_total * 100), 1) if leads_contacted_total > 0 else 0.0
 
     # Monthly metrics (last 12 months)
     twelve_months_ago = now - timedelta(days=365)
@@ -276,6 +317,58 @@ async def outreach_overview(
             })
         prev_count = users_reached
 
+    # Period reply rates — cohort by month of first contact.
+    # Buckets each unique lead by when they first received an initial email,
+    # then checks whether they ever replied (any email in the thread).
+    _first_contact_sq = (
+        db.query(
+            EmailSent.lead_id.label("lead_id"),
+            func.to_char(func.min(EmailSent.sent_at), "YYYY-MM").label("cohort_month"),
+        )
+        .select_from(EmailSent)
+        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
+        .join(User, User.id == OutreachOrder.user_id)
+        .join(PaymentOrder, PaymentOrder.user_id == User.id)
+        .filter(
+            EmailSent.followup_number == 0,
+            EmailSent.status.in_(["sent", "replied"]),
+            ~EmailSent.is_test,
+            EmailSent.lead_id.isnot(None),
+            EmailSent.sent_at.isnot(None),
+            PaymentOrder.status == "paid",
+            PaymentOrder.amount_cents > 0,
+            User.email.notin_(_STATS_EXCL),
+        )
+        .group_by(EmailSent.lead_id)
+        .subquery()
+    )
+    _any_reply_sq = (
+        db.query(EmailSent.lead_id.label("lead_id"))
+        .filter(EmailSent.reply_received_at.isnot(None), EmailSent.lead_id.isnot(None))
+        .distinct()
+        .subquery()
+    )
+    _period_rows = (
+        db.query(
+            _first_contact_sq.c.cohort_month,
+            func.count(_first_contact_sq.c.lead_id).label("leads_contacted"),
+            func.count(_any_reply_sq.c.lead_id).label("leads_replied"),
+        )
+        .outerjoin(_any_reply_sq, _any_reply_sq.c.lead_id == _first_contact_sq.c.lead_id)
+        .group_by(_first_contact_sq.c.cohort_month)
+        .order_by(_first_contact_sq.c.cohort_month)
+        .all()
+    )
+    period_reply_rates = [
+        {
+            "month": row.cohort_month,
+            "leads_contacted": row.leads_contacted,
+            "leads_replied": row.leads_replied,
+            "reply_rate": round(row.leads_replied / row.leads_contacted * 100, 1) if row.leads_contacted > 0 else 0.0,
+        }
+        for row in _period_rows
+    ]
+
     return {
         "total_orders": total_orders,
         "paid_orders": paid_orders,
@@ -287,6 +380,9 @@ async def outreach_overview(
         "total_emails_replied": total_replied,
         "total_emails_bounced": total_bounced,
         "reply_rate_pct": reply_rate_pct,
+        "leads_contacted": leads_contacted_total,
+        "leads_replied": leads_replied_total,
+        "period_reply_rates": period_reply_rates,
         "orders_by_status": orders_by_status,
         "monthly_metrics": monthly_metrics,
         "funnel": funnel,
