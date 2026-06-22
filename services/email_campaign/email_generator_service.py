@@ -582,6 +582,7 @@ def _build_generation_prompt(
 
     has_flex = candidate_profile.get("has_flex_notes", False)
     has_company_desc = lead_profile.get("has_company_description", False)
+    why_now = candidate_profile.get("why_now") or ""
 
     signal_instruction = (
         "SENDER SIGNAL describes something the sender BUILT or DID — it is NOT their job title. "
@@ -651,7 +652,6 @@ def _build_generation_prompt(
 
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
-    why_now = candidate_profile.get("why_now") or ""
     why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
 
     # ── Round-2 facts: include the structured per-company facts when we have
