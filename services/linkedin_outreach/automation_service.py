@@ -119,8 +119,8 @@ def _build_cookie_header(li_at: str, jsessionid: str, cookies_blob: str | None =
                 return "; ".join(parts)
         except Exception:
             pass
-    # Fallback — partial set
-    return f"li_at={li_at}; JSESSIONID={jsessionid}"
+    # Fallback — partial set. JSESSIONID must be quoted (contains a colon).
+    return f'li_at={li_at}; JSESSIONID="{(jsessionid or "").strip(chr(34))}"'
 
 
 def _headers(li_at: str, jsessionid: str, cookies_blob: str | None = None) -> dict:
@@ -734,9 +734,12 @@ def _search_linkedin_leads_sync(
         f"&queryId=voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0"
     )
 
+    # JSESSIONID must be quoted in the cookie (contains a colon); csrf-token is the
+    # unquoted value. Without this LinkedIn returns 403 "CSRF check failed".
+    js = (jsessionid or "").strip('"')
     headers = {
-        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
-        "csrf-token": jsessionid,
+        "Cookie": f'li_at={li_at}; JSESSIONID="{js}"',
+        "csrf-token": js,
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
         "Accept": "application/json",
