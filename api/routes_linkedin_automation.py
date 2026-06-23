@@ -949,28 +949,44 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
     from database.session import SessionLocal
     from services.linkedin_outreach.web_discovery import discover_leads_via_search
 
+    # 1. Read campaign params with a short-lived session. We must NOT hold a DB
+    # connection open across the web discovery below — it takes 1-2 min and
+    # Postgres closes the idle connection, breaking the later write.
     db = SessionLocal()
     try:
         c = db.query(LinkedInCampaign).filter(LinkedInCampaign.id == campaign_id).first()
         if not c:
             return
+        target_role = c.target_role
+        target_locations = c.target_locations or []
+        target_industries = c.target_industries or []
+        target_keywords = c.target_keywords
+    finally:
+        db.close()
 
-        logger.info(
-            "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
-            campaign_id, c.target_role, c.target_locations, c.target_industries, c.target_keywords,
-        )
+    logger.info(
+        "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
+        campaign_id, target_role, target_locations, target_industries, target_keywords,
+    )
 
-        # Login-free discovery via public web search (DDG x-ray). No LinkedIn
-        # session and no Apollo credits — leads come before the user connects.
-        people = await discover_leads_via_search(
-            target_role=c.target_role,
-            locations=c.target_locations or [],
-            industries=c.target_industries or [],
-            keywords=c.target_keywords,
-            limit=30,
-        )
+    # 2. Login-free discovery via public web search (DDG x-ray). No LinkedIn
+    # session, no Apollo credits, and no DB connection held while it runs.
+    people = await discover_leads_via_search(
+        target_role=target_role,
+        locations=target_locations,
+        industries=target_industries,
+        keywords=target_keywords,
+        limit=30,
+    )
 
-        logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
+    logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
+
+    # 3. Write results with a FRESH session.
+    db = SessionLocal()
+    try:
+        c = db.query(LinkedInCampaign).filter(LinkedInCampaign.id == campaign_id).first()
+        if not c:
+            return
 
         if not people:
             logger.warning("No leads found for campaign %d — web search returned nothing", campaign_id)
