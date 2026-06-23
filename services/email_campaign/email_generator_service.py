@@ -132,11 +132,21 @@ _EMAIL_SYSTEM_PROMPT = (
     "- Use simple, casual language. Write like a real person typing quickly, not a template.\n"
     "- Subject line: lowercase, casual, under 40 chars. Like a text message subject.\n"
     "- Use \\n\\n between paragraphs. 2-3 short paragraphs max.\n"
-    "- SENDER SIGNAL is something the sender BUILT or ACHIEVED — never interpret it as their job title.\n"
+    "- TRUTH ONLY: Use ONLY the facts given in the profile. NEVER invent, embellish, or add "
+    "specifics. Do not make up projects, tools, employers, results, metrics, numbers, percentages, "
+    "or timeframes. If a detail is not explicitly provided, do not state it.\n"
+    "- SENDER SIGNAL, if provided, is something the sender genuinely BUILT or ACHIEVED — never "
+    "interpret it as their job title. If NO concrete project/achievement is provided, do NOT invent "
+    "one: write a short, honest note based only on the sender's real field, listed skills, and what "
+    "they're looking for. It is fine for the email to be simple and modest.\n"
+    "- Write the sender's name EXACTLY as given. Do not shorten, expand, abbreviate, or alter it.\n"
     "- SENDER CITY is optional context. ONLY weave it in if it feels natural (e.g. lead's company is in "
     "same city). Never force it. If unsure, omit it entirely.\n\n"
     "ABSOLUTELY FORBIDDEN:\n"
     "- Em dashes (-- or —)\n"
+    "- Inventing any project, tool, result, employer, experience, or skill not in the profile\n"
+    '- Any specific number, percentage, metric, or timeframe not explicitly provided (e.g. "cut time by 40%")\n'
+    '- Claiming the sender "built", "created", "shipped", or "launched" anything unless it is explicitly in the signal\n'
     '- "I hope this email finds you well"\n'
     '- "I am passionate about" / "excited to apply" / "I believe my skills align"\n'
     "- Corporate phrasing, flattery, praising the company\n"
@@ -202,8 +212,22 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     prefs = parsed.get("preferences", {})
 
     _DEGREE_WORDS = {"bachelor", "master", "phd", "doctorate", "mba", "bsc", "msc", "b.tech", "m.tech", "b.e", "m.e", "associate"}
+    # Resume parsers often grab a header/title instead of the name (e.g. "AIML STUDENT").
+    # Reject those so we fall back to the authenticated account name.
+    _NON_NAME_WORDS = {"student", "resume", "cv", "curriculum", "vitae", "fresher", "aiml", "profile", "objective"}
     def _is_valid_name(n: str) -> bool:
-        return bool(n) and not any(w in n.lower() for w in _DEGREE_WORDS)
+        if not n:
+            return False
+        low = n.lower()
+        if any(w in low for w in _DEGREE_WORDS):
+            return False
+        words = low.split()
+        if any(w in _NON_NAME_WORDS for w in words):
+            return False
+        # All-caps multi-word strings are almost always resume section headers, not names.
+        if n.isupper() and len(words) >= 2:
+            return False
+        return True
 
     raw_name = personal.get("name") or parsed.get("name") or ""
     name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
