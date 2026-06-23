@@ -16,7 +16,6 @@ from database.models import (
     User,
 )
 from database.session import get_db
-from services.linkedin_outreach.automation_service import search_linkedin_leads
 from services.linkedin_outreach.crypto import decrypt, decrypt_second, encrypt_pair
 from services.linkedin_outreach.login import linkedin_check_phone_tap, linkedin_login_start, linkedin_verify_pin
 from services.linkedin_outreach.message_gen import generate_connection_message
@@ -919,12 +918,13 @@ async def search_leads(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Search LinkedIn for leads matching the campaign ICP and save them."""
-    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    """Search LinkedIn for leads matching the campaign ICP and save them.
 
-    token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
-    if not token_row:
-        raise HTTPException(status_code=400, detail="LinkedIn not connected. Connect first.")
+    Lead discovery uses public web search (DDG x-ray) and needs NO LinkedIn
+    session — leads appear before the user connects. A connected account is
+    only required later, at send-time, to fire connection requests.
+    """
+    c = _get_campaign_or_404(campaign_id, current_user.id, db)
 
     # Clear existing pending leads and reset search_failed status before a new search
     db.query(LinkedInConnectionRequest).filter(
@@ -947,26 +947,22 @@ async def search_leads(
 
 async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
     from database.session import SessionLocal
-    from services.linkedin_outreach.crypto import decrypt, decrypt_second
+    from services.linkedin_outreach.web_discovery import discover_leads_via_search
 
     db = SessionLocal()
     try:
         c = db.query(LinkedInCampaign).filter(LinkedInCampaign.id == campaign_id).first()
-        token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
-        if not c or not token_row:
+        if not c:
             return
-
-        li_at = decrypt(token_row.li_at_enc, token_row.nonce)
-        jsessionid = decrypt_second(token_row.jsessionid_enc, token_row.nonce)
 
         logger.info(
             "Starting lead search for campaign %d: role=%r locations=%r industries=%r keywords=%r",
             campaign_id, c.target_role, c.target_locations, c.target_industries, c.target_keywords,
         )
 
-        people = await search_linkedin_leads(
-            li_at=li_at,
-            jsessionid=jsessionid,
+        # Login-free discovery via public web search (DDG x-ray). No LinkedIn
+        # session and no Apollo credits — leads come before the user connects.
+        people = await discover_leads_via_search(
             target_role=c.target_role,
             locations=c.target_locations or [],
             industries=c.target_industries or [],
@@ -977,7 +973,7 @@ async def _run_lead_search(campaign_id: int, user_id: str, user_name: str):
         logger.info("Lead search for campaign %d returned %d people", campaign_id, len(people))
 
         if not people:
-            logger.warning("No leads found for campaign %d — check search params and Apollo key", campaign_id)
+            logger.warning("No leads found for campaign %d — web search returned nothing", campaign_id)
             c.status = "search_failed"
             c.updated_at = datetime.utcnow()
             db.commit()
