@@ -404,6 +404,16 @@ async def _send_via_playwright(
             logger.info("Playwright send succeeded for %s", profile_url)
             return True, ""
         err = result.get("error", "unknown")
+        # Surface structured outcomes the daemon must handle differently from a
+        # generic send error: a LinkedIn invite-limit (stop the whole tick) vs an
+        # email-gated invite (skip just this lead). Encode as an error prefix so
+        # the existing (ok, error) tuple signature is unchanged.
+        if result.get("limit_reached"):
+            logger.warning("Playwright send hit invite limit for %s: %s", profile_url, err)
+            return False, f"LIMIT_REACHED: {err}"
+        if result.get("needs_email"):
+            logger.info("Playwright send needs recipient email for %s", profile_url)
+            return False, f"NEEDS_EMAIL: {err}"
         logger.warning("Playwright send failed for %s: %s", profile_url, err)
         return False, f"Playwright: {err}"
     except LinkedInAuthError:
@@ -1386,6 +1396,24 @@ class LinkedInAutomationDaemon:
                 except Exception as send_err:
                     logger.warning("Campaign %d: send error for %s: %s", campaign.id, req.profile_url, send_err)
                     ok, send_error = False, str(send_err)
+
+                # LinkedIn invite-limit modal: stop the WHOLE tick (don't error the
+                # lead, leave it pending) — sending more today is pointless and just
+                # burns browser launches. It self-heals when the limit window resets.
+                if not ok and send_error and send_error.startswith("LIMIT_REACHED"):
+                    logger.warning(
+                        "Campaign %d: LinkedIn invite limit reached (%s) — stopping this tick, lead stays pending",
+                        campaign.id, send_error,
+                    )
+                    return
+                # Email-gated invite: LinkedIn won't let us connect without the
+                # recipient's email. Skip just this lead (don't retry forever).
+                if not ok and send_error and send_error.startswith("NEEDS_EMAIL"):
+                    req.status = "skipped_no_email"
+                    req.error = "LinkedIn requires the recipient's email to connect"
+                    req.updated_at = datetime.utcnow()
+                    db.commit()
+                    continue
 
                 if ok:
                     req.status = "sent"
