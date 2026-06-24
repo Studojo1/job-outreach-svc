@@ -301,6 +301,10 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
     why_now = flex.get("why_now", "").strip()
+    # Optional credibility marker the user wants in every email (e.g. school /
+    # recent-grad status). Only set when flex_notes.credential exists, so this is
+    # opt-in per candidate and does not change behaviour for everyone else.
+    credential = flex.get("credential", "").strip()
 
     return {
         "candidate_name": name,
@@ -314,6 +318,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         "has_flex_notes": bool(flex.get("best_project")),
         "candidate_city": candidate_city,
         "why_now": why_now,
+        "credential": credential,
     }
 
 
@@ -677,6 +682,15 @@ def _build_generation_prompt(
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
     why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
+    credential = candidate_profile.get("credential") or ""
+    credential_line = (
+        f"\nSENDER CREDENTIAL (MANDATORY, must appear in this email): {credential}. "
+        f"The email is INVALID if it does not state that the sender is {credential}. "
+        "Put it in the sender's first 'about me' sentence, blended with the signal "
+        f"(e.g. \"I recently finished my Master's at HEC Paris and ...\" style for '{credential}'). "
+        "Never omit it. Do not start a sentence with 'As a'."
+        if credential else ""
+    )
 
     # ── Round-2 facts: include the structured per-company facts when we have
     # them. These come from the company_fact_extractor LLM and contain the
@@ -704,7 +718,7 @@ SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
 SENDER FIELD: {candidate_profile['primary_field']}
 SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{city_line}{why_now_line}
+SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{credential_line}{city_line}{why_now_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
@@ -821,18 +835,26 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         logger.info("[EmailGen] Generating for %s (%s) at %s, style=%s",
                     lead.name, lead.title, lead.company, style)
 
-        result = generate_json(
-            prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
-            deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
-        )
-        body = result.get("body", "").strip()
+        cred = candidate_profile.get("credential") or ""
+        # Acronym tokens (e.g. 'HEC') let us verify the credential actually landed
+        # in the body; if the model dropped it, regenerate once. No credential or
+        # no acronym -> single pass, unchanged behaviour.
+        cred_required = [w.strip("(),.'") for w in cred.split() if w.isupper() and len(w.strip("(),.'")) >= 3]
+
+        body = ""
+        for attempt in range(2):
+            result = generate_json(
+                prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
+                deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
+            )
+            body = clean_tone(result.get("body", "").strip())  # Stage 5: tone cleaner
+            if not cred_required or any(t.lower() in body.lower() for t in cred_required):
+                break
+            logger.info("[EmailGen] credential %s missing for %s, regenerating", cred_required, lead.name)
 
         # Subject: always "quick question {first name}" — ignore LLM output
         first_name = (lead.name or "").split()[0] if lead.name else ""
         subject = f"quick question {first_name}".strip()
-
-        # Stage 5: Tone cleaner
-        body = clean_tone(body)
 
         # Stage 6: Validation
         if not subject or len(subject) < 5:

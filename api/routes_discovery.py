@@ -765,6 +765,135 @@ class ImportFromOutreachRequest(BaseModel):
     source_candidate_id: Optional[int] = None  # specific source; else newest other candidate with leads
 
 
+class LinkedInDiscoverRequest(BaseModel):
+    candidate_id: int
+    target_role: Optional[str] = None        # override; else derived from candidate profile
+    locations: Optional[List[str]] = None    # override; else derived from candidate profile
+    limit: int = 30
+
+
+def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
+    """Best-effort target role + locations from a candidate, mirroring the
+    logic used by create_campaign_from_order."""
+    parsed = candidate.parsed_json or {}
+    prefs = parsed.get("preferences", {}) if isinstance(parsed, dict) else {}
+    career = parsed.get("career_analysis", {}) if isinstance(parsed, dict) else {}
+    profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+
+    role = ""
+    target_roles = candidate.target_roles if isinstance(candidate.target_roles, list) else []
+    if target_roles:
+        first = target_roles[0]
+        role = first if isinstance(first, str) else (first.get("role") or first.get("title") or "")
+    if not role:
+        rec = career.get("recommended_roles") or []
+        if rec and isinstance(rec[0], dict):
+            role = rec[0].get("title") or ""
+    if not role:
+        likely = profile.get("likely_roles") if isinstance(profile.get("likely_roles"), list) else []
+        if likely:
+            role = str(likely[0])
+    role = (role or "Marketing Manager").strip()
+
+    locations: list[str] = []
+    for loc in (prefs.get("locations") or []):
+        if isinstance(loc, str) and loc.strip() and loc.strip() not in locations:
+            locations.append(loc.strip())
+    geo = profile.get("geography") if isinstance(profile.get("geography"), dict) else {}
+    for key in ("city", "country"):
+        v = (geo.get(key) or "").strip()
+        if v and v not in locations:
+            locations.append(v)
+    if not locations:
+        locations = ["India"]
+    return role, locations
+
+
+async def _run_linkedin_discover(candidate_id: int, user_id: str,
+                                 role_override: Optional[str], loc_override: Optional[list]):
+    """Background worker: DDG x-ray discovery → Lead rows with linkedin_url.
+    Takes 1-2 min, so it never holds a DB connection across the web work —
+    read params with a short session, discover with none held, write fresh."""
+    from services.linkedin_outreach.web_discovery import discover_leads_via_search
+
+    db = SessionLocal()
+    try:
+        candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
+        if not candidate:
+            return
+        role, locations = _derive_role_and_locations(candidate)
+    finally:
+        db.close()
+    if role_override:
+        role = role_override.strip()
+    if loc_override:
+        locations = [l for l in loc_override if l and l.strip()] or locations
+
+    people = await discover_leads_via_search(target_role=role, locations=locations, limit=30)
+
+    db = SessionLocal()
+    try:
+        existing = {
+            u for (u,) in db.query(Lead.linkedin_url).filter_by(candidate_id=candidate_id).all() if u
+        }
+        created = 0
+        for p in people:
+            url = (p.get("profile_url") or "").strip()
+            if not url or url in existing:
+                continue
+            db.add(Lead(
+                candidate_id=candidate_id,
+                name=p.get("name") or "",
+                title=p.get("headline") or role,
+                company=p.get("company"),
+                linkedin_url=url,
+                status="new",
+            ))
+            existing.add(url)
+            created += 1
+        db.commit()
+        logger.info(
+            "[LinkedInDiscover] candidate=%s role=%r locations=%r created=%d",
+            candidate_id, role, locations, created,
+        )
+    finally:
+        db.close()
+
+
+@router.post("/linkedin-discover")
+async def linkedin_discover(
+    body: LinkedInDiscoverRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Find real LinkedIn profiles (name + profile URL) for a candidate via
+    public web search (DDG x-ray through the residential proxy). No Apollo
+    credits, no LinkedIn login, no extension. Runs in the background (1-2 min);
+    the frontend polls GET /candidate/{id}/leads for the new rows.
+    """
+    candidate = db.query(Candidate).filter_by(
+        id=body.candidate_id, user_id=current_user.id
+    ).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    role, locations = _derive_role_and_locations(candidate)
+    if body.target_role:
+        role = body.target_role.strip()
+    if body.locations:
+        locations = [l for l in body.locations if l and l.strip()] or locations
+
+    background_tasks.add_task(
+        _run_linkedin_discover,
+        candidate_id=body.candidate_id,
+        user_id=str(current_user.id),
+        role_override=body.target_role,
+        loc_override=body.locations,
+    )
+    return {"status": "started", "role": role, "locations": locations}
+
+
 @router.get("/outreach-sources/{candidate_id}")
 async def outreach_sources(
     candidate_id: int,

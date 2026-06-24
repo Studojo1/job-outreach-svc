@@ -33,9 +33,14 @@ _LI_TRACK = (
 
 
 def _build_headers(li_at: str, jsessionid: str) -> dict:
+    # LinkedIn requires the JSESSIONID cookie value to be wrapped in double quotes
+    # (it contains a colon, e.g. ajax:123). The csrf-token header must equal the
+    # UNQUOTED value. The auto-refreshed jsessionid comes back unquoted, so without
+    # this the Voyager API returns 403 "CSRF check failed". Normalize both.
+    js = (jsessionid or "").strip('"')
     return {
-        "Cookie": f"li_at={li_at}; JSESSIONID={jsessionid}",
-        "csrf-token": jsessionid,
+        "Cookie": f'li_at={li_at}; JSESSIONID="{js}"',
+        "csrf-token": js,
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
         "x-li-track": _LI_TRACK,
