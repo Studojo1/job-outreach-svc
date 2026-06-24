@@ -9,6 +9,7 @@ from the DOM (LinkedIn no longer server-renders them).
 """
 
 import asyncio
+import json
 import logging
 import re
 
@@ -676,6 +677,15 @@ async def playwright_send_invitation(
                 # Wait for the invitation network request to complete
                 await page.wait_for_timeout(3000)
 
+                # Capture the refreshed cookie jar so the caller can roll the stored
+                # session forward (keeps lidc/bcookie/JSESSIONID/li_at current, so the
+                # session self-renews instead of drifting until a forced re-login).
+                refreshed_blob = None
+                try:
+                    refreshed_blob = json.dumps(await context.cookies())
+                except Exception:
+                    refreshed_blob = None
+
                 inv_status = invitation_result.get("status")
                 inv_body = invitation_result.get("body", "")[:200]
                 inv_url = invitation_result.get("url", "")
@@ -686,10 +696,10 @@ async def playwright_send_invitation(
                 )
 
                 if inv_status in (200, 201):
-                    return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
+                    return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None, "cookies_blob": refreshed_blob}
                 elif inv_status == 301:
                     # Already pending
-                    return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "already_pending": True}
+                    return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "already_pending": True, "cookies_blob": refreshed_blob}
                 elif inv_status is not None:
                     return {"ok": False, "error": f"Invitation API returned {inv_status}: {inv_body}", "profile_urn": existing_urn}
                 else:
@@ -718,7 +728,7 @@ async def playwright_send_invitation(
                     if dom_state.get("modalGone") or dom_state.get("hasPending"):
                         logger.info("Playwright: %s — invite confirmed via DOM (modal gone=%s pending=%s)",
                                     slug, dom_state.get("modalGone"), dom_state.get("hasPending"))
-                        return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None}
+                        return {"ok": True, "profile_urn": existing_urn, "auth_token": None, "error": None, "cookies_blob": refreshed_blob}
                     logger.warning("Playwright: %s — send clicked but no API call intercepted and no Pending button", slug)
                     return {"ok": False, "error": "Invitation sent click fired but could not confirm delivery", "profile_urn": existing_urn}
 
