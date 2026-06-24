@@ -301,6 +301,10 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
     why_now = flex.get("why_now", "").strip()
+    # Optional credibility marker the user wants in every email (e.g. school /
+    # recent-grad status). Only set when flex_notes.credential exists, so this is
+    # opt-in per candidate and does not change behaviour for everyone else.
+    credential = flex.get("credential", "").strip()
 
     return {
         "candidate_name": name,
@@ -314,6 +318,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         "has_flex_notes": bool(flex.get("best_project")),
         "candidate_city": candidate_city,
         "why_now": why_now,
+        "credential": credential,
     }
 
 
@@ -677,6 +682,13 @@ def _build_generation_prompt(
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
     why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
+    credential = candidate_profile.get("credential") or ""
+    credential_line = (
+        f"\nSENDER CREDENTIAL: {credential}. This is a true, important credibility marker — "
+        "weave it into EVERY email naturally (in the sender's intro line or the sign-off context). "
+        "Do not omit it and do not start a sentence with 'As a'."
+        if credential else ""
+    )
 
     # ── Round-2 facts: include the structured per-company facts when we have
     # them. These come from the company_fact_extractor LLM and contain the
@@ -704,7 +716,7 @@ SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
 SENDER FIELD: {candidate_profile['primary_field']}
 SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{city_line}{why_now_line}
+SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{credential_line}{city_line}{why_now_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
