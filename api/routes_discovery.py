@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -773,13 +774,30 @@ class LinkedInDiscoverRequest(BaseModel):
 
 
 def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
-    """Best-effort target role + locations from a candidate, mirroring the
-    logic used by create_campaign_from_order."""
+    """Target role + locations for lead discovery.
+
+    HIGHEST priority is what the user actually typed in the LinkedIn onboarding
+    form (stored in flex_notes by save_flex_notes). Only if that's absent do we
+    fall back to résumé-derived targeting — otherwise a user searching for
+    'Marketing Associate in Paris' wrongly gets their résumé's role/country."""
     parsed = candidate.parsed_json or {}
     prefs = parsed.get("preferences", {}) if isinstance(parsed, dict) else {}
     career = parsed.get("career_analysis", {}) if isinstance(parsed, dict) else {}
     profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+    flex = candidate.flex_notes if isinstance(candidate.flex_notes, dict) else {}
 
+    # 1. User-typed input wins outright.
+    role_input = (flex.get("target_role_user_input") or "").strip()
+    loc_input = (flex.get("location_user_input") or "").strip()
+    if role_input:
+        # Split a "Paris, France" style location into parts; "remote" → no geo filter.
+        if loc_input and loc_input.lower() not in ("remote", "anywhere"):
+            locs = [p.strip() for p in re.split(r"[,/]| or ", loc_input) if p.strip()]
+        else:
+            locs = []
+        return role_input, locs
+
+    # 2. Fall back to résumé-derived role.
     role = ""
     target_roles = candidate.target_roles if isinstance(candidate.target_roles, list) else []
     if target_roles:
@@ -796,6 +814,8 @@ def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
     role = (role or "Marketing Manager").strip()
 
     locations: list[str] = []
+    if loc_input and loc_input.lower() not in ("remote", "anywhere"):
+        locations = [p.strip() for p in re.split(r"[,/]| or ", loc_input) if p.strip()]
     for loc in (prefs.get("locations") or []):
         if isinstance(loc, str) and loc.strip() and loc.strip() not in locations:
             locations.append(loc.strip())
@@ -830,9 +850,22 @@ async def _run_linkedin_discover(candidate_id: int, user_id: str,
         locations = [l for l in loc_override if l and l.strip()] or locations
 
     people = await discover_leads_via_search(target_role=role, locations=locations, limit=30)
+    if not people:
+        return
 
     db = SessionLocal()
     try:
+        # Replace prior web-discovered leads so a re-search with new criteria
+        # (e.g. role/location changed) doesn't mix stale results in. Only the
+        # DDG-sourced rows are removed (apollo_id IS NULL, linkedin_url set) —
+        # imported Apollo leads (apollo_id present) are left untouched.
+        db.query(Lead).filter(
+            Lead.candidate_id == candidate_id,
+            Lead.apollo_id.is_(None),
+            Lead.linkedin_url.isnot(None),
+        ).delete(synchronize_session=False)
+        db.commit()
+
         existing = {
             u for (u,) in db.query(Lead.linkedin_url).filter_by(candidate_id=candidate_id).all() if u
         }

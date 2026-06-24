@@ -597,9 +597,16 @@ async def get_candidate_leads(
 
 
 class FlexNotesRequest(BaseModel):
-    best_project: str
-    outcome: str
+    best_project: str = ""
+    outcome: str = ""
     why_now: str = ""
+    # The LinkedIn onboarding form (linkedin.onboarding.profile) sends the
+    # user's typed target role + location. It wraps them in a nested
+    # `flex_notes` object, so accept that shape too. These drive lead discovery
+    # and must take priority over résumé-derived targeting.
+    target_role_user_input: Optional[str] = None
+    location_user_input: Optional[str] = None
+    flex_notes: Optional[Dict[str, Any]] = None
 
 
 @router.put("/{candidate_id}/flex")
@@ -610,7 +617,10 @@ async def save_flex_notes(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Save post-Gmail debrief flex notes used to personalise email copy."""
+    """Save flex notes. Two callers share this:
+      - the quiz/debrief sends best_project/outcome/why_now (email personalisation)
+      - the LinkedIn onboarding sends target_role_user_input/location_user_input
+    so we MERGE into flex_notes rather than clobber the other caller's fields."""
     candidate = db.query(Candidate).filter(
         Candidate.id == candidate_id,
         Candidate.user_id == current_user.id,
@@ -618,10 +628,30 @@ async def save_flex_notes(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    candidate.flex_notes = {
-        "best_project": request.best_project.strip(),
-        "outcome": request.outcome.strip(),
-        "why_now": request.why_now.strip(),
-    }
+    flex = dict(candidate.flex_notes or {})
+    # Debrief fields — only write when the debrief actually supplied content.
+    if request.best_project or request.outcome or request.why_now:
+        flex["best_project"] = request.best_project.strip()
+        flex["outcome"] = request.outcome.strip()
+        flex["why_now"] = request.why_now.strip()
+
+    # LinkedIn onboarding targeting — accept either flat fields or the nested
+    # `flex_notes` object the onboarding form actually sends.
+    nested = request.flex_notes if isinstance(request.flex_notes, dict) else {}
+    role_in = request.target_role_user_input
+    if role_in is None:
+        role_in = nested.get("target_role_user_input")
+    loc_in = request.location_user_input
+    if loc_in is None:
+        loc_in = nested.get("location_user_input")
+    if role_in is not None:
+        flex["target_role_user_input"] = (role_in or "").strip()
+    if loc_in is not None:
+        flex["location_user_input"] = (loc_in or "").strip()
+    for k in ("company_stage_user_input", "source"):
+        if k in nested:
+            flex[k] = nested[k]
+
+    candidate.flex_notes = flex
     db.commit()
     return {"ok": True}

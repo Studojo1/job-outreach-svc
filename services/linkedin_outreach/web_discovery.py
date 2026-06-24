@@ -75,7 +75,7 @@ _TITLE_HINTS = (
 )
 # Delay between DDG queries — the html endpoint returns 202 if hit too fast.
 _QUERY_DELAY_S = 2.5
-_MAX_202_RETRIES = 2
+_MAX_202_RETRIES = 4
 
 
 def _clean_title(raw: str) -> str:
@@ -177,7 +177,65 @@ _COUNTRY_CITIES = {
     "uae": ["Dubai", "Abu Dhabi", "Sharjah"],
     "united arab emirates": ["Dubai", "Abu Dhabi", "Sharjah"],
     "singapore": ["Singapore"],
+    "france": ["Paris", "Lyon", "Toulouse"],
+    "germany": ["Berlin", "Munich", "Hamburg"],
+    "canada": ["Toronto", "Vancouver", "Montreal"],
+    "australia": ["Sydney", "Melbourne"],
 }
+
+# Map a country (any common name/alias) to LinkedIn's country subdomain. The
+# subdomain is the strongest geo filter: fr.linkedin.com is France-only, so
+# "Paris" resolves to Paris, France instead of Paris, Texas.
+_COUNTRY_SUBDOMAIN = {
+    "india": "in", "united states": "www", "usa": "www", "us": "www",
+    "united kingdom": "uk", "uk": "uk", "england": "uk", "scotland": "uk",
+    "uae": "ae", "united arab emirates": "ae", "singapore": "sg",
+    "france": "fr", "germany": "de", "spain": "es", "italy": "it",
+    "netherlands": "nl", "canada": "ca", "australia": "au", "ireland": "ie",
+    "switzerland": "ch", "belgium": "be", "sweden": "se", "brazil": "br",
+}
+
+# Map a city to its country so a city-only input still picks the right subdomain.
+_CITY_COUNTRY = {
+    "paris": "france", "lyon": "france", "toulouse": "france", "marseille": "france",
+    "london": "uk", "manchester": "uk", "birmingham": "uk", "edinburgh": "uk",
+    "dubai": "uae", "abu dhabi": "uae", "sharjah": "uae",
+    "singapore": "singapore",
+    "berlin": "germany", "munich": "germany", "hamburg": "germany", "frankfurt": "germany",
+    "madrid": "spain", "barcelona": "spain", "milan": "italy", "rome": "italy",
+    "amsterdam": "netherlands", "toronto": "canada", "vancouver": "canada", "montreal": "canada",
+    "sydney": "australia", "melbourne": "australia", "dublin": "ireland", "zurich": "switzerland",
+    "bangalore": "india", "bengaluru": "india", "mumbai": "india", "delhi": "india",
+    "new delhi": "india", "gurgaon": "india", "gurugram": "india", "hyderabad": "india",
+    "pune": "india", "chennai": "india", "kolkata": "india", "noida": "india",
+    "new york": "usa", "san francisco": "usa", "los angeles": "usa", "chicago": "usa",
+    "austin": "usa", "boston": "usa", "seattle": "usa",
+}
+
+
+def _resolve_geo(location: str) -> tuple[str, str, str | None]:
+    """Resolve a free-text location to (subdomain, place_for_query, country_name).
+
+    place_for_query is what to quote in the x-ray query (the city if given, else
+    the country). country_name lets us add a second country-level query."""
+    l = (location or "").strip()
+    low = l.lower()
+    # Direct country match.
+    if low in _COUNTRY_SUBDOMAIN:
+        country = low
+        return _COUNTRY_SUBDOMAIN[low], l, country
+    # "City, Country" — try the trailing part as a country.
+    parts = [p.strip() for p in re.split(r"[,/]", l) if p.strip()]
+    for p in reversed(parts):
+        if p.lower() in _COUNTRY_SUBDOMAIN:
+            return _COUNTRY_SUBDOMAIN[p.lower()], parts[0], p.lower()
+    # City lookup.
+    city = parts[0] if parts else l
+    country = _CITY_COUNTRY.get(city.lower())
+    if country:
+        return _COUNTRY_SUBDOMAIN.get(country, "www"), city, country
+    # Unknown — search globally with the place as a keyword.
+    return "www", l, None
 
 
 def _expand_locations(locations: list[str]) -> list[str]:
@@ -196,21 +254,30 @@ def _expand_locations(locations: list[str]) -> list[str]:
 
 
 def _build_queries(target_role: str, locations: list[str], keywords: str | None) -> list[str]:
-    """Diverse x-ray queries. DDG lite has no page offset, so query variety
-    (role x each city x keyword) is how we reach volume."""
+    """Geo-targeted x-ray queries using the LinkedIn country subdomain so
+    results are actually in the requested country. DDG lite has no page offset,
+    so role x place variety is how we reach volume."""
     role = (target_role or "").strip() or "Marketing Manager"
     locs = _expand_locations([l for l in (locations or []) if l and l.strip()])
     kw = (keywords or "").strip()
 
     queries: list[str] = []
     for loc in locs:
-        base = f'site:linkedin.com/in "{role}"'
-        queries.append(f'{base} {loc}'.strip())
-        if loc:
-            queries.append(f'"{role}" "{loc}" site:linkedin.com/in')
+        if not loc:
+            queries.append(f'site:linkedin.com/in "{role}"')
+            continue
+        sub, place, country = _resolve_geo(loc)
+        base = f'site:{sub}.linkedin.com/in "{role}"'
+        queries.append(f'{base} "{place}"')
+        if country and country != place.lower():
+            queries.append(f'{base} "{country}"')
+        # Subdomain-only query: still geo-filtered to the country (e.g.
+        # fr.linkedin.com), adds volume and survives when the city/country
+        # term gets a transient DDG 202.
+        if sub != "www":
+            queries.append(base)
         if kw:
-            queries.append(f'{base} "{kw}" {loc}'.strip())
-    queries.append(f'site:linkedin.com/in "{role}"')  # broad fallback
+            queries.append(f'{base} "{kw}" "{place}"')
     # De-dupe while preserving order.
     seen, out = set(), []
     for q in queries:
