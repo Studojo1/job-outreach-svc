@@ -835,18 +835,26 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         logger.info("[EmailGen] Generating for %s (%s) at %s, style=%s",
                     lead.name, lead.title, lead.company, style)
 
-        result = generate_json(
-            prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
-            deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
-        )
-        body = result.get("body", "").strip()
+        cred = candidate_profile.get("credential") or ""
+        # Acronym tokens (e.g. 'HEC') let us verify the credential actually landed
+        # in the body; if the model dropped it, regenerate once. No credential or
+        # no acronym -> single pass, unchanged behaviour.
+        cred_required = [w.strip("(),.'") for w in cred.split() if w.isupper() and len(w.strip("(),.'")) >= 3]
+
+        body = ""
+        for attempt in range(2):
+            result = generate_json(
+                prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
+                deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
+            )
+            body = clean_tone(result.get("body", "").strip())  # Stage 5: tone cleaner
+            if not cred_required or any(t.lower() in body.lower() for t in cred_required):
+                break
+            logger.info("[EmailGen] credential %s missing for %s, regenerating", cred_required, lead.name)
 
         # Subject: always "quick question {first name}" — ignore LLM output
         first_name = (lead.name or "").split()[0] if lead.name else ""
         subject = f"quick question {first_name}".strip()
-
-        # Stage 5: Tone cleaner
-        body = clean_tone(body)
 
         # Stage 6: Validation
         if not subject or len(subject) < 5:
