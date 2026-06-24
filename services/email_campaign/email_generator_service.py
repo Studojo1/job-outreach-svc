@@ -684,9 +684,11 @@ def _build_generation_prompt(
     why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
     credential = candidate_profile.get("credential") or ""
     credential_line = (
-        f"\nSENDER CREDENTIAL: {credential}. This is a true, important credibility marker — "
-        "weave it into EVERY email naturally (in the sender's intro line or the sign-off context). "
-        "Do not omit it and do not start a sentence with 'As a'."
+        f"\nSENDER CREDENTIAL (MANDATORY, must appear in this email): {credential}. "
+        f"The email is INVALID if it does not state that the sender is {credential}. "
+        "Put it in the sender's first 'about me' sentence, blended with the signal "
+        f"(e.g. \"I recently finished my Master's at HEC Paris and ...\" style for '{credential}'). "
+        "Never omit it. Do not start a sentence with 'As a'."
         if credential else ""
     )
 
