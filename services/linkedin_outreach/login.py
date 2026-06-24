@@ -1,5 +1,6 @@
 """LinkedIn email+password login via Playwright browser (PIN / phone-tap challenge support)."""
 
+import json
 import logging
 import re
 import time
@@ -210,8 +211,9 @@ async def _linkedin_login_attempt(
                     jsessionid = cookie_dict.get("JSESSIONID", "").strip('"')
                     display_name = await _get_display_name_from_page(page)
                     logger.info("Phone tap approved inline for %s (name=%s)", email, display_name)
+                    blob = json.dumps(cookies)
                     await _cleanup()
-                    return li_at, jsessionid, display_name, None
+                    return li_at, jsessionid, display_name, None, blob
 
                 # Not approved in the inline window — park the live browser for
                 # the poll-based fallback (works if the poll hits this replica).
@@ -225,7 +227,7 @@ async def _linkedin_login_attempt(
                     "email": email,
                     "expires": time.time() + _CHALLENGE_TTL,
                 }
-                return None, None, None, key
+                return None, None, None, key, None
             else:
                 # PIN/captcha: store cookies for httpx submit, close browser
                 cookies = await ctx.cookies()
@@ -238,7 +240,7 @@ async def _linkedin_login_attempt(
                     "expires": time.time() + _CHALLENGE_TTL,
                 }
                 await _cleanup()
-                return None, None, None, key
+                return None, None, None, key, None
 
         # Success
         cookies = await ctx.cookies()
@@ -252,8 +254,12 @@ async def _linkedin_login_attempt(
 
         display_name = await _get_display_name_from_page(page)
         logger.info("LinkedIn login OK for %s (name=%s)", email, display_name)
+        # Capture the FULL cookie jar (lidc/bcookie/bscookie/JSESSIONID/li_at) so
+        # the stored session looks like a real browser and survives longer — the
+        # send flow injects this whole jar (cookies_blob) for anti-fraud.
+        blob = json.dumps(cookies)
         await _cleanup()
-        return li_at, jsessionid, display_name, None
+        return li_at, jsessionid, display_name, None, blob
 
     except ValueError:
         await _cleanup()
