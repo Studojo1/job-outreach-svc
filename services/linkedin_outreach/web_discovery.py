@@ -37,29 +37,57 @@ _HTTP_HEADERS = {
 _HTTP_TIMEOUT = 20.0
 
 
+def _proxy() -> str | None:
+    return (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+
+
+def _parse_li_anchors(html: str) -> list[dict]:
+    """Extract linkedin.com/in/ results ({title,url,snippet}) from a SERP."""
+    soup = BeautifulSoup(html, "lxml")
+    out, seen = [], set()
+    for a in soup.select("a"):
+        href = a.get("href") or ""
+        if "linkedin.com/in/" not in href:
+            continue
+        url = href.split("?")[0]
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"title": a.get_text(strip=True), "url": href, "snippet": ""})
+    return out
+
+
 async def _ddg_lite_search(query: str) -> list[dict]:
-    """POST to the DDG lite endpoint (via residential proxy) and return
-    [{title, url, snippet}] for linkedin.com/in/ results. Never raises."""
-    proxy = (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+    """POST to the DDG lite endpoint (via residential proxy). Never raises."""
     try:
         async with httpx.AsyncClient(
             headers=_HTTP_HEADERS, follow_redirects=True,
-            timeout=_HTTP_TIMEOUT, verify=False, proxy=proxy,
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
         ) as client:
             resp = await client.post(_DDG_LITE_URL, data={"q": query})
         if resp.status_code != 200:
             logger.warning("[WebDiscovery] DDG lite non-200 (%d) for %r", resp.status_code, query[:60])
             return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        out = []
-        for a in soup.select("a"):
-            href = a.get("href") or ""
-            if "linkedin.com/in/" not in href:
-                continue
-            out.append({"title": a.get_text(strip=True), "url": href, "snippet": ""})
-        return out
+        return _parse_li_anchors(resp.text)
     except Exception as exc:
         logger.warning("[WebDiscovery] DDG lite failed for %r: %s", query[:60], exc)
+        return []
+
+
+async def _brave_search(query: str) -> list[dict]:
+    """Brave Search HTML (via residential proxy). A second source so DDG
+    throttling (202s) doesn't bottleneck volume. Never raises."""
+    try:
+        async with httpx.AsyncClient(
+            headers=_HTTP_HEADERS, follow_redirects=True,
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
+        ) as client:
+            resp = await client.get("https://search.brave.com/search", params={"q": query, "source": "web"})
+        if resp.status_code != 200:
+            return []
+        return _parse_li_anchors(resp.text)
+    except Exception as exc:
+        logger.warning("[WebDiscovery] Brave failed for %r: %s", query[:60], exc)
         return []
 
 # Trailing LinkedIn page-title suffixes to strip before parsing the name/headline.
@@ -307,33 +335,54 @@ async def _expand_roles(role: str, want_variants: bool) -> list[str]:
         return [role]
 
 
+def _geo_for_queries(locations: list[str]) -> tuple[str, list[str]]:
+    """Resolve the user's location(s) to (subdomain, [cities to query]).
+
+    Crucially, a CITY input (e.g. 'paris') is fanned out across the whole
+    country's hub cities (Paris, Lyon, Marseille, …) — the country subdomain
+    keeps every query in-country, and the extra cities multiply volume so we can
+    reach a large target from a single 'role in city' search."""
+    locs = [l for l in (locations or []) if l and l.strip()]
+    if not locs:
+        return "www", [""]
+    sub, place, country = _resolve_geo(locs[0])
+    cities: list[str] = []
+    # User's explicitly named cities first.
+    for loc in locs:
+        _s, p, _c = _resolve_geo(loc)
+        if p and p not in cities:
+            cities.append(p)
+    # Then the country's hub cities for breadth.
+    if country and country in _COUNTRY_CITIES:
+        for c in _COUNTRY_CITIES[country]:
+            if c not in cities:
+                cities.append(c)
+    return sub, (cities or [place or ""])
+
+
 def _build_queries(role_variants: list[str], locations: list[str], keywords: str | None) -> list[str]:
     """Geo-targeted x-ray queries: each role variant x the country subdomain x
     its hub cities. The subdomain (e.g. fr.linkedin.com) is the geo filter, so
     results stay in-country. DDG lite has no page offset, so role x city variety
     is how we reach high volume."""
-    locs = _expand_locations([l for l in (locations or []) if l and l.strip()])
     kw = (keywords or "").strip()
     roles = role_variants or ["Marketing Manager"]
+    sub, cities = _geo_for_queries(locations)
+    site = f"{sub}.linkedin.com/in" if sub != "www" else "linkedin.com/in"
 
     queries: list[str] = []
     # Subdomain-only queries first (highest yield, most resilient to 202s).
     for role in roles:
-        sub, _place, _country = _resolve_geo(locs[0]) if locs and locs[0] else ("www", "", None)
-        if sub != "www":
-            queries.append(f'site:{sub}.linkedin.com/in "{role}"')
-        else:
-            queries.append(f'site:linkedin.com/in "{role}"')
+        queries.append(f'site:{site} "{role}"')
     # Then role x city.
     for role in roles:
-        for loc in locs:
-            if not loc:
+        for city in cities:
+            if not city:
                 continue
-            sub, place, country = _resolve_geo(loc)
-            base = f'site:{sub}.linkedin.com/in "{role}"'
-            queries.append(f'{base} "{place}"')
+            base = f'site:{site} "{role}"'
+            queries.append(f'{base} "{city}"')
             if kw:
-                queries.append(f'{base} "{kw}" "{place}"')
+                queries.append(f'{base} "{kw}" "{city}"')
     # De-dupe while preserving order.
     seen, out = set(), []
     for q in queries:
@@ -344,12 +393,19 @@ def _build_queries(role_variants: list[str], locations: list[str], keywords: str
 
 
 async def _search_with_retry(query: str) -> list[dict]:
-    """DDG lite search with backoff. Each retry goes out on a fresh rotating
-    residential proxy IP, so a transient 202 usually clears on retry."""
+    """Query DDG lite + Brave in parallel and merge — two sources so one engine
+    throttling (DDG 202s) doesn't bottleneck volume. Retries with backoff if
+    BOTH return nothing (each retry rotates the residential proxy IP)."""
     for attempt in range(_MAX_202_RETRIES + 1):
-        res = await _ddg_lite_search(query)
-        if res:
-            return res
+        ddg, brave = await asyncio.gather(_ddg_lite_search(query), _brave_search(query))
+        merged, seen = [], set()
+        for item in (ddg + brave):
+            u = (item.get("url") or "").split("?")[0]
+            if u and u not in seen:
+                seen.add(u)
+                merged.append(item)
+        if merged:
+            return merged
         if attempt < _MAX_202_RETRIES:
             await asyncio.sleep(_QUERY_DELAY_S * (attempt + 1))
     return []
