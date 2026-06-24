@@ -465,17 +465,27 @@ async def playwright_send_invitation(
                     # ERR_TOO_MANY_REDIRECTS. Surface this as auth-failed so the UI can prompt
                     # the user to reconnect via Email & Password (which creates proxy-bound cookies).
                     if "ERR_TOO_MANY_REDIRECTS" in msg or "ERR_HTTP_RESPONSE_CODE_FAILURE" in msg:
+                        # Extension cookies (home-IP bound) can't work through the
+                        # proxy — genuine reconnect-required. revoked=True so the
+                        # daemon marks auth_failed authoritatively.
                         raise LinkedInAuthError(
                             "LinkedIn rejected the session — please reconnect using Email & Password. "
-                            "(Extension cookies don't work through our network proxy.)"
+                            "(Extension cookies don't work through our network proxy.)",
+                            revoked=True,
                         )
                     raise
                 feed_url = page.url
-                if "/login" in feed_url or "/uas/login" in feed_url or "/authwall" in feed_url:
+                # The /feed bootstrap is the AUTHORITATIVE liveness check: a real
+                # logged-in browser loads /feed. A redirect to /login means the
+                # li_at is genuinely dead (revoked=True → mark auth_failed).
+                if "/login" in feed_url or "/uas/login" in feed_url:
                     raise LinkedInAuthError(
-                        "LinkedIn rejected the session — please reconnect using Email & Password. "
-                        "(Extension cookies don't work through our network proxy.)"
+                        "LinkedIn session is no longer valid — please reconnect using Email & Password.",
+                        revoked=True,
                     )
+                if "/authwall" in feed_url:
+                    # Authwall is often transient rate-limiting, NOT death — back off.
+                    raise LinkedInAuthError("LinkedIn authwall on /feed (likely rate-limited) — will retry")
                 await page.wait_for_timeout(2000)
 
                 logger.info("Playwright: navigating to /in/%s/ proxy=%s jsessionid=%s",
@@ -488,7 +498,9 @@ async def playwright_send_invitation(
 
                 final_url = page.url
                 if "/login" in final_url or "/uas/login" in final_url:
-                    raise LinkedInAuthError("Session expired — browser redirected to login")
+                    # /feed bootstrapped fine but the profile nav redirected to
+                    # login → genuine death. revoked=True → authoritative.
+                    raise LinkedInAuthError("Session expired — browser redirected to login", revoked=True)
                 if "/authwall" in final_url:
                     logger.warning("Playwright: authwall for %s — profile may be private or rate-limited", slug)
                     return {"ok": False, "error": "LinkedIn showed authwall — profile may be private or rate-limited"}

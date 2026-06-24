@@ -7,9 +7,14 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-# In-memory store for pending challenge sessions (TTL: 10 min)
+# In-memory store for pending challenge sessions (TTL: 10 min).
+# NOTE: this is per-replica memory. With multiple replicas a follow-up poll can
+# land on a different pod and not find the session. To avoid that for the common
+# phone-tap case we wait for approval INLINE within the original /login request
+# (see _INLINE_TAP_WAIT_S) so it resolves on the same replica without a poll.
 _pending: dict[str, dict] = {}
 _CHALLENGE_TTL = 600
+_INLINE_TAP_WAIT_S = 60   # wait this long for phone-tap approval inside /login
 
 
 async def linkedin_login_start(
@@ -180,7 +185,37 @@ async def _linkedin_login_attempt(
             )
 
             if challenge_type == "phone_tap":
-                # Keep browser alive — we'll poll for redirect after user taps Yes
+                # Wait for the phone-tap approval INLINE (same replica, same
+                # request) — users normally tap "Yes" within a few seconds.
+                # This avoids the cross-replica poll problem entirely for the
+                # common case. Fall back to the _pending poll flow only if the
+                # user hasn't approved within _INLINE_TAP_WAIT_S.
+                logger.info("Phone-tap challenge for %s — waiting inline up to %ds", email, _INLINE_TAP_WAIT_S)
+                deadline = time.time() + _INLINE_TAP_WAIT_S
+                while time.time() < deadline:
+                    await page.wait_for_timeout(3000)
+                    url_now = page.url
+                    approved = (
+                        "/feed" in url_now
+                        or ("checkpoint" not in url_now and "challenge" not in url_now
+                            and "login" not in url_now and "linkedin.com" in url_now)
+                    )
+                    if not approved:
+                        continue
+                    cookies = await ctx.cookies()
+                    cookie_dict = {c["name"]: c["value"] for c in cookies}
+                    li_at = cookie_dict.get("li_at", "")
+                    if not li_at:
+                        continue  # approved but cookie not set yet — keep polling
+                    jsessionid = cookie_dict.get("JSESSIONID", "").strip('"')
+                    display_name = await _get_display_name_from_page(page)
+                    logger.info("Phone tap approved inline for %s (name=%s)", email, display_name)
+                    await _cleanup()
+                    return li_at, jsessionid, display_name, None
+
+                # Not approved in the inline window — park the live browser for
+                # the poll-based fallback (works if the poll hits this replica).
+                logger.info("Phone-tap not approved within %ds for %s — falling back to poll", _INLINE_TAP_WAIT_S, email)
                 _pending[key] = {
                     "challenge_type": "phone_tap",
                     "pw": pw,

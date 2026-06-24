@@ -1236,22 +1236,19 @@ class LinkedInAutomationDaemon:
                             campaign.updated_at = datetime.utcnow()
                             db.commit()
                             return
-                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                        cnt = _auth_fail_count[campaign.id]
-                        if cnt < AUTH_FAIL_THRESHOLD:
-                            logger.warning(
-                                "Campaign %d: auth failure %d/%d during resolve — will retry next tick",
-                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                            )
-                            return  # exit tick — let it cool down for 60s
+                        # Non-revoked auth-looking errors are almost always FALSE
+                        # negatives: server/proxy-originated Voyager calls get
+                        # IP/CSRF-mismatch 403s, 999s and login redirects even when
+                        # li_at is perfectly valid. Treating these as session death
+                        # is what forced users to reconnect daily. Back off and retry
+                        # next tick; only an explicit revoke (handled above) or a
+                        # Playwright /feed bootstrap landing on /login (raised with
+                        # revoked=True) is treated as real death.
                         logger.warning(
-                            "Campaign %d: %d consecutive auth failures (during resolve), marking auth_failed",
-                            campaign.id, cnt,
+                            "Campaign %d: transient auth-looking error during resolve (%s) — backing off, retrying next tick",
+                            campaign.id, _auth_err,
                         )
-                        campaign.status = "auth_failed"
-                        campaign.updated_at = datetime.utcnow()
-                        db.commit()
-                        return
+                        return  # cool down 60s, do NOT mark auth_failed
                     except Exception as resolve_err:
                         logger.warning("Campaign %d: Voyager resolve error for '%s': %s", campaign.id, req.name, resolve_err)
                         req.status = "error"
@@ -1277,21 +1274,12 @@ class LinkedInAutomationDaemon:
                             campaign.updated_at = datetime.utcnow()
                             db.commit()
                             return
-                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                        cnt = _auth_fail_count[campaign.id]
-                        if cnt < AUTH_FAIL_THRESHOLD:
-                            logger.warning(
-                                "Campaign %d: auth failure %d/%d during URN resolve — will retry next tick",
-                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                            )
-                            return  # break out of this tick, try again next time
+                        # Non-revoked = transient proxy/CSRF/IP false negative.
+                        # Back off and retry next tick; never mark auth_failed here.
                         logger.warning(
-                            "Campaign %d: %d consecutive auth failures, marking auth_failed",
-                            campaign.id, cnt,
+                            "Campaign %d: transient auth-looking error during URN resolve (%s) — backing off, retrying next tick",
+                            campaign.id, _auth_err,
                         )
-                        campaign.status = "auth_failed"
-                        campaign.updated_at = datetime.utcnow()
-                        db.commit()
                         return
                     if urn:
                         req.profile_urn = urn
@@ -1386,21 +1374,14 @@ class LinkedInAutomationDaemon:
                         campaign.updated_at = datetime.utcnow()
                         db.commit()
                         return
-                    _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                    cnt = _auth_fail_count[campaign.id]
-                    if cnt < AUTH_FAIL_THRESHOLD:
-                        logger.warning(
-                            "Campaign %d: auth failure %d/%d on send — will retry next tick",
-                            campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                        )
-                        return
+                    # Non-revoked = transient proxy/CSRF/IP false negative on the
+                    # Voyager send attempt (the Playwright fallback path raises
+                    # revoked=True for a genuine /login redirect). Back off and
+                    # retry next tick; never mark auth_failed here.
                     logger.warning(
-                        "Campaign %d: %d consecutive auth failures, marking auth_failed",
-                        campaign.id, cnt,
+                        "Campaign %d: transient auth-looking error on send (%s) — backing off, retrying next tick",
+                        campaign.id, _auth_err,
                     )
-                    campaign.status = "auth_failed"
-                    campaign.updated_at = datetime.utcnow()
-                    db.commit()
                     return
                 except Exception as send_err:
                     logger.warning("Campaign %d: send error for %s: %s", campaign.id, req.profile_url, send_err)
