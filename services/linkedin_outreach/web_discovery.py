@@ -168,19 +168,27 @@ def _profile_key(url: str) -> str:
 # pull fresh profiles is genuinely different queries. Expanding a country into
 # its hub cities multiplies distinct results without spending extra sources.
 _COUNTRY_CITIES = {
-    "india": ["Bangalore", "Mumbai", "Delhi", "Gurgaon", "Hyderabad", "Pune", "Chennai"],
-    "united states": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "usa": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "us": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "united kingdom": ["London", "Manchester", "Birmingham", "Edinburgh"],
-    "uk": ["London", "Manchester", "Birmingham", "Edinburgh"],
+    "india": ["Bangalore", "Mumbai", "Delhi", "Gurgaon", "Hyderabad", "Pune", "Chennai",
+              "Kolkata", "Noida", "Ahmedabad", "Jaipur"],
+    "united states": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+                      "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "usa": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+            "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "us": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+           "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "united kingdom": ["London", "Manchester", "Birmingham", "Edinburgh", "Leeds", "Bristol", "Glasgow"],
+    "uk": ["London", "Manchester", "Birmingham", "Edinburgh", "Leeds", "Bristol", "Glasgow"],
     "uae": ["Dubai", "Abu Dhabi", "Sharjah"],
     "united arab emirates": ["Dubai", "Abu Dhabi", "Sharjah"],
     "singapore": ["Singapore"],
-    "france": ["Paris", "Lyon", "Toulouse"],
-    "germany": ["Berlin", "Munich", "Hamburg"],
-    "canada": ["Toronto", "Vancouver", "Montreal"],
-    "australia": ["Sydney", "Melbourne"],
+    "france": ["Paris", "Lyon", "Toulouse", "Marseille", "Lille", "Bordeaux",
+               "Nantes", "Nice", "Strasbourg", "Montpellier", "Rennes"],
+    "germany": ["Berlin", "Munich", "Hamburg", "Frankfurt", "Cologne", "Stuttgart"],
+    "spain": ["Madrid", "Barcelona", "Valencia", "Seville"],
+    "italy": ["Milan", "Rome", "Turin", "Bologna"],
+    "netherlands": ["Amsterdam", "Rotterdam", "The Hague", "Utrecht"],
+    "canada": ["Toronto", "Vancouver", "Montreal", "Calgary", "Ottawa"],
+    "australia": ["Sydney", "Melbourne", "Brisbane", "Perth"],
 }
 
 # Map a country (any common name/alias) to LinkedIn's country subdomain. The
@@ -253,31 +261,79 @@ def _expand_locations(locations: list[str]) -> list[str]:
     return out or [""]
 
 
-def _build_queries(target_role: str, locations: list[str], keywords: str | None) -> list[str]:
-    """Geo-targeted x-ray queries using the LinkedIn country subdomain so
-    results are actually in the requested country. DDG lite has no page offset,
-    so role x place variety is how we reach volume."""
-    role = (target_role or "").strip() or "Marketing Manager"
+async def _expand_roles(role: str, want_variants: bool) -> list[str]:
+    """Return [role] plus close title variants. For large target counts we ask
+    the LLM (chat.completions; needs a generous token budget on the reasoning
+    deployment) for ~12 synonyms/adjacent titles to widen the net. Falls back to
+    just the role on any failure. No Apollo — Azure tokens only."""
+    role = (role or "").strip() or "Marketing Manager"
+    if not want_variants:
+        return [role]
+    try:
+        from openai import AsyncAzureOpenAI
+        from core.config import settings
+        if not settings.AZURE_OPENAI_KEY:
+            return [role]
+        client = AsyncAzureOpenAI(
+            api_key=settings.AZURE_OPENAI_KEY,
+            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            api_version=settings.AZURE_OPENAI_API_VERSION,
+        )
+        prompt = (
+            f'Return ONLY a JSON array of 12 LinkedIn job-title variants closely related to '
+            f'"{role}" (synonyms plus adjacent seniority/function). No prose, no markdown.'
+        )
+        resp = await client.chat.completions.create(
+            model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=2000,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1:
+            return [role]
+        import json
+        arr = json.loads(text[start:end + 1])
+        variants = [role] + [v.strip() for v in arr if isinstance(v, str) and v.strip()]
+        seen, out = set(), []
+        for v in variants:
+            k = v.lower()
+            if k not in seen:
+                seen.add(k); out.append(v)
+        return out[:13]
+    except Exception as exc:
+        logger.warning("[WebDiscovery] role expansion failed: %s", exc)
+        return [role]
+
+
+def _build_queries(role_variants: list[str], locations: list[str], keywords: str | None) -> list[str]:
+    """Geo-targeted x-ray queries: each role variant x the country subdomain x
+    its hub cities. The subdomain (e.g. fr.linkedin.com) is the geo filter, so
+    results stay in-country. DDG lite has no page offset, so role x city variety
+    is how we reach high volume."""
     locs = _expand_locations([l for l in (locations or []) if l and l.strip()])
     kw = (keywords or "").strip()
+    roles = role_variants or ["Marketing Manager"]
 
     queries: list[str] = []
-    for loc in locs:
-        if not loc:
-            queries.append(f'site:linkedin.com/in "{role}"')
-            continue
-        sub, place, country = _resolve_geo(loc)
-        base = f'site:{sub}.linkedin.com/in "{role}"'
-        queries.append(f'{base} "{place}"')
-        if country and country != place.lower():
-            queries.append(f'{base} "{country}"')
-        # Subdomain-only query: still geo-filtered to the country (e.g.
-        # fr.linkedin.com), adds volume and survives when the city/country
-        # term gets a transient DDG 202.
+    # Subdomain-only queries first (highest yield, most resilient to 202s).
+    for role in roles:
+        sub, _place, _country = _resolve_geo(locs[0]) if locs and locs[0] else ("www", "", None)
         if sub != "www":
-            queries.append(base)
-        if kw:
-            queries.append(f'{base} "{kw}" "{place}"')
+            queries.append(f'site:{sub}.linkedin.com/in "{role}"')
+        else:
+            queries.append(f'site:linkedin.com/in "{role}"')
+    # Then role x city.
+    for role in roles:
+        for loc in locs:
+            if not loc:
+                continue
+            sub, place, country = _resolve_geo(loc)
+            base = f'site:{sub}.linkedin.com/in "{role}"'
+            queries.append(f'{base} "{place}"')
+            if kw:
+                queries.append(f'{base} "{kw}" "{place}"')
     # De-dupe while preserving order.
     seen, out = set(), []
     for q in queries:
@@ -305,12 +361,20 @@ async def discover_leads_via_search(
     industries: list[str] | None = None,
     keywords: str | None = None,
     limit: int = 30,
+    on_batch=None,
 ) -> list[dict]:
-    """Find public LinkedIn profiles matching the ICP — no login, no Apollo."""
-    queries = _build_queries(target_role, locations or [], keywords)
+    """Find public LinkedIn profiles matching the ICP — no login, no Apollo.
+
+    on_batch: optional async callback(new_leads: list[dict]) invoked after each
+    query with the freshly-found leads, so long high-volume runs can persist
+    progressively instead of losing everything if interrupted."""
+    # For larger targets, widen the net with LLM-generated role variants so we
+    # can actually reach the requested volume from a single role + location.
+    role_variants = await _expand_roles(target_role, want_variants=limit > 40)
+    queries = _build_queries(role_variants, locations or [], keywords)
     logger.info(
-        "[WebDiscovery] role=%r locations=%r -> %d queries (target %d leads)",
-        target_role, locations, len(queries), limit,
+        "[WebDiscovery] role=%r (%d variants) locations=%r -> %d queries (target %d leads)",
+        target_role, len(role_variants), locations, len(queries), limit,
     )
 
     leads: list[dict] = []
@@ -320,6 +384,7 @@ async def discover_leads_via_search(
         if len(leads) >= limit:
             break
         results = await _search_with_retry(q)
+        batch: list[dict] = []
         for item in results:
             parsed = _parse_result(item)
             if not parsed:
@@ -329,8 +394,14 @@ async def discover_leads_via_search(
                 continue
             seen.add(key)
             leads.append(parsed)
+            batch.append(parsed)
             if len(leads) >= limit:
                 break
+        if batch and on_batch is not None:
+            try:
+                await on_batch(batch)
+            except Exception as exc:
+                logger.warning("[WebDiscovery] on_batch persist failed: %s", exc)
         # Be polite to DDG between queries.
         if i < len(queries) - 1:
             await asyncio.sleep(_QUERY_DELAY_S)
