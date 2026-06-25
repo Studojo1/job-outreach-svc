@@ -92,7 +92,7 @@ def extract_resume_profile(
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
-        max_completion_tokens=600,
+        max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
     )
 
     raw = response.choices[0].message.content or ""
@@ -211,7 +211,7 @@ def extract_enhanced_resume_profile(resume_text: str) -> dict:
             {"role": "system", "content": _ENHANCED_SYSTEM_PROMPT},
             {"role": "user", "content": f"Resume:\n{trimmed}"},
         ],
-        max_completion_tokens=1200,
+        max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
     )
 
     raw = response.choices[0].message.content or ""
