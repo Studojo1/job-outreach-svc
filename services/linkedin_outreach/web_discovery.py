@@ -314,7 +314,7 @@ async def _expand_roles(role: str, want_variants: bool) -> list[str]:
         resp = await client.chat.completions.create(
             model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=2000,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
         )
         text = (resp.choices[0].message.content or "").strip()
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()

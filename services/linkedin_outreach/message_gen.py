@@ -54,7 +54,7 @@ Return only the message text, nothing else."""
         response = await client.chat.completions.create(
             model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=120,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
             temperature=0.85,
         )
         message = response.choices[0].message.content or ""
@@ -113,7 +113,7 @@ Return only the sentence."""
         response = await client.chat.completions.create(
             model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=80,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
             temperature=0.6,
         )
         text = (response.choices[0].message.content or "").strip()
@@ -179,7 +179,7 @@ Return only the message text, nothing else."""
         response = await client.chat.completions.create(
             model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=120,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
             temperature=0.85,
         )
         message = response.choices[0].message.content or ""

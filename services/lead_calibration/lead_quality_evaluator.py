@@ -116,7 +116,7 @@ def evaluate_probe_with_llm(
                 {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            max_completion_tokens=600,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
         )
         raw = (response.choices[0].message.content or "").strip()
         # Strip markdown fences if the model included them anyway

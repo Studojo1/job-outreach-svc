@@ -253,7 +253,7 @@ def run_career_strategist(
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            max_completion_tokens=1200,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
         )
         raw_text = (response.choices[0].message.content or "").strip()
 
