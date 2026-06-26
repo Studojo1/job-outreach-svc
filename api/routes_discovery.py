@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -769,17 +770,34 @@ class LinkedInDiscoverRequest(BaseModel):
     candidate_id: int
     target_role: Optional[str] = None        # override; else derived from candidate profile
     locations: Optional[List[str]] = None    # override; else derived from candidate profile
-    limit: int = 30
+    limit: int = 300                         # web search is cheap; default to a full set
 
 
 def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
-    """Best-effort target role + locations from a candidate, mirroring the
-    logic used by create_campaign_from_order."""
+    """Target role + locations for lead discovery.
+
+    HIGHEST priority is what the user actually typed in the LinkedIn onboarding
+    form (stored in flex_notes by save_flex_notes). Only if that's absent do we
+    fall back to résumé-derived targeting — otherwise a user searching for
+    'Marketing Associate in Paris' wrongly gets their résumé's role/country."""
     parsed = candidate.parsed_json or {}
     prefs = parsed.get("preferences", {}) if isinstance(parsed, dict) else {}
     career = parsed.get("career_analysis", {}) if isinstance(parsed, dict) else {}
     profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+    flex = candidate.flex_notes if isinstance(candidate.flex_notes, dict) else {}
 
+    # 1. User-typed input wins outright.
+    role_input = (flex.get("target_role_user_input") or "").strip()
+    loc_input = (flex.get("location_user_input") or "").strip()
+    if role_input:
+        # Split a "Paris, France" style location into parts; "remote" → no geo filter.
+        if loc_input and loc_input.lower() not in ("remote", "anywhere"):
+            locs = [p.strip() for p in re.split(r"[,/]| or ", loc_input) if p.strip()]
+        else:
+            locs = []
+        return role_input, locs
+
+    # 2. Fall back to résumé-derived role.
     role = ""
     target_roles = candidate.target_roles if isinstance(candidate.target_roles, list) else []
     if target_roles:
@@ -796,6 +814,8 @@ def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
     role = (role or "Marketing Manager").strip()
 
     locations: list[str] = []
+    if loc_input and loc_input.lower() not in ("remote", "anywhere"):
+        locations = [p.strip() for p in re.split(r"[,/]| or ", loc_input) if p.strip()]
     for loc in (prefs.get("locations") or []):
         if isinstance(loc, str) and loc.strip() and loc.strip() not in locations:
             locations.append(loc.strip())
@@ -810,10 +830,12 @@ def _derive_role_and_locations(candidate: Candidate) -> tuple[str, list[str]]:
 
 
 async def _run_linkedin_discover(candidate_id: int, user_id: str,
-                                 role_override: Optional[str], loc_override: Optional[list]):
+                                 role_override: Optional[str], loc_override: Optional[list],
+                                 limit: int = 30):
     """Background worker: DDG x-ray discovery → Lead rows with linkedin_url.
-    Takes 1-2 min, so it never holds a DB connection across the web work —
-    read params with a short session, discover with none held, write fresh."""
+    Never holds a DB connection across the web work, and for high-volume runs
+    persists each batch as it arrives (so a 5-10 min run isn't lost if the pod
+    restarts mid-sweep)."""
     from services.linkedin_outreach.web_discovery import discover_leads_via_search
 
     db = SessionLocal()
@@ -829,35 +851,54 @@ async def _run_linkedin_discover(candidate_id: int, user_id: str,
     if loc_override:
         locations = [l for l in loc_override if l and l.strip()] or locations
 
-    people = await discover_leads_via_search(target_role=role, locations=locations, limit=30)
-
+    # Clear prior web-discovered leads up front so a re-search with new criteria
+    # doesn't mix stale results in. Only DDG-sourced rows (apollo_id NULL,
+    # linkedin_url set) are removed; imported Apollo leads are left untouched.
     db = SessionLocal()
     try:
-        existing = {
+        db.query(Lead).filter(
+            Lead.candidate_id == candidate_id,
+            Lead.apollo_id.is_(None),
+            Lead.linkedin_url.isnot(None),
+        ).delete(synchronize_session=False)
+        db.commit()
+        seen_urls = {
             u for (u,) in db.query(Lead.linkedin_url).filter_by(candidate_id=candidate_id).all() if u
         }
-        created = 0
-        for p in people:
-            url = (p.get("profile_url") or "").strip()
-            if not url or url in existing:
-                continue
-            db.add(Lead(
-                candidate_id=candidate_id,
-                name=p.get("name") or "",
-                title=p.get("headline") or role,
-                company=p.get("company"),
-                linkedin_url=url,
-                status="new",
-            ))
-            existing.add(url)
-            created += 1
-        db.commit()
-        logger.info(
-            "[LinkedInDiscover] candidate=%s role=%r locations=%r created=%d",
-            candidate_id, role, locations, created,
-        )
     finally:
         db.close()
+
+    total = 0
+
+    async def _persist(batch: list[dict]):
+        nonlocal total
+        bdb = SessionLocal()
+        try:
+            for p in batch:
+                url = (p.get("profile_url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                bdb.add(Lead(
+                    candidate_id=candidate_id,
+                    name=p.get("name") or "",
+                    title=p.get("headline") or role,
+                    company=p.get("company"),
+                    linkedin_url=url,
+                    status="new",
+                ))
+                seen_urls.add(url)
+                total += 1
+            bdb.commit()
+        finally:
+            bdb.close()
+
+    await discover_leads_via_search(
+        target_role=role, locations=locations, limit=limit, on_batch=_persist,
+    )
+    logger.info(
+        "[LinkedInDiscover] candidate=%s role=%r locations=%r limit=%d created=%d",
+        candidate_id, role, locations, limit, total,
+    )
 
 
 @router.post("/linkedin-discover")
@@ -890,8 +931,9 @@ async def linkedin_discover(
         user_id=str(current_user.id),
         role_override=body.target_role,
         loc_override=body.locations,
+        limit=max(5, min(body.limit, 400)),
     )
-    return {"status": "started", "role": role, "locations": locations}
+    return {"status": "started", "role": role, "locations": locations, "target": body.limit}
 
 
 @router.get("/outreach-sources/{candidate_id}")

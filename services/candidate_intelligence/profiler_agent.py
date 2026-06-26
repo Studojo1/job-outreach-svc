@@ -335,7 +335,7 @@ def get_agent_response(
                 model=model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_completion_tokens=2000,
+                max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
             )
             t_llm_end = time.perf_counter()
             raw = completion.choices[0].message.content
@@ -645,7 +645,7 @@ def stream_agent_response(
         stream = client.chat.completions.create(
             model=model,
             messages=messages,
-            max_completion_tokens=600,
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
             stream=True,
         )
 

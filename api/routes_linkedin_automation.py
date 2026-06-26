@@ -107,7 +107,7 @@ async def login_with_credentials(
     try:
         from core.config import settings as _s
         proxy_url = (_s.LINKEDIN_PROXY_URL or "").strip() or None
-        li_at, jsessionid, display_name, session_key = await linkedin_login_start(
+        li_at, jsessionid, display_name, session_key, cookies_blob = await linkedin_login_start(
             body.email, body.password, proxy_url=proxy_url
         )
     except ValueError as e:
@@ -118,7 +118,7 @@ async def login_with_credentials(
         challenge_type = _pending.get(session_key, {}).get("challenge_type", "pin")
         return {"ok": False, "challenge_required": True, "session_key": session_key, "challenge_type": challenge_type}
 
-    _store_token(db, current_user.id, li_at, jsessionid, display_name)
+    _store_token(db, current_user.id, li_at, jsessionid, display_name, cookies_blob=cookies_blob)
     return {"ok": True, "linkedin_name": display_name}
 
 

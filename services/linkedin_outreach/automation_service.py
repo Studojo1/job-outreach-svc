@@ -92,6 +92,51 @@ def reset_auth_fail_count(campaign_id: int) -> None:
     the auth_failed state on the next tick.
     """
     _auth_fail_count.pop(campaign_id, None)
+
+
+def persist_refreshed_session(db, user_id: str, cookies_blob: str,
+                              fallback_li_at: str, fallback_js: str) -> None:
+    """Roll the stored LinkedIn session forward after a successful send.
+
+    A real browser's cookies (JSESSIONID, lidc, bcookie, and sometimes a rotated
+    li_at) change as it's used. We persist the freshly-captured jar back to the
+    token row so the stored session stays current instead of drifting until a
+    forced re-login. Best-effort — never raises into the daemon.
+    """
+    import json as _json
+    from services.linkedin_outreach.crypto import encrypt as _encrypt_single, encrypt_pair
+    from database.models import LinkedInToken
+    try:
+        row = db.query(LinkedInToken).filter(LinkedInToken.user_id == user_id).first()
+        if not row:
+            return
+        by = {}
+        try:
+            by = {c.get("name"): c.get("value") for c in _json.loads(cookies_blob) if c.get("name")}
+        except Exception:
+            pass
+        li_at = by.get("li_at") or fallback_li_at
+        js = (by.get("JSESSIONID") or fallback_js or "").strip('"')
+        if not li_at:
+            return
+        li_at_enc, js_enc, nonce = encrypt_pair(li_at, js)
+        row.li_at_enc = li_at_enc
+        row.jsessionid_enc = js_enc
+        row.nonce = nonce
+        cb_enc, cb_nonce = _encrypt_single(cookies_blob)
+        row.cookies_blob_enc = cb_enc
+        row.cookies_blob_nonce = cb_nonce
+        row.updated_at = datetime.utcnow()
+        db.commit()
+        logger.info("Rolled forward LinkedIn session for user %s (%d cookies)", user_id, len(by))
+    except Exception as e:
+        logger.warning("persist_refreshed_session failed for user %s: %s", user_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 _last_reply_check: dict[int, float] = {}
 _ACCEPT_INTERVAL = 300  # 5 minutes
 _REPLY_INTERVAL = 7200    # 2 hours
@@ -219,8 +264,13 @@ async def send_connection_request(
     session_id: str | None = None,
     profile_url: str | None = None,
     cookies_blob: str | None = None,
+    out: dict | None = None,
 ) -> tuple[bool, str]:
     """Send a LinkedIn connection request via Voyager. Returns True on success.
+
+    `out` (optional dict) is populated with {"cookies_blob": <refreshed jar JSON>}
+    when the Playwright send succeeds, so the daemon can roll the stored session
+    forward.
 
     Uses a single persistent httpx client for both the seed GET (to obtain a
     JSESSIONID valid for this proxy IP) and the POST, so both requests travel
@@ -236,7 +286,7 @@ async def send_connection_request(
     """
     # If we have no URN, skip Voyager attempts — they require profileId.
     if not profile_urn and profile_url:
-        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob, session_id=session_id)
+        return await _send_via_playwright(li_at, jsessionid, profile_url, note, None, cookies_blob, session_id=session_id, out=out)
     ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -374,7 +424,7 @@ async def send_connection_request(
     # Playwright fallback: click the Connect button in a real browser
     # Prefer the real profile_url if caller passed it, else reconstruct from URN.
     target_url = profile_url or f"https://www.linkedin.com/in/{profile_urn}/"
-    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob, session_id=session_id)
+    return await _send_via_playwright(li_at, jsessionid, target_url, note, profile_urn, cookies_blob, session_id=session_id, out=out)
 
 
 async def _send_via_playwright(
@@ -385,6 +435,7 @@ async def _send_via_playwright(
     existing_urn: str | None,
     cookies_blob: str | None = None,
     session_id: str | None = None,
+    out: dict | None = None,
 ) -> tuple[bool, str]:
     try:
         from services.linkedin_outreach.playwright_service import playwright_send_invitation
@@ -402,8 +453,20 @@ async def _send_via_playwright(
         )
         if result.get("ok"):
             logger.info("Playwright send succeeded for %s", profile_url)
+            if out is not None and result.get("cookies_blob"):
+                out["cookies_blob"] = result["cookies_blob"]
             return True, ""
         err = result.get("error", "unknown")
+        # Surface structured outcomes the daemon must handle differently from a
+        # generic send error: a LinkedIn invite-limit (stop the whole tick) vs an
+        # email-gated invite (skip just this lead). Encode as an error prefix so
+        # the existing (ok, error) tuple signature is unchanged.
+        if result.get("limit_reached"):
+            logger.warning("Playwright send hit invite limit for %s: %s", profile_url, err)
+            return False, f"LIMIT_REACHED: {err}"
+        if result.get("needs_email"):
+            logger.info("Playwright send needs recipient email for %s", profile_url)
+            return False, f"NEEDS_EMAIL: {err}"
         logger.warning("Playwright send failed for %s: %s", profile_url, err)
         return False, f"Playwright: {err}"
     except LinkedInAuthError:
@@ -1236,22 +1299,19 @@ class LinkedInAutomationDaemon:
                             campaign.updated_at = datetime.utcnow()
                             db.commit()
                             return
-                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                        cnt = _auth_fail_count[campaign.id]
-                        if cnt < AUTH_FAIL_THRESHOLD:
-                            logger.warning(
-                                "Campaign %d: auth failure %d/%d during resolve — will retry next tick",
-                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                            )
-                            return  # exit tick — let it cool down for 60s
+                        # Non-revoked auth-looking errors are almost always FALSE
+                        # negatives: server/proxy-originated Voyager calls get
+                        # IP/CSRF-mismatch 403s, 999s and login redirects even when
+                        # li_at is perfectly valid. Treating these as session death
+                        # is what forced users to reconnect daily. Back off and retry
+                        # next tick; only an explicit revoke (handled above) or a
+                        # Playwright /feed bootstrap landing on /login (raised with
+                        # revoked=True) is treated as real death.
                         logger.warning(
-                            "Campaign %d: %d consecutive auth failures (during resolve), marking auth_failed",
-                            campaign.id, cnt,
+                            "Campaign %d: transient auth-looking error during resolve (%s) — backing off, retrying next tick",
+                            campaign.id, _auth_err,
                         )
-                        campaign.status = "auth_failed"
-                        campaign.updated_at = datetime.utcnow()
-                        db.commit()
-                        return
+                        return  # cool down 60s, do NOT mark auth_failed
                     except Exception as resolve_err:
                         logger.warning("Campaign %d: Voyager resolve error for '%s': %s", campaign.id, req.name, resolve_err)
                         req.status = "error"
@@ -1277,21 +1337,12 @@ class LinkedInAutomationDaemon:
                             campaign.updated_at = datetime.utcnow()
                             db.commit()
                             return
-                        _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                        cnt = _auth_fail_count[campaign.id]
-                        if cnt < AUTH_FAIL_THRESHOLD:
-                            logger.warning(
-                                "Campaign %d: auth failure %d/%d during URN resolve — will retry next tick",
-                                campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                            )
-                            return  # break out of this tick, try again next time
+                        # Non-revoked = transient proxy/CSRF/IP false negative.
+                        # Back off and retry next tick; never mark auth_failed here.
                         logger.warning(
-                            "Campaign %d: %d consecutive auth failures, marking auth_failed",
-                            campaign.id, cnt,
+                            "Campaign %d: transient auth-looking error during URN resolve (%s) — backing off, retrying next tick",
+                            campaign.id, _auth_err,
                         )
-                        campaign.status = "auth_failed"
-                        campaign.updated_at = datetime.utcnow()
-                        db.commit()
                         return
                     if urn:
                         req.profile_urn = urn
@@ -1366,7 +1417,10 @@ class LinkedInAutomationDaemon:
                             campaign.id, like_err,
                         )
 
-                # Send — pass profile_url so Playwright works even if URN is empty
+                # Send — pass profile_url so Playwright works even if URN is empty.
+                # `_send_out` collects the refreshed cookie jar so we can roll the
+                # stored session forward after a successful send.
+                _send_out: dict = {}
                 try:
                     ok, send_error = await send_connection_request(
                         li_at, jsessionid,
@@ -1375,6 +1429,7 @@ class LinkedInAutomationDaemon:
                         session_id,
                         profile_url=req.profile_url,
                         cookies_blob=cookies_blob,
+                        out=_send_out,
                     )
                 except LinkedInAuthError as _auth_err:
                     if _auth_err.revoked:
@@ -1386,25 +1441,36 @@ class LinkedInAutomationDaemon:
                         campaign.updated_at = datetime.utcnow()
                         db.commit()
                         return
-                    _auth_fail_count[campaign.id] = _auth_fail_count.get(campaign.id, 0) + 1
-                    cnt = _auth_fail_count[campaign.id]
-                    if cnt < AUTH_FAIL_THRESHOLD:
-                        logger.warning(
-                            "Campaign %d: auth failure %d/%d on send — will retry next tick",
-                            campaign.id, cnt, AUTH_FAIL_THRESHOLD,
-                        )
-                        return
+                    # Non-revoked = transient proxy/CSRF/IP false negative on the
+                    # Voyager send attempt (the Playwright fallback path raises
+                    # revoked=True for a genuine /login redirect). Back off and
+                    # retry next tick; never mark auth_failed here.
                     logger.warning(
-                        "Campaign %d: %d consecutive auth failures, marking auth_failed",
-                        campaign.id, cnt,
+                        "Campaign %d: transient auth-looking error on send (%s) — backing off, retrying next tick",
+                        campaign.id, _auth_err,
                     )
-                    campaign.status = "auth_failed"
-                    campaign.updated_at = datetime.utcnow()
-                    db.commit()
                     return
                 except Exception as send_err:
                     logger.warning("Campaign %d: send error for %s: %s", campaign.id, req.profile_url, send_err)
                     ok, send_error = False, str(send_err)
+
+                # LinkedIn invite-limit modal: stop the WHOLE tick (don't error the
+                # lead, leave it pending) — sending more today is pointless and just
+                # burns browser launches. It self-heals when the limit window resets.
+                if not ok and send_error and send_error.startswith("LIMIT_REACHED"):
+                    logger.warning(
+                        "Campaign %d: LinkedIn invite limit reached (%s) — stopping this tick, lead stays pending",
+                        campaign.id, send_error,
+                    )
+                    return
+                # Email-gated invite: LinkedIn won't let us connect without the
+                # recipient's email. Skip just this lead (don't retry forever).
+                if not ok and send_error and send_error.startswith("NEEDS_EMAIL"):
+                    req.status = "skipped_no_email"
+                    req.error = "LinkedIn requires the recipient's email to connect"
+                    req.updated_at = datetime.utcnow()
+                    db.commit()
+                    continue
 
                 if ok:
                     req.status = "sent"
@@ -1412,6 +1478,12 @@ class LinkedInAutomationDaemon:
                     campaign.total_sent += 1
                     # Reset the consecutive-failure counter on any success.
                     _auth_fail_count.pop(campaign.id, None)
+                    # Roll the stored session forward with the refreshed cookie jar
+                    # so it self-renews and doesn't drift toward a forced re-login.
+                    if _send_out.get("cookies_blob"):
+                        persist_refreshed_session(
+                            db, campaign.user_id, _send_out["cookies_blob"], li_at, jsessionid,
+                        )
                 else:
                     req.status = "error"
                     req.error = send_error or "Send failed"

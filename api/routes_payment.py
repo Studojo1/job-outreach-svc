@@ -152,6 +152,10 @@ async def validate_coupon(
         raise HTTPException(status_code=400, detail="Coupon is not yet active")
     if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
         raise HTTPException(status_code=400, detail="Coupon usage limit reached")
+    # Per-recipient founder coupons are bound to one buyer — reject if someone
+    # else tries to redeem a leaked code.
+    if coupon.user_id and str(coupon.user_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="This coupon is not valid for your account")
 
     # Support both plan_id (new) and tier (legacy)
     if request.plan_id:
@@ -241,7 +245,12 @@ async def create_order(
             valid = True
             if coupon.valid_until and coupon.valid_until < now:
                 valid = False
+            if coupon.valid_from and coupon.valid_from > now:
+                valid = False
             if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
+                valid = False
+            # Per-recipient founder coupons are bound to one buyer.
+            if coupon.user_id and str(coupon.user_id) != str(current_user.id):
                 valid = False
             if valid:
                 amount = apply_coupon(amount, coupon.discount_type, float(coupon.discount_value))

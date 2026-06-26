@@ -37,29 +37,57 @@ _HTTP_HEADERS = {
 _HTTP_TIMEOUT = 20.0
 
 
+def _proxy() -> str | None:
+    return (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+
+
+def _parse_li_anchors(html: str) -> list[dict]:
+    """Extract linkedin.com/in/ results ({title,url,snippet}) from a SERP."""
+    soup = BeautifulSoup(html, "lxml")
+    out, seen = [], set()
+    for a in soup.select("a"):
+        href = a.get("href") or ""
+        if "linkedin.com/in/" not in href:
+            continue
+        url = href.split("?")[0]
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"title": a.get_text(strip=True), "url": href, "snippet": ""})
+    return out
+
+
 async def _ddg_lite_search(query: str) -> list[dict]:
-    """POST to the DDG lite endpoint (via residential proxy) and return
-    [{title, url, snippet}] for linkedin.com/in/ results. Never raises."""
-    proxy = (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+    """POST to the DDG lite endpoint (via residential proxy). Never raises."""
     try:
         async with httpx.AsyncClient(
             headers=_HTTP_HEADERS, follow_redirects=True,
-            timeout=_HTTP_TIMEOUT, verify=False, proxy=proxy,
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
         ) as client:
             resp = await client.post(_DDG_LITE_URL, data={"q": query})
         if resp.status_code != 200:
             logger.warning("[WebDiscovery] DDG lite non-200 (%d) for %r", resp.status_code, query[:60])
             return []
-        soup = BeautifulSoup(resp.text, "lxml")
-        out = []
-        for a in soup.select("a"):
-            href = a.get("href") or ""
-            if "linkedin.com/in/" not in href:
-                continue
-            out.append({"title": a.get_text(strip=True), "url": href, "snippet": ""})
-        return out
+        return _parse_li_anchors(resp.text)
     except Exception as exc:
         logger.warning("[WebDiscovery] DDG lite failed for %r: %s", query[:60], exc)
+        return []
+
+
+async def _brave_search(query: str) -> list[dict]:
+    """Brave Search HTML (via residential proxy). A second source so DDG
+    throttling (202s) doesn't bottleneck volume. Never raises."""
+    try:
+        async with httpx.AsyncClient(
+            headers=_HTTP_HEADERS, follow_redirects=True,
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
+        ) as client:
+            resp = await client.get("https://search.brave.com/search", params={"q": query, "source": "web"})
+        if resp.status_code != 200:
+            return []
+        return _parse_li_anchors(resp.text)
+    except Exception as exc:
+        logger.warning("[WebDiscovery] Brave failed for %r: %s", query[:60], exc)
         return []
 
 # Trailing LinkedIn page-title suffixes to strip before parsing the name/headline.
@@ -75,7 +103,7 @@ _TITLE_HINTS = (
 )
 # Delay between DDG queries — the html endpoint returns 202 if hit too fast.
 _QUERY_DELAY_S = 2.5
-_MAX_202_RETRIES = 2
+_MAX_202_RETRIES = 4
 
 
 def _clean_title(raw: str) -> str:
@@ -168,16 +196,82 @@ def _profile_key(url: str) -> str:
 # pull fresh profiles is genuinely different queries. Expanding a country into
 # its hub cities multiplies distinct results without spending extra sources.
 _COUNTRY_CITIES = {
-    "india": ["Bangalore", "Mumbai", "Delhi", "Gurgaon", "Hyderabad", "Pune", "Chennai"],
-    "united states": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "usa": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "us": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin"],
-    "united kingdom": ["London", "Manchester", "Birmingham", "Edinburgh"],
-    "uk": ["London", "Manchester", "Birmingham", "Edinburgh"],
+    "india": ["Bangalore", "Mumbai", "Delhi", "Gurgaon", "Hyderabad", "Pune", "Chennai",
+              "Kolkata", "Noida", "Ahmedabad", "Jaipur"],
+    "united states": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+                      "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "usa": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+            "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "us": ["New York", "San Francisco", "Los Angeles", "Chicago", "Austin",
+           "Boston", "Seattle", "Atlanta", "Denver", "Miami"],
+    "united kingdom": ["London", "Manchester", "Birmingham", "Edinburgh", "Leeds", "Bristol", "Glasgow"],
+    "uk": ["London", "Manchester", "Birmingham", "Edinburgh", "Leeds", "Bristol", "Glasgow"],
     "uae": ["Dubai", "Abu Dhabi", "Sharjah"],
     "united arab emirates": ["Dubai", "Abu Dhabi", "Sharjah"],
     "singapore": ["Singapore"],
+    "france": ["Paris", "Lyon", "Toulouse", "Marseille", "Lille", "Bordeaux",
+               "Nantes", "Nice", "Strasbourg", "Montpellier", "Rennes"],
+    "germany": ["Berlin", "Munich", "Hamburg", "Frankfurt", "Cologne", "Stuttgart"],
+    "spain": ["Madrid", "Barcelona", "Valencia", "Seville"],
+    "italy": ["Milan", "Rome", "Turin", "Bologna"],
+    "netherlands": ["Amsterdam", "Rotterdam", "The Hague", "Utrecht"],
+    "canada": ["Toronto", "Vancouver", "Montreal", "Calgary", "Ottawa"],
+    "australia": ["Sydney", "Melbourne", "Brisbane", "Perth"],
 }
+
+# Map a country (any common name/alias) to LinkedIn's country subdomain. The
+# subdomain is the strongest geo filter: fr.linkedin.com is France-only, so
+# "Paris" resolves to Paris, France instead of Paris, Texas.
+_COUNTRY_SUBDOMAIN = {
+    "india": "in", "united states": "www", "usa": "www", "us": "www",
+    "united kingdom": "uk", "uk": "uk", "england": "uk", "scotland": "uk",
+    "uae": "ae", "united arab emirates": "ae", "singapore": "sg",
+    "france": "fr", "germany": "de", "spain": "es", "italy": "it",
+    "netherlands": "nl", "canada": "ca", "australia": "au", "ireland": "ie",
+    "switzerland": "ch", "belgium": "be", "sweden": "se", "brazil": "br",
+}
+
+# Map a city to its country so a city-only input still picks the right subdomain.
+_CITY_COUNTRY = {
+    "paris": "france", "lyon": "france", "toulouse": "france", "marseille": "france",
+    "london": "uk", "manchester": "uk", "birmingham": "uk", "edinburgh": "uk",
+    "dubai": "uae", "abu dhabi": "uae", "sharjah": "uae",
+    "singapore": "singapore",
+    "berlin": "germany", "munich": "germany", "hamburg": "germany", "frankfurt": "germany",
+    "madrid": "spain", "barcelona": "spain", "milan": "italy", "rome": "italy",
+    "amsterdam": "netherlands", "toronto": "canada", "vancouver": "canada", "montreal": "canada",
+    "sydney": "australia", "melbourne": "australia", "dublin": "ireland", "zurich": "switzerland",
+    "bangalore": "india", "bengaluru": "india", "mumbai": "india", "delhi": "india",
+    "new delhi": "india", "gurgaon": "india", "gurugram": "india", "hyderabad": "india",
+    "pune": "india", "chennai": "india", "kolkata": "india", "noida": "india",
+    "new york": "usa", "san francisco": "usa", "los angeles": "usa", "chicago": "usa",
+    "austin": "usa", "boston": "usa", "seattle": "usa",
+}
+
+
+def _resolve_geo(location: str) -> tuple[str, str, str | None]:
+    """Resolve a free-text location to (subdomain, place_for_query, country_name).
+
+    place_for_query is what to quote in the x-ray query (the city if given, else
+    the country). country_name lets us add a second country-level query."""
+    l = (location or "").strip()
+    low = l.lower()
+    # Direct country match.
+    if low in _COUNTRY_SUBDOMAIN:
+        country = low
+        return _COUNTRY_SUBDOMAIN[low], l, country
+    # "City, Country" — try the trailing part as a country.
+    parts = [p.strip() for p in re.split(r"[,/]", l) if p.strip()]
+    for p in reversed(parts):
+        if p.lower() in _COUNTRY_SUBDOMAIN:
+            return _COUNTRY_SUBDOMAIN[p.lower()], parts[0], p.lower()
+    # City lookup.
+    city = parts[0] if parts else l
+    country = _CITY_COUNTRY.get(city.lower())
+    if country:
+        return _COUNTRY_SUBDOMAIN.get(country, "www"), city, country
+    # Unknown — search globally with the place as a keyword.
+    return "www", l, None
 
 
 def _expand_locations(locations: list[str]) -> list[str]:
@@ -195,22 +289,100 @@ def _expand_locations(locations: list[str]) -> list[str]:
     return out or [""]
 
 
-def _build_queries(target_role: str, locations: list[str], keywords: str | None) -> list[str]:
-    """Diverse x-ray queries. DDG lite has no page offset, so query variety
-    (role x each city x keyword) is how we reach volume."""
-    role = (target_role or "").strip() or "Marketing Manager"
-    locs = _expand_locations([l for l in (locations or []) if l and l.strip()])
+async def _expand_roles(role: str, want_variants: bool) -> list[str]:
+    """Return [role] plus close title variants. For large target counts we ask
+    the LLM (chat.completions; needs a generous token budget on the reasoning
+    deployment) for ~12 synonyms/adjacent titles to widen the net. Falls back to
+    just the role on any failure. No Apollo — Azure tokens only."""
+    role = (role or "").strip() or "Marketing Manager"
+    if not want_variants:
+        return [role]
+    try:
+        from openai import AsyncAzureOpenAI
+        from core.config import settings
+        if not settings.AZURE_OPENAI_KEY:
+            return [role]
+        client = AsyncAzureOpenAI(
+            api_key=settings.AZURE_OPENAI_KEY,
+            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            api_version=settings.AZURE_OPENAI_API_VERSION,
+        )
+        prompt = (
+            f'Return ONLY a JSON array of 12 LinkedIn job-title variants closely related to '
+            f'"{role}" (synonyms plus adjacent seniority/function). No prose, no markdown.'
+        )
+        resp = await client.chat.completions.create(
+            model=settings.AZURE_OPENAI_LLM_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=4000,  # gpt-5-mini uses reasoning tokens first; needs large budget
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text).strip()
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1:
+            return [role]
+        import json
+        arr = json.loads(text[start:end + 1])
+        variants = [role] + [v.strip() for v in arr if isinstance(v, str) and v.strip()]
+        seen, out = set(), []
+        for v in variants:
+            k = v.lower()
+            if k not in seen:
+                seen.add(k); out.append(v)
+        return out[:13]
+    except Exception as exc:
+        logger.warning("[WebDiscovery] role expansion failed: %s", exc)
+        return [role]
+
+
+def _geo_for_queries(locations: list[str]) -> tuple[str, list[str]]:
+    """Resolve the user's location(s) to (subdomain, [cities to query]).
+
+    Crucially, a CITY input (e.g. 'paris') is fanned out across the whole
+    country's hub cities (Paris, Lyon, Marseille, …) — the country subdomain
+    keeps every query in-country, and the extra cities multiply volume so we can
+    reach a large target from a single 'role in city' search."""
+    locs = [l for l in (locations or []) if l and l.strip()]
+    if not locs:
+        return "www", [""]
+    sub, place, country = _resolve_geo(locs[0])
+    cities: list[str] = []
+    # User's explicitly named cities first.
+    for loc in locs:
+        _s, p, _c = _resolve_geo(loc)
+        if p and p not in cities:
+            cities.append(p)
+    # Then the country's hub cities for breadth.
+    if country and country in _COUNTRY_CITIES:
+        for c in _COUNTRY_CITIES[country]:
+            if c not in cities:
+                cities.append(c)
+    return sub, (cities or [place or ""])
+
+
+def _build_queries(role_variants: list[str], locations: list[str], keywords: str | None) -> list[str]:
+    """Geo-targeted x-ray queries: each role variant x the country subdomain x
+    its hub cities. The subdomain (e.g. fr.linkedin.com) is the geo filter, so
+    results stay in-country. DDG lite has no page offset, so role x city variety
+    is how we reach high volume."""
     kw = (keywords or "").strip()
+    roles = role_variants or ["Marketing Manager"]
+    sub, cities = _geo_for_queries(locations)
+    site = f"{sub}.linkedin.com/in" if sub != "www" else "linkedin.com/in"
 
     queries: list[str] = []
-    for loc in locs:
-        base = f'site:linkedin.com/in "{role}"'
-        queries.append(f'{base} {loc}'.strip())
-        if loc:
-            queries.append(f'"{role}" "{loc}" site:linkedin.com/in')
-        if kw:
-            queries.append(f'{base} "{kw}" {loc}'.strip())
-    queries.append(f'site:linkedin.com/in "{role}"')  # broad fallback
+    # Subdomain-only queries first (highest yield, most resilient to 202s).
+    for role in roles:
+        queries.append(f'site:{site} "{role}"')
+    # Then role x city.
+    for role in roles:
+        for city in cities:
+            if not city:
+                continue
+            base = f'site:{site} "{role}"'
+            queries.append(f'{base} "{city}"')
+            if kw:
+                queries.append(f'{base} "{kw}" "{city}"')
     # De-dupe while preserving order.
     seen, out = set(), []
     for q in queries:
@@ -221,12 +393,19 @@ def _build_queries(target_role: str, locations: list[str], keywords: str | None)
 
 
 async def _search_with_retry(query: str) -> list[dict]:
-    """DDG lite search with backoff. Each retry goes out on a fresh rotating
-    residential proxy IP, so a transient 202 usually clears on retry."""
+    """Query DDG lite + Brave in parallel and merge — two sources so one engine
+    throttling (DDG 202s) doesn't bottleneck volume. Retries with backoff if
+    BOTH return nothing (each retry rotates the residential proxy IP)."""
     for attempt in range(_MAX_202_RETRIES + 1):
-        res = await _ddg_lite_search(query)
-        if res:
-            return res
+        ddg, brave = await asyncio.gather(_ddg_lite_search(query), _brave_search(query))
+        merged, seen = [], set()
+        for item in (ddg + brave):
+            u = (item.get("url") or "").split("?")[0]
+            if u and u not in seen:
+                seen.add(u)
+                merged.append(item)
+        if merged:
+            return merged
         if attempt < _MAX_202_RETRIES:
             await asyncio.sleep(_QUERY_DELAY_S * (attempt + 1))
     return []
@@ -238,12 +417,20 @@ async def discover_leads_via_search(
     industries: list[str] | None = None,
     keywords: str | None = None,
     limit: int = 30,
+    on_batch=None,
 ) -> list[dict]:
-    """Find public LinkedIn profiles matching the ICP — no login, no Apollo."""
-    queries = _build_queries(target_role, locations or [], keywords)
+    """Find public LinkedIn profiles matching the ICP — no login, no Apollo.
+
+    on_batch: optional async callback(new_leads: list[dict]) invoked after each
+    query with the freshly-found leads, so long high-volume runs can persist
+    progressively instead of losing everything if interrupted."""
+    # For larger targets, widen the net with LLM-generated role variants so we
+    # can actually reach the requested volume from a single role + location.
+    role_variants = await _expand_roles(target_role, want_variants=limit > 40)
+    queries = _build_queries(role_variants, locations or [], keywords)
     logger.info(
-        "[WebDiscovery] role=%r locations=%r -> %d queries (target %d leads)",
-        target_role, locations, len(queries), limit,
+        "[WebDiscovery] role=%r (%d variants) locations=%r -> %d queries (target %d leads)",
+        target_role, len(role_variants), locations, len(queries), limit,
     )
 
     leads: list[dict] = []
@@ -253,6 +440,7 @@ async def discover_leads_via_search(
         if len(leads) >= limit:
             break
         results = await _search_with_retry(q)
+        batch: list[dict] = []
         for item in results:
             parsed = _parse_result(item)
             if not parsed:
@@ -262,8 +450,14 @@ async def discover_leads_via_search(
                 continue
             seen.add(key)
             leads.append(parsed)
+            batch.append(parsed)
             if len(leads) >= limit:
                 break
+        if batch and on_batch is not None:
+            try:
+                await on_batch(batch)
+            except Exception as exc:
+                logger.warning("[WebDiscovery] on_batch persist failed: %s", exc)
         # Be polite to DDG between queries.
         if i < len(queries) - 1:
             await asyncio.sleep(_QUERY_DELAY_S)
