@@ -286,7 +286,10 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
         if order:
             order_status_map = {
                 "running": "campaign_running",
-                "paused": "campaign_setup",
+                # A paused campaign was already built + launched — route the user to
+                # the dashboard (where pause reason + reconnect banners live), NOT back
+                # to /campaign/setup, which created an infinite "Resume -> setup" loop.
+                "paused": "campaign_running",
                 "completed": "completed",
             }
             new_order_status = order_status_map.get(target_status)
