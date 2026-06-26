@@ -289,6 +289,10 @@ class Coupon(Base):
     valid_until = Column(DateTime, nullable=True)
     distributor_name = Column(String(255))
     is_active = Column(Boolean, default=True, nullable=False)
+    # When set, this coupon is bound to a single buyer (per-recipient founder
+    # coupons minted by emailer-service). A leaked code can't be redeemed by
+    # anyone else. NULL = unbound (legacy blanket codes, partner codes, etc.).
+    user_id = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     payment_orders = relationship("PaymentOrder", back_populates="coupon")
