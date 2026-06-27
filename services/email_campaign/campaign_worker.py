@@ -289,13 +289,29 @@ def _enrich_upcoming(db) -> int:
             db.commit()
 
         else:  # exception or unknown
-            lead.enrichment_fail_count += 1
-            if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
-                email.enrichment_status = "skipped"
-                email.status = "failed"
-                email.error_message = f"Enrichment error: {result.error_detail[:200]}"
-            db.commit()
-            logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
+            # Before counting toward permanent failure quota, check if the error
+            # detail indicates a credit/rate/infra issue (transient) vs a genuine
+            # exception. Catches credit errors that slip past enrich_single_lead_classified.
+            detail_lower = result.error_detail.lower()
+            _credit_keywords = (
+                "insufficient credits", "credit limit", "upgrade your plan",
+                "not accessible", "apollo key exhausted", "no valid apollo key",
+                "402", "403",
+            )
+            if any(kw in detail_lower for kw in _credit_keywords):
+                email.enrichment_status = "credit_paused"
+                email.error_message = f"Apollo credit_exhausted (exception): {result.error_detail[:200]}"
+                db.commit()
+                logger.warning("[JIT-ENRICH] Credit exhaustion detected in exception path for lead %d: %s",
+                               lead.id, result.error_detail[:120])
+            else:
+                lead.enrichment_fail_count += 1
+                if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+                    email.enrichment_status = "skipped"
+                    email.status = "failed"
+                    email.error_message = f"Enrichment error: {result.error_detail[:200]}"
+                db.commit()
+                logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
 
         time.sleep(0.2)  # Apollo rate limit
 
