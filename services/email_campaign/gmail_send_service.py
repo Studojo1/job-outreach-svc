@@ -129,8 +129,13 @@ def _refresh_token_sync(email_account, db) -> str:
         return email_account.access_token
 
     if not email_account.refresh_token:
-        logger.warning("No refresh token for email account %d — using existing access token", email_account.id)
-        return email_account.access_token
+        logger.error(
+            "[GMAIL-AUTH] No refresh token for account %d (%s) — user must reconnect Gmail",
+            email_account.id, email_account.email_address,
+        )
+        raise RuntimeError(
+            f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
+        )
 
     logger.info("Refreshing expired Gmail token for account %d", email_account.id)
 
@@ -144,8 +149,33 @@ def _refresh_token_sync(email_account, db) -> str:
     })
 
     if not resp.ok:
-        logger.error("Token refresh failed: %d %s", resp.status_code, resp.text)
-        return email_account.access_token
+        try:
+            err_body = resp.json()
+            err_code = err_body.get("error", "")
+        except Exception:
+            err_code = ""
+            err_body = resp.text
+
+        # "invalid_grant" means the refresh token was revoked or expired by Google
+        # (e.g. user disconnected the app, or 7-day unverified-app limit hit).
+        # Any other error (5xx, quota, etc.) is transient.
+        if err_code == "invalid_grant":
+            logger.error(
+                "[GMAIL-AUTH] Refresh token revoked/expired for account %d (%s). "
+                "User must reconnect Gmail. Google error: %s",
+                email_account.id, email_account.email_address, err_body,
+            )
+            raise RuntimeError(
+                f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
+            )
+        else:
+            logger.error(
+                "[GMAIL-AUTH] Transient token refresh failure for account %d: HTTP %d %s",
+                email_account.id, resp.status_code, err_body,
+            )
+            raise RuntimeError(
+                f"Gmail token refresh failed (HTTP {resp.status_code}) — will retry next cycle"
+            )
 
     token_data = resp.json()
     email_account.access_token = token_data["access_token"]
