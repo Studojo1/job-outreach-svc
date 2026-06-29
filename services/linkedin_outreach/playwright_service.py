@@ -253,43 +253,41 @@ async def _find_connect_button(page):
         """)
         logger.info("Playwright: More dropdown items: %s", dropdown_items)
 
-        # Find Connect link by vanityName in the dropdown.
-        # LinkedIn's dropdown renders in a DOM portal so container-walk fails.
-        # Scoping by vanityName avoids PYMK "Connect" links on the same page.
         vanity = page.url.rstrip('/').split('/')[-1]
 
-        # Click the Connect link via real CDP mouse events (not JS .click() and not
-        # page.goto to the href). JS click generates isTrusted=false which LinkedIn
-        # ignores for invite links. page.goto to /preload/custom-invite/ does a full
-        # page load, losing the SPA context, so the invite modal never renders.
-        # Getting the bounding box and using page.mouse.click fires a trusted mouse
-        # event at the element's center, letting the SPA handle it client-side.
-        connect_handle = await page.evaluate_handle(f"""
-            () => {{
-                const link = document.querySelector('a[href*="custom-invite"][href*="{vanity}"]');
-                return link || null;
-            }}
-        """)
-        connect_elem = connect_handle.as_element()
-        if connect_elem:
+        # Click the dropdown "Connect" item with a REAL Playwright click — it fires
+        # a trusted event, auto-scrolls, and re-resolves the element, which manual
+        # mouse-coordinate clicks do NOT (those silently failed to trigger
+        # LinkedIn's React onClick). In the current UI the item is a
+        # menuitem/button whose visible text is exactly "Connect" (with a
+        # person-add icon), not an <a custom-invite> link. Try the most specific
+        # locators first; the legacy anchor stays as a fallback.
+        dd = page.locator(
+            '[class*="dropdown__content--is-open"], '
+            '[class*="artdeco-dropdown__content--is-open"], '
+            '[role="menu"]:not([hidden])'
+        ).first
+        candidates = [
+            dd.get_by_role("menuitem", name="Connect", exact=True),
+            dd.get_by_role("button", name="Connect", exact=True),
+            dd.get_by_text("Connect", exact=True),
+            page.get_by_role("menuitem", name="Connect", exact=True),
+            page.locator(f'a[href*="custom-invite"][href*="{vanity}"]'),
+        ]
+        for cand in candidates:
             try:
-                box = await connect_elem.bounding_box()
-                if box:
-                    cx = box["x"] + box["width"] / 2
-                    cy = box["y"] + box["height"] / 2
-                    logger.info("Playwright: clicking Connect link via mouse at (%.0f, %.0f) for %s", cx, cy, vanity)
-                    await page.mouse.click(cx, cy)
-                    await page.wait_for_timeout(2000)
-                    return "DROPDOWN_CONNECT_CLICKED"
-                else:
-                    logger.warning("Playwright: Connect link has no bounding box for %s — falling back to JS click", vanity)
-                    await page.evaluate("el => el.click()", connect_elem)
-                    await page.wait_for_timeout(2000)
-                    return "DROPDOWN_CONNECT_CLICKED"
-            except Exception as click_err:
-                logger.warning("Playwright: Connect link click failed for %s: %s", vanity, click_err)
+                t = cand.first
+                if await t.count() == 0 or not await t.is_visible():
+                    continue
+                await t.click(timeout=5000)
+                logger.info("Playwright: clicked dropdown Connect (locator) for %s", vanity)
+                await page.wait_for_timeout(2500)
+                return "DROPDOWN_CONNECT_CLICKED"
+            except Exception as ce:
+                logger.info("Playwright: dropdown Connect candidate failed (%s)", repr(ce)[:90])
+                continue
 
-        logger.info("Playwright: More dropdown opened but Connect link not found for vanity=%s", vanity)
+        logger.info("Playwright: More dropdown opened but Connect item not found for vanity=%s", vanity)
         await page.keyboard.press("Escape")
     except Exception as e:
         logger.info("Playwright: More dropdown search error: %s", e)
@@ -566,18 +564,17 @@ async def playwright_send_invitation(
                 else:
                     logger.info("Playwright: %s — Connect menuitem clicked, waiting for modal", slug)
 
-                # Wait up to 20s for the Send button — covers both in-page modal (fast)
-                # and navigation-then-modal cases (slower). After the button appears,
-                # wait another 2s for LinkedIn to enable it (custom-invite page loads
-                # invite context async and the button starts disabled).
+                # Wait up to 20s for the invite modal's Send button to appear.
+                # IMPORTANT: do NOT then sleep — the modal can race-close, so we
+                # click via a live locator below as soon as it's actionable.
                 try:
                     await page.wait_for_selector(
                         'button[aria-label="Send without a note"], button:has-text("Send without a note"), '
-                        'button[aria-label="Add a note"], button[aria-label="Send now"]',
+                        'button[aria-label="Add a note"], button[aria-label="Send now"], '
+                        'div[role="dialog"] button:has-text("Send")',
                         timeout=20000,
                     )
-                    logger.info("Playwright: %s — invite modal is open, waiting for button to enable", slug)
-                    await page.wait_for_timeout(2500)
+                    logger.info("Playwright: %s — invite modal is open", slug)
                 except Exception:
                     logger.info("Playwright: %s — modal not detected after 20s (url=%s)", slug, page.url)
 
@@ -639,41 +636,47 @@ async def playwright_send_invitation(
                     except Exception as note_err:
                         logger.warning("Playwright: %s — add-note failed (%s); sending without note", slug, note_err)
 
-                # Click Send. Labels differ between the note path ("Send") and the
-                # no-note path ("Send without a note"). Dump + click in one evaluate
-                # so the React SPA can't re-render between find and click. Scope to a
-                # dialog and require the button to be enabled.
-                send_labels = (["Send", "Send invitation", "Send now"] if note_added
-                               else ["Send without a note", "Send now"])
-                send_result = await page.evaluate("""
-                    (labels) => {
-                        const all = [...document.querySelectorAll('button')];
-                        const visible = b => b.offsetParent !== null && !b.disabled;
-                        const dump = all.filter(b => b.offsetParent !== null).map(b => ({
-                            label: b.getAttribute('aria-label') || '',
-                            text: (b.innerText || '').trim().slice(0, 40),
-                        }));
-                        const dialog = document.querySelector('div[role="dialog"]');
-                        const scope = dialog ? [...dialog.querySelectorAll('button')] : all;
-                        for (const lbl of labels) {
-                            const btn = scope.find(b => visible(b) && (
-                                (b.getAttribute('aria-label') || '').trim() === lbl ||
-                                (b.innerText || '').trim() === lbl
-                            ));
-                            if (btn) { btn.click(); return { action: 'send_clicked', button: lbl, dump }; }
-                        }
-                        return { action: 'not_found', dump };
-                    }
-                """, send_labels)
-                logger.info("Playwright: %s — send_result: action=%s note_added=%s dump=%s",
-                            slug, send_result.get("action"), note_added, send_result.get("dump"))
-
-                send_clicked = send_result.get("action") == "send_clicked"
-                if send_clicked:
-                    logger.info("Playwright: %s — invite button clicked: %s", slug, send_result.get("button"))
+                # Click Send via a LIVE Playwright locator (auto-waits for visible +
+                # enabled + stable and clicks ASAP) — the old "sleep then JS re-scan"
+                # raced the modal closing and missed the button entirely. Labels
+                # differ: note path = "Send"/"Send invitation"; no-note = "Send
+                # without a note". Try in priority order, scoped to the dialog.
+                if note_added:
+                    send_sels = [
+                        'div[role="dialog"] button:has-text("Send invitation")',
+                        'div[role="dialog"] button:has-text("Send")',
+                        'button[aria-label="Send invitation"]',
+                        'button[aria-label="Send now"]',
+                    ]
                 else:
-                    logger.warning("Playwright: %s — could not find Send button. Dump: %s",
-                                   slug, send_result.get("dump"))
+                    send_sels = [
+                        'button[aria-label="Send without a note"]',
+                        'button:has-text("Send without a note")',
+                        'button[aria-label="Send now"]',
+                        'button:has-text("Send now")',
+                        'div[role="dialog"] button:has-text("Send")',
+                    ]
+                send_clicked = False
+                for sel in send_sels:
+                    try:
+                        sb = page.locator(sel).first
+                        if await sb.count() == 0:
+                            continue
+                        await sb.click(timeout=6000)
+                        send_clicked = True
+                        logger.info("Playwright: %s — clicked Send via %r", slug, sel)
+                        break
+                    except Exception as se:
+                        logger.info("Playwright: %s — Send selector %r failed (%s)", slug, sel, repr(se)[:70])
+                        continue
+
+                if not send_clicked:
+                    dump = await page.evaluate("""
+                        () => [...document.querySelectorAll('button')]
+                          .filter(b => b.offsetParent !== null)
+                          .map(b => (b.getAttribute('aria-label')||'') + '|' + (b.innerText||'').trim().slice(0,30))
+                    """)
+                    logger.warning("Playwright: %s — could not click Send. Visible buttons: %s", slug, dump)
                     return {"ok": False, "error": "Send button not found after clicking Connect", "profile_urn": existing_urn}
 
                 # Wait for the invitation network request to complete
