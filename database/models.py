@@ -346,6 +346,8 @@ class LinkedInToken(Base):
     nonce = Column(Text, nullable=False)           # base64 GCM nonce (12 bytes)
     linkedin_name = Column(Text)
     proxy_session_id = Column(Text)               # sticky residential proxy session ID per account
+    proxy_country = Column(Text, nullable=True)   # ISO-2 country to pin the proxy exit to (geolocated at connect)
+    proxy_city = Column(Text, nullable=True)      # city (informational; Evomi targeting is country-level)
     # 'proxy' = cookies created via our Playwright login through proxy (works server-side).
     # 'extension' = cookies from browser extension bound to user's home IP — only the
     # extension itself can use them; server-side sends will hit a redirect loop.
