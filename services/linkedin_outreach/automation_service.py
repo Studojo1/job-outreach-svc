@@ -62,9 +62,13 @@ def _proxy(session_id: str | None = None) -> dict:
     user-session). Falls back to rotating IP when no session_id.
     """
     from core.config import settings
+    from services.linkedin_outreach.proxy_ctx import apply_current_country
     base_url = (settings.LINKEDIN_PROXY_URL or "").strip()
     if not base_url:
         return {}
+    # Pin the exit to the customer's country (from context), then add the
+    # per-user sticky session.
+    base_url = apply_current_country(base_url)
     return {"proxy": apply_sticky_session(base_url, session_id)}
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
@@ -1182,6 +1186,11 @@ class LinkedInAutomationDaemon:
 
                     session_id = token_row.proxy_session_id
                     cookies_blob = _decrypt_cookies_blob(token_row)
+
+                    # Pin all proxied requests for this campaign to the customer's
+                    # detected country (set at connect; falls back to no pin).
+                    from services.linkedin_outreach.proxy_ctx import proxy_country_var
+                    proxy_country_var.set(getattr(token_row, "proxy_country", None))
 
                     await self._process_campaign(db, campaign, li_at, jsessionid, session_id, cookies_blob)
 

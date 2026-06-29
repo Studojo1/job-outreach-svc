@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,28 @@ from services.linkedin_outreach.message_gen import generate_connection_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/linkedin/automation", tags=["linkedin-automation"])
+
+
+async def _geo_from_request(request: Request) -> tuple[str | None, str | None]:
+    """Geolocate the customer's real IP (behind the ingress) → (country, city),
+    and set the proxy-country context so this very login routes through the
+    customer's own country. Best-effort; never raises."""
+    try:
+        from services.linkedin_outreach.geo import client_ip_from_headers, geolocate
+        from services.linkedin_outreach.proxy_ctx import proxy_country_var
+        ip = client_ip_from_headers(
+            request.headers.get("x-forwarded-for"),
+            request.headers.get("x-real-ip"),
+            request.client.host if request.client else None,
+        )
+        country, city = await geolocate(ip)
+        if country:
+            proxy_country_var.set(country)
+            logger.info("LinkedIn connect: geolocated client %s -> %s/%s", ip, country, city)
+        return country, city
+    except Exception as e:
+        logger.warning("LinkedIn connect: geolocation failed: %s", e)
+        return None, None
 
 
 # ── Auth: email+password login ─────────────────────────────────────────────────
@@ -44,6 +66,8 @@ def _store_token(
     db, user_id: str, li_at: str, jsessionid: str, display_name: str | None,
     connection_mode: str = "proxy",
     cookies_blob: str | None = None,
+    proxy_country: str | None = None,
+    proxy_city: str | None = None,
 ):
     import secrets as _secrets
     from services.linkedin_outreach.crypto import encrypt as encrypt_single
@@ -68,6 +92,11 @@ def _store_token(
         existing.connection_mode = connection_mode
         existing.cookies_blob_enc = cookies_blob_enc
         existing.cookies_blob_nonce = cookies_blob_nonce
+        # Only overwrite the geolocated country when we actually have one — a
+        # later re-login without an IP shouldn't wipe a good value.
+        if proxy_country:
+            existing.proxy_country = proxy_country
+            existing.proxy_city = proxy_city
         existing.updated_at = datetime.utcnow()
     else:
         db.add(LinkedInToken(
@@ -80,6 +109,8 @@ def _store_token(
             connection_mode=connection_mode,
             cookies_blob_enc=cookies_blob_enc,
             cookies_blob_nonce=cookies_blob_nonce,
+            proxy_country=proxy_country,
+            proxy_city=proxy_city,
         ))
     db.commit()
 
@@ -97,12 +128,18 @@ def _store_token(
 @router.post("/login")
 async def login_with_credentials(
     body: LinkedInLoginRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Step 1 — attempt login. Returns ok=True on success, or challenge_required=True + session_key if PIN needed."""
     if not body.email or not body.password:
         raise HTTPException(status_code=400, detail="email and password are required")
+
+    # Geolocate the customer's real IP and pin the proxy exit to their country —
+    # both for THIS login (sets the context the proxy builders read) and stored
+    # on the token so all future sends egress from the same country.
+    proxy_country, proxy_city = await _geo_from_request(request)
 
     try:
         from core.config import settings as _s
@@ -116,10 +153,15 @@ async def login_with_credentials(
     if li_at is None:
         from services.linkedin_outreach.login import _pending
         challenge_type = _pending.get(session_key, {}).get("challenge_type", "pin")
+        # Stash the geo on the pending session so verify-pin/check-phone-tap can persist it.
+        if session_key and session_key in _pending:
+            _pending[session_key]["proxy_country"] = proxy_country
+            _pending[session_key]["proxy_city"] = proxy_city
         return {"ok": False, "challenge_required": True, "session_key": session_key, "challenge_type": challenge_type}
 
-    _store_token(db, current_user.id, li_at, jsessionid, display_name, cookies_blob=cookies_blob)
-    return {"ok": True, "linkedin_name": display_name}
+    _store_token(db, current_user.id, li_at, jsessionid, display_name, cookies_blob=cookies_blob,
+                 proxy_country=proxy_country, proxy_city=proxy_city)
+    return {"ok": True, "linkedin_name": display_name, "proxy_country": proxy_country}
 
 
 @router.post("/login/verify-pin")
@@ -132,12 +174,16 @@ async def verify_pin(
     if not body.session_key or not body.pin:
         raise HTTPException(status_code=400, detail="session_key and pin are required")
 
+    from services.linkedin_outreach.login import _pending
+    _pc = _pending.get(body.session_key, {}).get("proxy_country")
+    _pcity = _pending.get(body.session_key, {}).get("proxy_city")
     try:
         li_at, jsessionid, display_name = await linkedin_verify_pin(body.session_key, body.pin)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    _store_token(db, current_user.id, li_at, jsessionid, display_name)
+    _store_token(db, current_user.id, li_at, jsessionid, display_name,
+                 proxy_country=_pc, proxy_city=_pcity)
     return {"ok": True, "linkedin_name": display_name}
 
 
@@ -150,6 +196,9 @@ async def check_phone_tap(
     """Poll whether the user approved the phone notification. Returns ok=True when approved."""
     if not body.session_key:
         raise HTTPException(status_code=400, detail="session_key is required")
+    from services.linkedin_outreach.login import _pending
+    _pc = _pending.get(body.session_key, {}).get("proxy_country")
+    _pcity = _pending.get(body.session_key, {}).get("proxy_city")
     try:
         result = await linkedin_check_phone_tap(body.session_key)
     except ValueError as e:
@@ -157,7 +206,8 @@ async def check_phone_tap(
     if result is None:
         return {"ok": False, "still_waiting": True}
     li_at, jsessionid, display_name = result
-    _store_token(db, current_user.id, li_at, jsessionid, display_name)
+    _store_token(db, current_user.id, li_at, jsessionid, display_name,
+                 proxy_country=_pc, proxy_city=_pcity)
     return {"ok": True, "linkedin_name": display_name}
 
 
@@ -181,6 +231,7 @@ class LinkedInCookieLoginRequest(BaseModel):
 @router.post("/login/cookies")
 async def login_with_cookies(
     body: LinkedInCookieLoginRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -231,10 +282,13 @@ async def login_with_cookies(
     else:
         connection_mode = "extension" if body.is_extension else "proxy"
 
+    # Geolocate the customer's IP so proxy-mode sends egress from their country.
+    proxy_country, proxy_city = await _geo_from_request(request)
     _store_token(
         db, current_user.id, body.li_at, body.jsessionid.strip('"'), display_name,
         connection_mode=connection_mode,
         cookies_blob=cookies_blob,
+        proxy_country=proxy_country, proxy_city=proxy_city,
     )
     return {
         "ok": True,

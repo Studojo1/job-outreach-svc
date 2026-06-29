@@ -25,10 +25,11 @@ def _httpx_proxy(proxy_url: str | None, session_id: str | None = None) -> dict |
     """
     from core.config import settings
     from services.linkedin_outreach.automation_service import apply_sticky_session
+    from services.linkedin_outreach.proxy_ctx import apply_current_country
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
-    url = apply_sticky_session(url, session_id)
+    url = apply_sticky_session(apply_current_country(url), session_id)
     # Evomi host:port:user:pass format
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
         without_scheme = url[len("http://"):]
@@ -108,10 +109,11 @@ def _parse_proxy(proxy_url: str | None, session_id: str | None = None) -> dict |
     """
     from core.config import settings
     from services.linkedin_outreach.automation_service import apply_sticky_session
+    from services.linkedin_outreach.proxy_ctx import apply_current_country
     url = (proxy_url or "").strip() or (settings.LINKEDIN_PROXY_URL or "").strip()
     if not url:
         return None
-    url = apply_sticky_session(url, session_id)
+    url = apply_sticky_session(apply_current_country(url), session_id)
 
     # Evomi generator emits host:port:user:pass — convert to standard http://user:pass@host:port
     if url.startswith("http://") and "@" not in url and url.count(":") >= 3:
