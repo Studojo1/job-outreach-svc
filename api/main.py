@@ -85,6 +85,8 @@ def on_startup():
     logger.info("Job outreach service started")
     from services.linkedin_outreach.automation_service import start_automation_daemon
     start_automation_daemon()
+    from services.payment_reconciler import start_reconciler
+    start_reconciler()
 
 
 @app.on_event("shutdown")
@@ -95,6 +97,8 @@ def on_shutdown():
     ph_shutdown()
     from services.linkedin_outreach.automation_service import stop_automation_daemon
     stop_automation_daemon()
+    from services.payment_reconciler import stop_reconciler
+    stop_reconciler()
 
 
 @app.get("/health")
