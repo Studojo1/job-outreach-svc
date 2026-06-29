@@ -97,22 +97,60 @@ async def _linkedin_login_attempt(
         #   Variant B (React):   obfuscated IDs (:r0:), with hidden duplicate fields.
         # Fill the classic IDs when present, otherwise target the VISIBLE inputs so
         # we don't fill a hidden duplicate (which silently never submits).
+        # Fill credentials. LinkedIn's newer React login UI no longer uses the
+        # stable #username/#password ids (inputs get React ids like «r0»), so we
+        # target the visible email/password inputs. Click-then-fill so the field
+        # is focused and the React state updates.
+        pw_loc = None
         if await page.query_selector("#username"):
             await page.fill("#username", email)
             await page.fill("#password", password)
+            pw_loc = page.locator("#password")
         else:
-            await page.locator("input[type=email]:visible, input[autocomplete=username]:visible").first.fill(email)
-            await page.locator("input[type=password]:visible").first.fill(password)
+            email_loc = page.locator(
+                "input[type=email]:visible, input[autocomplete=username]:visible, "
+                "input[name=session_key]:visible"
+            ).first
+            pw_loc = page.locator(
+                "input[type=password]:visible, input[autocomplete=current-password]:visible, "
+                "input[name=session_password]:visible"
+            ).first
+            await email_loc.click()
+            await email_loc.fill(email)
+            await pw_loc.click()
+            await pw_loc.fill(password)
 
-        # Click the visible Sign in button (role-based works across both variants).
+        # Submit. LinkedIn's new React login has NO type=submit button and no
+        # form-submit — the real button is <button type="button">Sign in</button>
+        # with an onClick handler, and the page ALSO has "Sign in with Apple" and
+        # "Sign in with a passkey". So:
+        #   - pressing Enter does nothing (no form submit),
+        #   - name="Sign in" without exact match also hits "Sign in with Apple".
+        # Match the accessible name EXACTLY; fall back to an exact-innerText JS click.
+        clicked = False
         try:
-            signin = page.get_by_role("button", name="Sign in")
-            if await signin.count():
-                await signin.first.click()
-            else:
-                await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
+            btn = page.get_by_role("button", name="Sign in", exact=True)
+            if await btn.count():
+                await btn.first.click()
+                clicked = True
         except Exception:
-            await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
+            clicked = False
+        if not clicked:
+            try:
+                clicked = await page.evaluate(
+                    "() => { const b=[...document.querySelectorAll('button')]"
+                    ".find(x => (x.innerText||'').trim()==='Sign in' && x.offsetParent!==null);"
+                    " if (b) { b.click(); return true; } return false; }"
+                )
+            except Exception:
+                clicked = False
+        if not clicked:
+            # Last-resort fallbacks for the old form variants.
+            try:
+                await page.click('[data-litms-control-urn="login-submit"], [type="submit"]')
+            except Exception:
+                if pw_loc is not None:
+                    await pw_loc.press("Enter")
         # networkidle can take a while via residential proxy due to LinkedIn analytics scripts
         try:
             await page.wait_for_load_state("networkidle", timeout=45000)
