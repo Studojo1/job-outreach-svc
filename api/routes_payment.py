@@ -160,6 +160,9 @@ async def validate_coupon(
     # Support both plan_id (new) and tier (legacy)
     if request.plan_id:
         plan = get_plan(request.plan_id, settings.RAZORPAY_TEST_MODE)
+        # Coupons apply to the LinkedIn weekly plan only — never the monthly plan.
+        if plan.plan_type == "linkedin" and plan.plan_id != "linkedin_weekly":
+            raise HTTPException(status_code=400, detail="Coupons apply to the weekly plan only.")
         original = plan.price_inr if request.currency.upper() == "INR" else plan.price_usd
     elif request.tier:
         pricing = get_tier_pricing(request.tier, settings.RAZORPAY_TEST_MODE)
@@ -251,6 +254,9 @@ async def create_order(
                 valid = False
             # Per-recipient founder coupons are bound to one buyer.
             if coupon.user_id and str(coupon.user_id) != str(current_user.id):
+                valid = False
+            # Coupons apply to the LinkedIn weekly plan only — never the monthly plan.
+            if plan.plan_type == "linkedin" and resolved_plan_id != "linkedin_weekly":
                 valid = False
             if valid:
                 amount = apply_coupon(amount, coupon.discount_type, float(coupon.discount_value))

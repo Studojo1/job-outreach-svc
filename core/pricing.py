@@ -27,9 +27,10 @@ PLANS: list[PlanTier] = [
     PlanTier("email_350",    "email",    "Pro",     350, 0,   2700,  232500),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   5000,  346500),
     # ── LinkedIn-only ───────────────────────────────────────────────────────
-    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   2000,  182500),
-    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   2700,  232500),
-    PlanTier("linkedin_500", "linkedin", "Scale",   0, 500,   5000,  346500),
+    # Two cadences only. Weekly is the coupon-eligible plan (Free100 / Oauth100);
+    # monthly never accepts coupons (enforced in routes_payment.py).
+    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,   800,   50000, duration_days=7),
+    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 2500,  180000, duration_days=30),
     # ── Both channels ───────────────────────────────────────────────────────
     PlanTier("both_200",     "both",     "Starter", 200, 200, 3500,  299900),
     PlanTier("both_350",     "both",     "Growth",  350, 350, 4500,  399900),
@@ -42,9 +43,8 @@ TEST_PLANS: list[PlanTier] = [
     PlanTier("email_200",    "email",    "Growth",  200, 0,   100,   9000),
     PlanTier("email_350",    "email",    "Pro",     350, 0,   100,   9000),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   100,   9000),
-    PlanTier("linkedin_200", "linkedin", "Starter", 0, 200,   100,   9000),
-    PlanTier("linkedin_350", "linkedin", "Growth",  0, 350,   100,   9000),
-    PlanTier("linkedin_500", "linkedin", "Scale",   0, 500,   100,   9000),
+    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,  100,   9000, duration_days=7),
+    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 100,   9000, duration_days=30),
     PlanTier("both_200",     "both",     "Starter", 200, 200, 100,   9000),
     PlanTier("both_350",     "both",     "Growth",  350, 350, 100,   9000),
     PlanTier("both_500",     "both",     "Scale",   500, 500, 100,   9000),
