@@ -664,19 +664,52 @@ async def create_campaign_from_order(
     # Only reached when the user has no existing campaign at all.
     # Now we need a candidate and credits.
 
+    # Candidate: prefer the one on the order, but fall back to the user's most
+    # recent candidate that has discovered leads. The order's candidate_id can be
+    # NULL for coupon/free orders (create-order doesn't always set it), and we'd
+    # rather build the campaign from the user's real leads than dead-end here.
     candidate_id = order.candidate_id
     if not candidate_id:
-        raise HTTPException(status_code=400, detail="Order has no candidate profile linked")
+        fallback = (
+            db.query(Candidate.id)
+            .join(Lead, Lead.candidate_id == Candidate.id)
+            .filter(Candidate.user_id == current_user.id)
+            .group_by(Candidate.id, Candidate.created_at)
+            .order_by(Candidate.created_at.desc())
+            .first()
+        )
+        if fallback:
+            candidate_id = fallback.id
+            order.candidate_id = candidate_id  # heal the order link
+            logger.info("from-order: order %s had no candidate; using latest with leads: %s", order.id, candidate_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No leads found yet. Upload your resume and run lead discovery first.",
+            )
 
-    # Credits check. Fall back to plan_type for orders whose
-    # linkedin_credits_reserved column was never backfilled.
+    # Credits: prefer the reserved amount; else derive from the user's LinkedIn
+    # PaymentOrder plan; else a sensible default. The user is explicitly in the
+    # LinkedIn flow, so never hard-fail on plan_type here.
     linkedin_limit = getattr(order, "linkedin_credits_reserved", 0) or 0
     if linkedin_limit == 0:
-        plan_type = getattr(order, "plan_type", "email") or "email"
-        if plan_type in ("linkedin", "both"):
-            linkedin_limit = 200
-        else:
-            raise HTTPException(status_code=400, detail="No LinkedIn credits reserved for this order")
+        try:
+            from database.models import PaymentOrder
+            from core.pricing import get_plan as _get_plan
+            from core.config import settings as _settings
+            po = (
+                db.query(PaymentOrder)
+                .filter(PaymentOrder.user_id == current_user.id,
+                        PaymentOrder.plan_id.ilike("linkedin%"))
+                .order_by(PaymentOrder.id.desc())
+                .first()
+            )
+            if po and po.plan_id:
+                linkedin_limit = _get_plan(po.plan_id, _settings.RAZORPAY_TEST_MODE).linkedin_credits or 0
+        except Exception as _e:
+            logger.warning("from-order: could not derive credits from PaymentOrder: %s", _e)
+        if linkedin_limit == 0:
+            linkedin_limit = 200  # safe default for the LinkedIn connect flow
 
     cand = db.query(Candidate).filter(Candidate.id == candidate_id, Candidate.user_id == current_user.id).first()
     if not cand:
