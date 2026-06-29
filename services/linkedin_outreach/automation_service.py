@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def _is_ist_sending_window() -> bool:
-    """Return True if current UTC time falls within 9am–6pm IST (UTC+5:30)."""
+    """Return True if current UTC time falls within 9am-7pm IST (UTC+5:30)."""
     ist = timezone(timedelta(hours=5, minutes=30))
     hour = datetime.now(ist).hour
-    return 9 <= hour < 18
+    return 9 <= hour < 19
 
 
 def apply_sticky_session(proxy_url: str, session_id: str | None) -> str:
@@ -313,6 +313,20 @@ async def send_connection_request(
     )
     # normInvitations (primary, still supported) uses growth.invitation namespace.
     # relationships/invitations (fallback) uses relationships.invitation namespace.
+    # verifyQuotaAndCreateV2 (current voyager endpoint). The old normInvitations /
+    # relationships/invitations endpoints now 301/400 for most profiles, so this
+    # is the primary path. Verified live: sends note-free invites at HTTP 200 even
+    # for "Follow-primary" creator profiles where the Connect button is buried in
+    # the More (...) menu and the browser Send modal never appears.
+    v2_payload = {
+        "invitee": {
+            "inviteeUnion": {
+                "memberProfile": f"urn:li:fsd_profile:{profile_urn}",
+            }
+        },
+    }
+    if note:
+        v2_payload["customMessage"] = note[:300]
     norm_payload = {
         "trackingId": _tracking_id(),
         "message": note[:300] if note else "",
@@ -408,6 +422,7 @@ async def send_connection_request(
             # normInvitations (growth.invitation namespace) is the current supported endpoint.
             # relationships/invitations (relationships.invitation namespace) is the fallback.
             attempts = [
+                ("https://www.linkedin.com/voyager/api/voyagerRelationshipsDashMemberRelationships?action=verifyQuotaAndCreateV2", v2_payload),
                 ("https://www.linkedin.com/voyager/api/growth/normInvitations", norm_payload),
                 ("https://www.linkedin.com/voyager/api/relationships/invitations", rel_payload),
             ]
