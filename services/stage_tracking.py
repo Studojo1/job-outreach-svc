@@ -45,21 +45,47 @@ def get_or_create_active_order(
     db: Session,
     user_id: str,
     candidate_id: Optional[int] = None,
+    campaign_id: Optional[int] = None,
 ) -> OutreachOrder:
-    """Return the user's most recent non-completed order, creating one if needed.
+    """Return the order to record this stage against, creating one if needed.
+
+    Resolution order:
+      1. If campaign_id is given, the order that already owns that campaign.
+         This is authoritative for campaign-stage events (launch/pause/complete)
+         so the timestamp lands on the *right* order even when the user has
+         multiple orders (e.g. an abandoned newer order created after launch).
+      2. Otherwise the user's most recent non-completed order.
+      3. Otherwise a new order.
 
     Used by stage 1 (resume upload) and any other entry point that may run
     before an order exists. Idempotent — never creates duplicate active orders.
     """
-    order = (
-        db.query(OutreachOrder)
-        .filter(
-            OutreachOrder.user_id == user_id,
-            OutreachOrder.status != "completed",
+    order = None
+
+    # 1. Campaign-stage events: bind to the order that owns this campaign.
+    if campaign_id is not None:
+        order = (
+            db.query(OutreachOrder)
+            .filter(
+                OutreachOrder.user_id == user_id,
+                OutreachOrder.campaign_id == campaign_id,
+            )
+            .order_by(OutreachOrder.created_at.asc())
+            .first()
         )
-        .order_by(OutreachOrder.created_at.desc())
-        .first()
-    )
+
+    # 2. Fall back to the most recent non-completed order.
+    if order is None:
+        order = (
+            db.query(OutreachOrder)
+            .filter(
+                OutreachOrder.user_id == user_id,
+                OutreachOrder.status != "completed",
+            )
+            .order_by(OutreachOrder.created_at.desc())
+            .first()
+        )
+
     if order:
         if candidate_id and order.candidate_id != candidate_id:
             order.candidate_id = candidate_id
@@ -101,7 +127,9 @@ def mark_stage(
         logger.warning("[STAGE] Unknown stage=%s, ignoring", stage)
         return None
 
-    order = get_or_create_active_order(db, user_id, candidate_id=candidate_id)
+    order = get_or_create_active_order(
+        db, user_id, candidate_id=candidate_id, campaign_id=campaign_id
+    )
 
     if candidate_id and not order.candidate_id:
         order.candidate_id = candidate_id
