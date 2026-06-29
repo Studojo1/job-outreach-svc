@@ -788,6 +788,26 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
             oo.linkedin_credits_reserved = linkedin_credits
             oo.plan_type = plan_type
 
+    # Safety net: a paid order must never stay frozen behind the payment step.
+    # The frontend normally advances order.status, but if that call is missed the
+    # user is stuck at an early stage and the app re-shows "pay" (support ticket #19,
+    # Ayesha: paid + credited but order frozen at 'created'). Always promote an
+    # early-stage order to campaign_setup on payment so they can build their campaign.
+    if order.outreach_order_id:
+        oo2 = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
+        _FROZEN = ("created", "leads_generating", "leads_ready", "enriching", "enrichment_complete")
+        if oo2 and oo2.status in _FROZEN:
+            _prev = oo2.status
+            oo2.status = "campaign_setup"
+            log = list(oo2.action_log or [])
+            log.append({
+                "ts": datetime.utcnow().isoformat(),
+                "msg": f"Auto-advanced {_prev} -> campaign_setup on payment (status was frozen behind payment)",
+            })
+            oo2.action_log = log
+            oo2.updated_at = datetime.utcnow()
+            logger.info("[PAYMENT] Advanced outreach_order %s (%s -> campaign_setup) on payment finalize", oo2.id, _prev)
+
 
 def _order_plan_type(order: PaymentOrder) -> str:
     if order.plan_id:
