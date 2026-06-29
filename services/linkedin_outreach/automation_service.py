@@ -73,10 +73,26 @@ def _proxy(session_id: str | None = None) -> dict:
 
 # Conservative daily limit per account (LinkedIn's soft limit is ~100/week)
 MAX_DAILY_REQUESTS = 25
-# Gap between each send (seconds)
-MIN_GAP_SECONDS = 90
-MAX_GAP_SECONDS = 240
+# Minimum spacing between invites: at most one every ~5 minutes (with jitter up
+# to ~9 min) so activity never looks scripted. Enforced both by this in-loop gap
+# AND by a last-sent-at gate per tick (see _process_campaign), so the spacing
+# holds across daemon ticks too.
+MIN_GAP_SECONDS = 300
+MAX_GAP_SECONDS = 540
+# Hard daily ceiling — the per-day cap is randomized strictly below this.
+DAILY_HARD_MAX = 20
+# Minimum seconds between two invites for the same campaign (account safety).
+MIN_SEND_SPACING_SECONDS = 300
 
+def _varied_daily_cap(campaign_id: int) -> int:
+    """Per-day randomized daily invite cap — always strictly below DAILY_HARD_MAX
+    (20) and varied day-to-day so the account never sends the same round number
+    every day. Stable within a UTC day (seeded by date + campaign id) so it
+    doesn't jitter between ticks. Range: 12..19."""
+    import hashlib
+    seed = f"{datetime.utcnow().date().isoformat()}:{campaign_id}"
+    # 13..19 inclusive — varied, never the round 20.
+    return 13 + (int(hashlib.md5(seed.encode()).hexdigest(), 16) % 7)
 # Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
 _last_accept_check: dict[int, float] = {}
 # Consecutive auth-failure count per campaign. Reset on any success.
@@ -1228,7 +1244,11 @@ class LinkedInAutomationDaemon:
             .count()
         )
 
-        remaining_today = campaign.daily_limit - sent_today
+        # Daily cap: randomized per day (13..19), always < 20 and varied so the
+        # account never sends the same round number daily. This governs over the
+        # campaign's stored daily_limit.
+        daily_cap = _varied_daily_cap(campaign.id)
+        remaining_today = daily_cap - sent_today
         weekly_limit = campaign.weekly_invite_limit or 95
         remaining_this_week = weekly_limit - sent_this_week
         # The lower of the two budgets wins. Weekly cap is the LinkedIn-safety
@@ -1240,8 +1260,26 @@ class LinkedInAutomationDaemon:
                 campaign.id, sent_this_week, weekly_limit,
             )
 
+        # Enforce ≥5-min spacing ACROSS ticks: if this campaign sent an invite in
+        # the last MIN_SEND_SPACING_SECONDS, skip sending this tick. Combined with
+        # the per-tick cap of 1 below, this guarantees at most ~1 invite / 5 min.
+        _last_row = (
+            db.query(LinkedInConnectionRequest.sent_at)
+            .filter(
+                LinkedInConnectionRequest.campaign_id == campaign.id,
+                LinkedInConnectionRequest.status.in_(sent_statuses),
+                LinkedInConnectionRequest.sent_at.isnot(None),
+            )
+            .order_by(LinkedInConnectionRequest.sent_at.desc())
+            .first()
+        )
+        last_sent = _last_row[0] if _last_row else None
+        spacing_ok = True
+        if last_sent and (datetime.utcnow() - last_sent).total_seconds() < MIN_SEND_SPACING_SECONDS:
+            spacing_ok = False
+
         # Phase 1: send pending connection requests (IST business hours only)
-        if budget > 0 and _is_ist_sending_window():
+        if budget > 0 and spacing_ok and _is_ist_sending_window():
             remaining_today = budget  # treat the lower bound as the effective cap
             # Only pull "pending" — NOT "error". Previously errors were re-
             # queued every tick, creating a hot loop on unresolvable leads
@@ -1255,7 +1293,7 @@ class LinkedInAutomationDaemon:
                     LinkedInConnectionRequest.campaign_id == campaign.id,
                     LinkedInConnectionRequest.status == "pending",
                 )
-                .limit(min(remaining_today, 5))  # max 5 per daemon tick
+                .limit(min(remaining_today, 1))  # 1 per tick; spacing gate enforces ≥5-min cadence
                 .all()
             )
 
