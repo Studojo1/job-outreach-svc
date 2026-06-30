@@ -306,7 +306,11 @@ SOURCE_SCRAPERS = {
     "naukri": _src_naukri,    # best-effort — often reCAPTCHA-gated
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
-# Sources that reliably return data without a paid API / captcha solver.
-RELIABLE_SOURCES = ["linkedin", "themuse", "remotive", "remoteok", "arbeitnow", "instahyre", "jobicy", "weworkremotely"]
+# Sources that reliably return keyword-relevant data with no auth / captcha / paid API.
+RELIABLE_SOURCES = ["linkedin", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "weworkremotely"]
+# Beta: auth-/bot-walled or no real keyword search — kept for when an aggregator
+# key (e.g. Adzuna / SerpApi) is wired. instahyre's public API ignores the query;
+# indeed is Cloudflare-blocked; naukri requires reCAPTCHA.
+BETA_SOURCES = ["instahyre", "indeed", "naukri"]
 # Defaults for a new search.
-DEFAULT_SOURCES = ["linkedin", "themuse", "remotive", "instahyre"]
+DEFAULT_SOURCES = ["linkedin", "themuse", "remotive", "jobicy"]
