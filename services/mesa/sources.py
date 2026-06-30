@@ -35,8 +35,10 @@ def _kw_match(text: str, keywords: str) -> bool:
     return any(t in low for t in toks)
 
 
-def _get(url: str):
-    return httpx.get(url, headers=_H, timeout=_T, verify=False, follow_redirects=True)
+def _get(url: str, headers: dict | None = None, proxy: bool = False):
+    from core.config import settings
+    px = ((getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None) if proxy else None
+    return httpx.get(url, headers=headers or _H, timeout=_T, verify=False, proxy=px, follow_redirects=True)
 
 
 def _src_linkedin(keywords, location, date_posted, workplace_types, experience_levels, max_results):
@@ -144,6 +146,152 @@ def _src_themuse(keywords, location, *_):
     return list(seen.values())
 
 
+def _src_instahyre(keywords, location, *_):
+    out = []
+    url = "https://www.instahyre.com/api/v1/job_search/?job_type=0"
+    if keywords:
+        url += "&q=" + urllib.parse.quote(keywords)
+    try:
+        h = {**_H, "Referer": "https://www.instahyre.com/search-jobs/"}
+        for o in _get(url, headers=h).json().get("objects", []):
+            title = o.get("title", "")
+            if not _kw_match(title, keywords):
+                continue
+            emp = o.get("employer")
+            company = ""
+            if isinstance(emp, dict):
+                company = emp.get("company_name") or emp.get("name") or ""
+            locs = o.get("locations")
+            parts = []
+            if isinstance(locs, list):
+                for x in locs:
+                    name = x if isinstance(x, str) else (x.get("name", "") if isinstance(x, dict) else "")
+                    if name and not name.startswith("/"):  # skip resource URIs
+                        parts.append(name)
+            loc = ", ".join(parts)
+            pub = o.get("public_url", "") or ""
+            # InstaHyre denormalises company/city into the slug: ...-at-{company}-{city}/
+            if not company and "-at-" in pub:
+                company = pub.rstrip("/").split("-at-")[-1].replace("-", " ").title()
+            out.append({
+                "external_id": str(o.get("id")), "title": title, "company": company or "—",
+                "location": loc or "India", "posted_date": None,
+                "url": ("https://www.instahyre.com" + pub) if pub.startswith("/") else pub,
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] instahyre failed: %s", e)
+    return out
+
+
+def _src_jobicy(keywords, location, *_):
+    url = "https://jobicy.com/api/v2/remote-jobs?count=50"
+    toks = (keywords or "").split()
+    if toks:
+        url += "&tag=" + urllib.parse.quote(toks[0])  # server-side tag filter
+    out = []
+    try:
+        for j in _get(url).json().get("jobs", []):
+            out.append({
+                "external_id": str(j.get("id")), "title": j.get("jobTitle", ""),
+                "company": j.get("companyName", ""), "location": j.get("jobGeo") or "Remote",
+                "posted_date": (j.get("pubDate") or "")[:10], "url": j.get("url", ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] jobicy failed: %s", e)
+    return out
+
+
+def _src_weworkremotely(keywords, location, *_):
+    import html
+    import re
+    out = []
+    try:
+        rss = _get("https://weworkremotely.com/remote-jobs.rss", headers={**_H, "Accept": "application/rss+xml"}).text
+        for m in re.finditer(r"<item>(.*?)</item>", rss, re.S):
+            blk = m.group(1)
+
+            def tag(t):
+                mm = re.search(rf"<{t}>(.*?)</{t}>", blk, re.S)
+                return html.unescape(mm.group(1).strip()) if mm else ""
+            title = tag("title")
+            if not _kw_match(title, keywords):
+                continue
+            link = tag("link")
+            company, role = (title.split(":", 1) + [""])[:2] if ":" in title else ("", title)
+            out.append({
+                "external_id": link or title, "title": (role or title).strip(),
+                "company": company.strip(), "location": tag("region") or "Remote",
+                "posted_date": tag("pubDate")[:16], "url": link,
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] weworkremotely failed: %s", e)
+    return out
+
+
+def _src_indeed(keywords, location, *_):
+    """Best-effort: Indeed is Cloudflare-protected and usually returns 403 from
+    datacenter/residential IPs. Parses the embedded job-card JSON when it does
+    get through; returns [] (gracefully) when blocked."""
+    import json as _json
+    import re
+    dom = "in.indeed.com" if (location and any(c in location.lower() for c in
+          ("india", "bangalore", "bengaluru", "mumbai", "delhi", "hyderabad", "pune", "chennai", "gurgaon", "noida"))) else "www.indeed.com"
+    url = f"https://{dom}/jobs?q={urllib.parse.quote(keywords or '')}&sort=date"
+    if location:
+        url += "&l=" + urllib.parse.quote(location)
+    out = []
+    try:
+        r = _get(url, headers={**_H, "Accept": "text/html"}, proxy=True)
+        if r.status_code != 200:
+            logger.info("[MESA] indeed blocked (HTTP %d)", r.status_code)
+            return []
+        m = re.search(r'mosaic-provider-jobcards"\]\s*=\s*(\{.*?\});', r.text)
+        if not m:
+            return []
+        results = (_json.loads(m.group(1)).get("metaData", {})
+                   .get("mosaicProviderJobCardsModel", {}).get("results", []))
+        for j in results:
+            jk = j.get("jobkey")
+            if not jk:
+                continue
+            out.append({
+                "external_id": jk, "title": j.get("title", ""), "company": j.get("company", ""),
+                "location": j.get("formattedLocation", ""), "posted_date": None,
+                "url": f"https://{dom}/viewjob?jk={jk}",
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] indeed failed: %s", e)
+    return out
+
+
+def _src_naukri(keywords, location, *_):
+    """Best-effort: Naukri's job API requires reCAPTCHA (HTTP 406) for bot
+    traffic; returns [] gracefully when gated."""
+    url = ("https://www.naukri.com/jobapi/v3/search?noOfResults=20&urlType=search_by_keyword"
+           f"&searchType=adv&keyword={urllib.parse.quote(keywords or '')}&pageNo=1")
+    if location:
+        url += "&location=" + urllib.parse.quote(location)
+    h = {**_H, "appid": "109", "systemid": "Naukri", "clientid": "d3skt0p", "Referer": "https://www.naukri.com/"}
+    out = []
+    try:
+        r = _get(url, headers=h, proxy=True)
+        if r.status_code != 200:
+            logger.info("[MESA] naukri blocked (HTTP %d)", r.status_code)
+            return []
+        for j in r.json().get("jobDetails", []):
+            ph = j.get("placeholders") or []
+            loc = next((p.get("label", "") for p in ph if p.get("type") == "location"), "")
+            out.append({
+                "external_id": str(j.get("jobId")), "title": j.get("title", ""),
+                "company": j.get("companyName", ""), "location": loc,
+                "posted_date": j.get("footerPlaceholderLabel", ""),
+                "url": "https://www.naukri.com" + (j.get("jdURL", "") or ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] naukri failed: %s", e)
+    return out
+
+
 # Registry — every value has the same signature.
 SOURCE_SCRAPERS = {
     "linkedin": _src_linkedin,
@@ -151,7 +299,14 @@ SOURCE_SCRAPERS = {
     "remotive": _src_remotive,
     "remoteok": _src_remoteok,
     "arbeitnow": _src_arbeitnow,
+    "instahyre": _src_instahyre,
+    "jobicy": _src_jobicy,
+    "weworkremotely": _src_weworkremotely,
+    "indeed": _src_indeed,    # best-effort — often Cloudflare-blocked
+    "naukri": _src_naukri,    # best-effort — often reCAPTCHA-gated
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
-# Sensible defaults for a new search: LinkedIn + the broadest aggregators.
-DEFAULT_SOURCES = ["linkedin", "themuse", "remotive"]
+# Sources that reliably return data without a paid API / captcha solver.
+RELIABLE_SOURCES = ["linkedin", "themuse", "remotive", "remoteok", "arbeitnow", "instahyre", "jobicy", "weworkremotely"]
+# Defaults for a new search.
+DEFAULT_SOURCES = ["linkedin", "themuse", "remotive", "instahyre"]
