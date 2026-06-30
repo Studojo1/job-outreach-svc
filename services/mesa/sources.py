@@ -43,7 +43,7 @@ def _get(url: str, headers: dict | None = None, proxy: bool = False):
 
 def _src_linkedin(keywords, location, date_posted, workplace_types, experience_levels, max_results):
     jobs = _linkedin_scrape(keywords, location, date_posted, workplace_types,
-                            experience_levels, max_pages=max(1, min(6, max_results // 10)))
+                            experience_levels, max_pages=max(2, min(40, max_results // 10)))
     return [{
         "external_id": j["linkedin_job_id"], "title": j["title"], "company": j["company"],
         "location": j["location"], "posted_date": j.get("posted_date"), "url": j["url"],

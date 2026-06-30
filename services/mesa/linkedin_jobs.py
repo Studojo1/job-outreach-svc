@@ -8,6 +8,7 @@ pagination and dedupe all work without a session.
 """
 
 import logging
+import random
 import time
 from urllib.parse import urlencode
 
@@ -76,7 +77,7 @@ def scrape_jobs(
     date_posted: str = "24h",
     workplace_types: list[str] | None = None,
     experience_levels: list[str] | None = None,
-    max_pages: int = 4,
+    max_pages: int = 25,
 ) -> list[dict]:
     """Return de-duplicated job dicts for one search. Cookie-free, proxied.
 
@@ -97,31 +98,52 @@ def scrape_jobs(
 
     seen: dict[str, dict] = {}
     proxy = _proxy()
+    empty_streak = 0   # consecutive pages with no parseable cards
+    dup_streak = 0     # consecutive pages that added nothing new
     try:
         with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, verify=False,
                           proxy=proxy, follow_redirects=True) as client:
             for page in range(max_pages):
                 q = dict(params, start=page * _PAGE_SIZE)
-                try:
-                    r = client.get(_GUEST_URL + "?" + urlencode(q))
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[MESA] scrape error page %d: %s", page, e)
+                html = None
+                # Up to 3 tries per page: the residential proxy rotates IPs, so a
+                # 429/transient usually clears on retry with a fresh exit node.
+                for attempt in range(3):
+                    try:
+                        r = client.get(_GUEST_URL + "?" + urlencode(q))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[MESA] li page %d attempt %d error: %s", page, attempt, e)
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    if r.status_code == 429:
+                        time.sleep(2.5 * (attempt + 1) + random.uniform(0, 1))  # back off, rotate IP
+                        continue
+                    if r.status_code != 200:
+                        logger.info("[MESA] li stop page %d (HTTP %d)", page, r.status_code)
+                        break
+                    html = r.text
                     break
-                if r.status_code != 200:
-                    logger.info("[MESA] stop at page %d (HTTP %d)", page, r.status_code)
-                    break
-                jobs = _parse(r.text)
+                if html is None:
+                    break  # exhausted retries (persistent 429 / error) — stop gracefully
+                jobs = _parse(html)
                 if not jobs:
-                    break
+                    empty_streak += 1
+                    if empty_streak >= 2:
+                        break  # two empty pages = end of results
+                    continue
+                empty_streak = 0
                 added = 0
                 for j in jobs:
                     if j["linkedin_job_id"] not in seen:
                         seen[j["linkedin_job_id"]] = j
                         added += 1
                 if added == 0:
-                    break  # no new ids -> reached the tail
-                if page < max_pages - 1:
-                    time.sleep(1.5)  # polite pacing through the proxy
+                    dup_streak += 1
+                    if dup_streak >= 2:
+                        break  # results have started repeating — reached the tail
+                else:
+                    dup_streak = 0
+                time.sleep(random.uniform(0.8, 1.8))  # jittered pacing through the proxy
     except Exception as e:  # noqa: BLE001 — never let a scrape crash the caller
         logger.error("[MESA] scrape_jobs failed kw=%r: %s", keywords, e)
 
