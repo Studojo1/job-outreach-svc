@@ -20,6 +20,7 @@ from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
 from database.session import get_db
 from services.mesa.runner import run_due_searches, run_search
+from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mesa", tags=["Mesa"])
@@ -36,6 +37,7 @@ class SearchIn(BaseModel):
     date_posted: str = "24h"
     workplace_types: List[str] = []
     experience_levels: List[str] = []
+    sources: List[str] = []
     is_active: bool = True
 
     def clean(self) -> "SearchIn":
@@ -43,6 +45,7 @@ class SearchIn(BaseModel):
             self.date_posted = "24h"
         self.workplace_types = [w for w in self.workplace_types if w in WORKPLACE_CHOICES]
         self.experience_levels = [e for e in self.experience_levels if e in EXPERIENCE_CHOICES]
+        self.sources = [s for s in self.sources if s in ALL_SOURCES] or list(DEFAULT_SOURCES)
         return self
 
 
@@ -55,6 +58,7 @@ def _serialize(s: MesaSearch, job_count: int = 0) -> dict:
         "date_posted": s.date_posted or "24h",
         "workplace_types": list(s.workplace_types or []),
         "experience_levels": list(s.experience_levels or []),
+        "sources": list(s.sources or []),
         "is_active": s.is_active,
         "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
         "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -89,7 +93,7 @@ async def create_search(body: SearchIn, current_user: User = Depends(get_current
     s = MesaSearch(
         user_id=current_user.id, name=body.name, keywords=body.keywords, location=body.location,
         date_posted=body.date_posted, workplace_types=body.workplace_types,
-        experience_levels=body.experience_levels, is_active=body.is_active,
+        experience_levels=body.experience_levels, sources=body.sources, is_active=body.is_active,
     )
     db.add(s)
     db.commit()
@@ -103,6 +107,7 @@ async def update_search(search_id: int, body: SearchIn, current_user: User = Dep
     body.clean()
     s.name, s.keywords, s.location = body.name, body.keywords, body.location
     s.date_posted, s.workplace_types, s.experience_levels = body.date_posted, body.workplace_types, body.experience_levels
+    s.sources = body.sources
     s.is_active = body.is_active
     db.commit()
     return _serialize(s)
@@ -151,7 +156,7 @@ async def list_jobs(
         "total": total,
         "jobs": [{
             "id": j.id, "title": j.title, "company": j.company, "location": j.location,
-            "posted_date": j.posted_date, "url": j.url,
+            "posted_date": j.posted_date, "url": j.url, "source": j.source,
             "scraped_at": j.scraped_at.isoformat() if j.scraped_at else None,
         } for j in rows],
     }
@@ -163,9 +168,9 @@ async def export_jobs_csv(search_id: int, current_user: User = Depends(get_curre
     rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).order_by(MesaJob.scraped_at.desc()).all()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["title", "company", "location", "posted_date", "url", "scraped_at"])
+    w.writerow(["title", "company", "location", "posted_date", "source", "url", "scraped_at"])
     for j in rows:
-        w.writerow([j.title, j.company, j.location, j.posted_date, j.url,
+        w.writerow([j.title, j.company, j.location, j.posted_date, j.source, j.url,
                     j.scraped_at.isoformat() if j.scraped_at else ""])
     buf.seek(0)
     fname = f"mesa_{s.name.replace(' ', '_')[:40]}.csv"

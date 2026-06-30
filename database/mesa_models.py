@@ -22,6 +22,7 @@ class MesaSearch(Base):
     date_posted = Column(String(20), default="24h")        # 24h | week | month | any
     workplace_types = Column(ARRAY(Text), default=list)    # on-site | remote | hybrid
     experience_levels = Column(ARRAY(Text), default=list)  # internship..executive
+    sources = Column(ARRAY(Text), default=list)            # linkedin | themuse | remotive | remoteok | arbeitnow
     is_active = Column(Boolean, nullable=False, default=True)
     last_run_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -34,7 +35,8 @@ class MesaJob(Base):
     id = Column(Integer, primary_key=True)
     search_id = Column(Integer, ForeignKey("mesa_searches.id", ondelete="CASCADE"),
                        index=True, nullable=False)
-    linkedin_job_id = Column(String, nullable=False)
+    source = Column(String(20), nullable=False, default="linkedin")
+    linkedin_job_id = Column(String, nullable=False)  # the source's external job id
     title = Column(Text)
     company = Column(Text)
     location = Column(Text)
