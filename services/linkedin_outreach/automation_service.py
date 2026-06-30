@@ -444,6 +444,13 @@ async def send_connection_request(
                         f"Session {'revoked' if revoked else 'expired'} (status {r.status_code})",
                         revoked=revoked,
                     )
+                # Already invited (or invite still pending): LinkedIn returns
+                # 400 CANT_RESEND_YET. The connection request IS live on LinkedIn,
+                # so treat it as sent and skip the Playwright fallback (which would
+                # launch a browser, see "Pending", and waste proxy bandwidth).
+                if "CANT_RESEND_YET" in (r.text or ""):
+                    logger.info("send_connection_request: %s already has a pending invite — marking sent", profile_urn)
+                    return True, ""
                 res = r
 
         last_status = res.status_code if res is not None else "no_response"
