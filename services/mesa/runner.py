@@ -1,6 +1,8 @@
 """Mesa runner — execute a saved search across all its sources (scrape + dedupe + store)."""
 
 import logging
+import re
+from collections import Counter
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -10,28 +12,54 @@ from services.mesa.sources import SOURCE_SCRAPERS
 
 logger = logging.getLogger(__name__)
 
+# The keywords field is often a comma/slash list of role variants ("SWE, SDE,
+# Software Engineer"). Searching each term separately and merging finds far more
+# than one combined query (matches what dedicated tools return). Capped to bound
+# runtime per Run-now.
+_MAX_TERMS = 8
+
+
+def _terms(keywords: str) -> list[str]:
+    parts = [p.strip() for p in re.split(r"[,/;|]| or | OR ", keywords or "") if p.strip()]
+    seen: set = set()
+    out: list[str] = []
+    for p in parts:
+        k = p.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out[:_MAX_TERMS] or [keywords or ""]
+
 
 def run_search(db: Session, search: MesaSearch) -> dict:
-    """Scrape every enabled source for one search; persist jobs not already stored."""
+    """Scrape every enabled source for one search across each keyword term;
+    persist jobs not already stored."""
     sources = list(search.sources or ["linkedin"])
+    terms = _terms(search.keywords)
     scraped: list[dict] = []
-    per_source: dict[str, int] = {}
+    per_source: Counter = Counter()
     for src in sources:
         fn = SOURCE_SCRAPERS.get(src)
         if not fn:
             continue
-        try:
-            jobs = fn(
-                search.keywords, search.location or "", search.date_posted or "24h",
-                list(search.workplace_types or []), list(search.experience_levels or []), 60,
-            )
-        except Exception as e:  # noqa: BLE001 — one bad source must not sink the rest
-            logger.error("[MESA] source %s failed for search %s: %s", src, search.id, e)
-            jobs = []
-        per_source[src] = len(jobs)
-        for j in jobs:
-            j["source"] = src
-        scraped.extend(jobs)
+        src_seen: set = set()  # dedupe within a source across terms
+        for term in terms:
+            try:
+                jobs = fn(
+                    term, search.location or "", search.date_posted or "24h",
+                    list(search.workplace_types or []), list(search.experience_levels or []), 50,
+                )
+            except Exception as e:  # noqa: BLE001 — one bad source/term must not sink the rest
+                logger.error("[MESA] %s/%r failed for search %s: %s", src, term, search.id, e)
+                jobs = []
+            for j in jobs:
+                eid = j.get("external_id")
+                if not eid or eid in src_seen:
+                    continue
+                src_seen.add(eid)
+                j["source"] = src
+                scraped.append(j)
+                per_source[src] += 1
 
     existing = {
         (r[0], r[1]) for r in
