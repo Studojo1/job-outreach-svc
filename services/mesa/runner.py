@@ -47,7 +47,7 @@ def run_search(db: Session, search: MesaSearch) -> dict:
             try:
                 jobs = fn(
                     term, search.location or "", search.date_posted or "24h",
-                    list(search.workplace_types or []), list(search.experience_levels or []), 250,
+                    list(search.workplace_types or []), list(search.experience_levels or []), 150,
                 )
             except Exception as e:  # noqa: BLE001 — one bad source/term must not sink the rest
                 logger.error("[MESA] %s/%r failed for search %s: %s", src, term, search.id, e)
