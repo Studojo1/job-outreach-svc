@@ -7,6 +7,7 @@ Cookie-free scraping (see services/mesa/linkedin_jobs.py). No Apollo.
 import csv
 import io
 import logging
+import threading
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from api.dependencies import get_current_user
 from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
-from database.session import get_db
+from database.session import SessionLocal, get_db
 from services.mesa.runner import run_due_searches, run_search
 from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
 
@@ -121,11 +122,26 @@ async def delete_search(search_id: int, current_user: User = Depends(get_current
     return {"status": "deleted", "id": search_id}
 
 
+def _run_search_bg(search_id: int):
+    """Background worker: deep multi-source scrape can take 1-3 min, so run it off
+    the request thread with its own DB session. Progress is observable via the
+    search's last_run_at / job_count (DB-backed, works across replicas)."""
+    db = SessionLocal()
+    try:
+        s = db.query(MesaSearch).filter(MesaSearch.id == search_id).first()
+        if s:
+            run_search(db, s)
+    except Exception as e:  # noqa: BLE001
+        logger.error("[MESA] background run %s failed: %s", search_id, e)
+    finally:
+        db.close()
+
+
 @router.post("/searches/{search_id}/run")
 async def run_now(search_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     s = _owned(db, search_id, current_user)
-    result = run_search(db, s)
-    return {"status": "ok", **result}
+    threading.Thread(target=_run_search_bg, args=(s.id,), daemon=True).start()
+    return {"status": "started"}
 
 
 # ── Jobs (results) ───────────────────────────────────────────────────────────────
