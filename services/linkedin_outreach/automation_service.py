@@ -1289,6 +1289,12 @@ class LinkedInAutomationDaemon:
             .first()
         )
         last_sent = _last_row[0] if _last_row else None
+        # Postgres timestamptz columns come back tz-aware; datetime.utcnow() is
+        # naive. Normalise to naive UTC before subtracting or the whole tick
+        # throws "can't subtract offset-naive and offset-aware datetimes" and no
+        # invite is ever sent once the campaign has its first sent row.
+        if last_sent is not None and last_sent.tzinfo is not None:
+            last_sent = last_sent.replace(tzinfo=None)
         spacing_ok = True
         if last_sent and (datetime.utcnow() - last_sent).total_seconds() < MIN_SEND_SPACING_SECONDS:
             spacing_ok = False
