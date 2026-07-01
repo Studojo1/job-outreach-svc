@@ -745,12 +745,12 @@ async def scoring_ready(
         .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
         .count()
     )
-    # Ready when 90%+ of leads are scored AND 85% of the JUSTIFY_TOP_K pool have bullets.
-    # Threshold is relative to JUSTIFY_TOP_K (the only leads that get bullets), not the
-    # full lead count. 0.85 (not 0.95) so a few slow/failed justifications near the tail
-    # don't hold the loading screen hostage — the results page renders partial fine.
-    bullet_threshold = max(1, int(min(JUSTIFY_TOP_K, scored) * 0.85))
-    ready = scored >= max(1, total * 0.9) and with_bullets >= bullet_threshold
+    # Unblock the loading screen as soon as (fast, heuristic) scoring is done — we no
+    # longer wait for the slow LLM justification pass here. The results page polls and
+    # renders justifications as they stream in, so the user gets onto their leads in
+    # ~seconds instead of staring at 96% for minutes. with_bullets stays in the response
+    # as a progress signal for the results page.
+    ready = scored >= max(1, total * 0.9)
     return {
         "ready": ready,
         "total": total,
