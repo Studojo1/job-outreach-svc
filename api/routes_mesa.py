@@ -173,6 +173,7 @@ async def list_jobs(
         "jobs": [{
             "id": j.id, "title": j.title, "company": j.company, "location": j.location,
             "posted_date": j.posted_date, "url": j.url, "source": j.source,
+            "author": j.author, "apply_link": j.apply_link, "post_text": j.post_text,
             "scraped_at": j.scraped_at.isoformat() if j.scraped_at else None,
         } for j in rows],
     }
@@ -184,9 +185,11 @@ async def export_jobs_csv(search_id: int, current_user: User = Depends(get_curre
     rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).order_by(MesaJob.scraped_at.desc()).all()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["title", "company", "location", "posted_date", "source", "url", "scraped_at"])
+    w.writerow(["title", "company", "author", "apply_link", "linkedin_url", "location",
+                "posted_date", "source", "post_text", "scraped_at"])
     for j in rows:
-        w.writerow([j.title, j.company, j.location, j.posted_date, j.source, j.url,
+        w.writerow([j.title, j.company, j.author, j.apply_link, j.url, j.location,
+                    j.posted_date, j.source, j.post_text,
                     j.scraped_at.isoformat() if j.scraped_at else ""])
     buf.seek(0)
     fname = f"mesa_{s.name.replace(' ', '_')[:40]}.csv"

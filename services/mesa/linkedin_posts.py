@@ -123,8 +123,11 @@ def _parse(text: str, links: list[str]) -> dict | None:
         return None  # drop non-hiring / advice posts
     emails = list(dict.fromkeys(re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", body)))
     apply = []
+    author_url = ""
     for l in links:
         ll = l.lower()
+        if "/in/" in ll and not author_url:
+            author_url = l.split("?")[0]  # the poster's LinkedIn profile
         if "linkedin.com" in ll and "lnkd.in" not in ll:
             continue
         if any(h in ll for h in _APPLY_HOSTS):
@@ -160,8 +163,12 @@ def _parse(text: str, links: list[str]) -> dict | None:
         "company": comp or author or "",
         "location": "",
         "posted_date": posted,
-        "url": apply_link or "",
+        # `url` is the row's primary link → the poster's LinkedIn profile (where the
+        # hiring post + a DM button live). The exact post permalink isn't in the
+        # search DOM, so the author profile is the reliable, actionable LinkedIn link.
+        "url": author_url or apply_link or "",
         "author": author,
+        "author_url": author_url,
         "apply_link": apply_link or "",
         "post_text": body[:1500],
     }
@@ -212,10 +219,26 @@ def scrape_posts(keywords: str, location: str = "", date_posted: str = "24h",
                 logger.error("[MESA_POSTS] session invalid (redirected to %s) — burner needs re-auth", page.url)
                 br.close()
                 return []
-            scrolls = max(4, min(14, max_results // 8))
-            for _ in range(scrolls):
-                page.mouse.wheel(0, 3000)
+            # Scroll until LinkedIn stops loading more (infinite scroll), not a
+            # fixed shallow count — otherwise we only saw ~12 of dozens available.
+            # Stop after several stalls (no new nodes) or a hard cap.
+            max_scrolls = max(12, min(45, max_results // 3))
+            prev = 0
+            stalls = 0
+            for _ in range(max_scrolls):
+                page.mouse.wheel(0, 3200)
                 page.wait_for_timeout(1500)
+                try:
+                    n = page.locator("[componentkey]").count()
+                except Exception:  # noqa: BLE001
+                    n = prev
+                if n <= prev:
+                    stalls += 1
+                    if stalls >= 4:  # genuinely exhausted the results
+                        break
+                else:
+                    stalls = 0
+                prev = n
             raw = page.evaluate(
                 r"""() => {
                   const out=[];
