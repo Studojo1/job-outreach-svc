@@ -14,6 +14,7 @@ import urllib.parse
 import httpx
 
 from services.mesa.linkedin_jobs import scrape_jobs as _linkedin_scrape
+from services.mesa.linkedin_posts import scrape_posts as _linkedin_posts_scrape
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,13 @@ def _src_linkedin(keywords, location, date_posted, workplace_types, experience_l
         "external_id": j["linkedin_job_id"], "title": j["title"], "company": j["company"],
         "location": j["location"], "posted_date": j.get("posted_date"), "url": j["url"],
     } for j in jobs]
+
+
+def _src_linkedin_posts(keywords, location, date_posted, workplace_types, experience_levels, max_results):
+    # Authenticated feed-post search (founder/recruiter hiring posts). Already
+    # returns the standard {external_id,title,company,location,posted_date,url} shape.
+    return _linkedin_posts_scrape(keywords, location, date_posted, workplace_types,
+                                  experience_levels, max_results)
 
 
 def _src_remotive(keywords, location, *_):
@@ -295,6 +303,7 @@ def _src_naukri(keywords, location, *_):
 # Registry — every value has the same signature.
 SOURCE_SCRAPERS = {
     "linkedin": _src_linkedin,
+    "linkedin_posts": _src_linkedin_posts,
     "themuse": _src_themuse,
     "remotive": _src_remotive,
     "remoteok": _src_remoteok,
@@ -307,7 +316,7 @@ SOURCE_SCRAPERS = {
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
 # Sources that reliably return keyword-relevant data with no auth / captcha / paid API.
-RELIABLE_SOURCES = ["linkedin", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "weworkremotely"]
+RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "weworkremotely"]
 # Beta: auth-/bot-walled or no real keyword search — kept for when an aggregator
 # key (e.g. Adzuna / SerpApi) is wired. instahyre's public API ignores the query;
 # indeed is Cloudflare-blocked; naukri requires reCAPTCHA.
