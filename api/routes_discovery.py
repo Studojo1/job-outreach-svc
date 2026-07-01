@@ -23,13 +23,12 @@ from services.lead_scoring.llm_justifier import justify_leads
 from api.dependencies import get_current_user
 from core.analytics import capture
 
-# Top-K leads that get the full enrichment + LLM justification pass.
-# Justify only the top 300 leads (by heuristic score). Beyond 300 the LLM
-# quality gain is marginal and the runtime (~2+ min for 800) was regularly
-# exceeding the frontend 3-min timeout, causing users to land on results
-# with empty justifications. Un-justified leads still show the client-side
-# heuristic fallback — acceptable for the lower-ranked tail.
-JUSTIFY_TOP_K = 300
+# Top-K leads that get the full enrichment + LLM justification pass. This batch
+# GATES the discovery loading screen (scoring-ready), so its size = how long the
+# user waits at 96%. Justifying 300 took ~2+ min, stranding users at 96%. 100 cuts
+# that ~3x; un-justified leads still show the client-side heuristic fallback
+# (acceptable for the lower-ranked tail), and the background pass fills more later.
+JUSTIFY_TOP_K = 100
 
 logger = logging.getLogger(__name__)
 
@@ -746,12 +745,11 @@ async def scoring_ready(
         .filter(Lead.candidate_id == candidate_id, LeadScore.justification_json.isnot(None))
         .count()
     )
-    # Ready when 90%+ of leads are scored AND 95%+ of the justified pool have bullets.
-    # JUSTIFY_TOP_K=300 means only the top 300 leads get bullets — the threshold must be
-    # relative to that ceiling, not to the full 800-lead count. Using 80% of all scored
-    # (=640) when we only generate 300 bullets meant ready was NEVER true and users hit
-    # the 6-min frontend timeout every run.
-    bullet_threshold = max(1, int(min(JUSTIFY_TOP_K, scored) * 0.95))
+    # Ready when 90%+ of leads are scored AND 85% of the JUSTIFY_TOP_K pool have bullets.
+    # Threshold is relative to JUSTIFY_TOP_K (the only leads that get bullets), not the
+    # full lead count. 0.85 (not 0.95) so a few slow/failed justifications near the tail
+    # don't hold the loading screen hostage — the results page renders partial fine.
+    bullet_threshold = max(1, int(min(JUSTIFY_TOP_K, scored) * 0.85))
     ready = scored >= max(1, total * 0.9) and with_bullets >= bullet_threshold
     return {
         "ready": ready,
