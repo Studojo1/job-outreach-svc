@@ -88,29 +88,39 @@ def _burner_cookies() -> list[dict] | None:
 
 
 # ── text parsing ──────────────────────────────────────────────────────────────
-def _clean_author(lines: list[str]) -> str:
-    for l in lines:
-        if _CHROME.match(l) or _DEGREE.match(l) or "•" in l:
-            continue
-        if len(l) < 2 or len(l) > 60 or "@" in l or "http" in l.lower():
-            continue
-        return l.strip()
-    return ""
+# LinkedIn renders a post card's innerText as, roughly:
+#   "Feed post <Author> • <degree> <Author headline> <Nm> • Follow <POST BODY>
+#    Activate to view... N likes N comments"
+# The pieces are separated inconsistently (newlines OR inline bullets), so we
+# parse structurally off the fixed markers instead of guessing line positions.
+_TIME_RE = re.compile(r"\b(\d+)\s*(m|h|d|w|mo)\b\s*[•·]")
+_TRAILING_RE = re.compile(r"\b\d[\d,]*\s*(?:likes?|comments?|reposts?|impressions?)\b", re.I)
 
 
-def _clean_body(lines: list[str]) -> str:
-    return " ".join(l.strip() for l in lines if not (_CHROME.match(l) or _DEGREE.match(l)))
+def _split_card(text: str) -> tuple[str, str, str]:
+    """Return (author, posted, body) from a post card's innerText."""
+    t = re.sub(r"\s+", " ", text).strip()
+    t = re.sub(r"^\s*feed post\s*", "", t, flags=re.I)
+    # author = the run of text before the first bullet/degree marker
+    am = re.match(r"([A-Za-z][\w.'’\-&() ]{1,55}?)\s*(?:[•·]|\b(?:1st|2nd|3rd\+?)\b)", t)
+    author = am.group(1).strip() if am else ""
+    author = re.sub(r"\s*(?:feed post)$", "", author, flags=re.I).strip()
+    tm = _TIME_RE.search(t)
+    posted = f"{tm.group(1)}{tm.group(2)}" if tm else ""
+    # body = everything after "Follow" (post content starts after the follow btn);
+    # fall back to text after the time marker.
+    fm = re.search(r"\bFollow\b\s*(.+)$", t, flags=re.I)
+    body = fm.group(1) if fm else (t[tm.end():] if tm else t)
+    body = _TRAILING_RE.split(body)[0]
+    body = re.sub(r"\s*(?:…more|\.\.\.more|see more)\s*$", "", body, flags=re.I).strip()
+    return author, posted, body
 
 
 def _parse(text: str, links: list[str]) -> dict | None:
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    author = _clean_author(lines)
-    body = _clean_body(lines)
+    author, posted, body = _split_card(text)
     low = body.lower()
     if not (any(k in low for k in _HIRING_POS) and not any(k in low for k in _HIRING_NEG)):
         return None  # drop non-hiring / advice posts
-    tm = re.search(r"\b(\d+)\s*(m|h|d|w|mo)\b\s*[•·]", text)
-    posted = f"{tm.group(1)}{tm.group(2)}" if tm else ""
     emails = list(dict.fromkeys(re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", body)))
     apply = []
     for l in links:
@@ -126,23 +136,28 @@ def _parse(text: str, links: list[str]) -> dict | None:
         apply_link = f"mailto:{emails[0]}"
     else:
         apply_link = ""
+    # role — the job title being hired for
     role = ""
-    rm = re.search(r"(?:hiring|looking for|role[:\s]|position[:\s])\s*[:\-]?\s*"
-                   r"([A-Z][A-Za-z0-9/&\+\- ]{2,40}?(?:intern|manager|engineer|developer|designer|"
-                   r"analyst|associate|executive|lead|marketer|specialist|coordinator|officer))",
+    rm = re.search(r"(?:hiring|we're hiring|were hiring|we are hiring|looking for|role|position)\b"
+                   r"\s*[:\-–—]?\s*(?:a|an|for)?\s*"
+                   r"([A-Z][A-Za-z0-9/&\+\. ]{2,45}?(?:intern|internship|manager|engineer|developer|"
+                   r"designer|analyst|associate|executive|lead|marketer|specialist|coordinator|"
+                   r"officer|consultant|strategist|writer|creator|sde|swe))",
                    body, re.I)
     if rm:
-        role = rm.group(1).strip()
+        role = re.sub(r"\s+", " ", rm.group(1)).strip(" .-–—")
+    # company — prefer an explicit "<Company> is hiring" / "@Company"; else fall back to author
     comp = ""
-    cm = (re.search(r"(?:@|at\s+)([A-Z][A-Za-z0-9&.\- ]{2,30})\s+(?:is hiring|is looking|hiring)", body)
-          or re.search(r"Founder\s*@?\s*([A-Z][A-Za-z0-9&.\- ]{2,30})", body))
+    cm = (re.search(r"\b([A-Z][A-Za-z0-9&.\- ]{1,34}?)\s+is\s+(?:hiring|looking)", body)
+          or re.search(r"(?:join|at)\s+([A-Z][A-Za-z0-9&.\-]{2,30})\b", body)
+          or re.search(r"@\s*([A-Za-z][A-Za-z0-9&.\-]{2,30})", body))
     if cm:
         comp = cm.group(1).strip()
     external_id = "post_" + hashlib.sha1(f"{author}|{body[:200]}".encode()).hexdigest()[:20]
     return {
         "external_id": external_id,
-        "title": role or (body[:80] if body else "Hiring post"),
-        "company": comp or author,
+        "title": role or "Hiring post",
+        "company": comp or author or "",
         "location": "",
         "posted_date": posted,
         "url": apply_link or "",
@@ -172,9 +187,16 @@ def scrape_posts(keywords: str, location: str = "", date_posted: str = "24h",
         return []
 
     dp = DATE_POSTED.get(date_posted, "past-24h")
-    q = (keywords + (f" {location}" if location else "")).strip()
+    # Search the keyword only. Do NOT append `location` to the query — content
+    # search has no geo filter, so appending it forces posts to literally contain
+    # the location word ("...India"), which almost no hiring post does and which
+    # zeroed out real results. LinkedIn personalises to the burner's region anyway.
+    # No sortBy => LinkedIn's default 'top match' (relevance) surfaces hiring posts
+    # across the whole date window; forcing date-sort buries relevant older posts
+    # under fresh non-hiring noise (past the scroll limit) on broad keywords.
+    q = keywords.strip()
     url = (f"https://www.linkedin.com/search/results/content/?keywords={quote(q)}"
-           + (f'&datePosted=%22{dp}%22' if dp else "") + '&sortBy=%22date_posted%22')
+           + (f'&datePosted=%22{dp}%22' if dp else ""))
 
     rows: list[dict] = []
     try:
