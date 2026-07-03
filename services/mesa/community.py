@@ -14,6 +14,7 @@ import html as ihtml
 import logging
 import re
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import httpx
 
@@ -98,24 +99,97 @@ def _match_any(text: str, toks: list[str]) -> bool:
     return any(t in low for t in toks)
 
 
-# ── Reddit r/forhire + r/hiring ───────────────────────────────────────────────
-def _reddit_proxy():
-    url = (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip()
-    return url or None
+# ── Reddit r/forhire + r/hiring (OAuth — .json/.rss now 403 without a token) ──────
+# Reddit hard-blocks unauthenticated programmatic access at the edge (403 on every
+# .json/.rss variant, direct or via residential proxy). The only reliable path is
+# OAuth: a registered app token against oauth.reddit.com. Set in config:
+#   MESA_REDDIT_CLIENT_ID / MESA_REDDIT_SECRET  (from reddit.com/prefs/apps)
+#   MESA_REDDIT_USER / MESA_REDDIT_PASS         (optional — enables password grant)
+_SUBS = ("forhire", "hiring", "jobbit", "remotejs")
+_TOKEN: dict = {"val": None, "exp": 0.0}
+_COMP_RE = re.compile(r"(?:at|@|company[:\-]?)\s+([A-Z][\w&.\- ]{2,40})")
+_COMP_HIRING_RE = re.compile(r"^([A-Z][\w&.\- ]{2,40}?)\s+is\s+hiring", re.I)
+_SALARY_RE = re.compile(r"(\$\s?\d[\d,]*(?:\s?[-–]\s?\$?\d[\d,]*)?\s?(?:k|/hr|/hour|per hour|/yr|k?\s?usd)?|"
+                        r"₹\s?\d[\d,]*|€\s?\d[\d,]*)", re.I)
+_EMAIL_RE = re.compile(r"[\w.\-+]+@[\w.\-]+\.\w+")
+
+
+def _reddit_headers():
+    return {"User-Agent": (getattr(settings, "MESA_REDDIT_UA", "") or "mesa-hiring-signal/0.1 (by Studojo)")}
+
+
+def _reddit_token() -> str | None:
+    import time
+    cid = (getattr(settings, "MESA_REDDIT_CLIENT_ID", "") or "").strip()
+    sec = (getattr(settings, "MESA_REDDIT_SECRET", "") or "").strip()
+    if not cid or not sec:
+        return None
+    if _TOKEN["val"] and _TOKEN["exp"] > time.time() + 30:
+        return _TOKEN["val"]
+    user = (getattr(settings, "MESA_REDDIT_USER", "") or "").strip()
+    pw = (getattr(settings, "MESA_REDDIT_PASS", "") or "").strip()
+    data = ({"grant_type": "password", "username": user, "password": pw}
+            if user and pw else {"grant_type": "client_credentials"})
+    try:
+        r = httpx.post("https://www.reddit.com/api/v1/access_token", data=data,
+                       auth=(cid, sec), headers=_reddit_headers(), timeout=_T, verify=False)
+        if r.status_code != 200:
+            logger.warning("[MESA] reddit token HTTP %s: %s", r.status_code, r.text[:120])
+            return None
+        j = r.json()
+        _TOKEN["val"] = j.get("access_token")
+        _TOKEN["exp"] = time.time() + int(j.get("expires_in", 3600))
+        return _TOKEN["val"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] reddit token: %s", e)
+        return None
+
+
+def _parse_reddit_post(d: dict, sub: str) -> dict | None:
+    title = d.get("title") or ""
+    if "[hiring]" not in title.lower() and sub == "forhire":
+        return None
+    if "[for hire]" in title.lower() or "[task]" in title.lower():
+        return None
+    body = f"{title}\n{d.get('selftext') or ''}"
+    role = re.sub(r"^\s*\[hiring\]\s*", "", title, flags=re.I).strip()
+    cm = _COMP_HIRING_RE.search(role) or _COMP_RE.search(body)
+    company = (cm.group(1).strip() if cm else "") or f"u/{d.get('author', '')}"
+    sal = _SALARY_RE.search(body)
+    em = _EMAIL_RE.search(d.get("selftext") or "")
+    try:
+        dt = datetime.fromtimestamp(d.get("created_utc", 0), tz=timezone.utc)
+    except Exception:
+        dt = None
+    return {
+        "external_id": f"rd_{d.get('id')}", "title": role[:120] or title,
+        "company": company[:60], "location": "Remote" if "remote" in body.lower() else "See post",
+        "posted_date": dt.date().isoformat() if dt else "",
+        "url": "https://www.reddit.com" + (d.get("permalink") or ""),
+        "apply_link": (f"mailto:{em.group(0)}" if em else ""),
+        "salary": (sal.group(1) if sal else ""),
+        "author": f"u/{d.get('author', '')}",
+        "post_text": (d.get("selftext") or "")[:300],
+    }
 
 
 def scrape_reddit(keywords, location, date_posted="week", workplace_types=None,
                   experience_levels=None, max_results=60):
+    token = _reddit_token()
+    if not token:
+        logger.info("[MESA] reddit: no OAuth creds (MESA_REDDIT_CLIENT_ID/SECRET) — skipping")
+        return []
+    hdr = {**_reddit_headers(), "Authorization": f"bearer {token}"}
     q = (keywords or "").strip()
-    proxy = _reddit_proxy()
+    twindow = {"24h": "day", "week": "week", "month": "month", "any": "all"}.get(date_posted, "week")
     out: list[dict] = []
-    for sub in ("forhire", "hiring"):
+    for sub in _SUBS:
         if len(out) >= max_results:
             break
-        url = (f"https://www.reddit.com/r/{sub}/search.json?q={httpx.QueryParams({'x': q + ' hiring'})['x']}"
-               f"&restrict_sr=1&sort=new&t=week&limit=25")
+        url = (f"https://oauth.reddit.com/r/{sub}/search?q={quote(q)}&restrict_sr=1"
+               f"&sort=new&t={twindow}&limit=25")
         try:
-            r = httpx.get(url, headers=_H, timeout=_T, verify=False, follow_redirects=True, proxy=proxy)
+            r = httpx.get(url, headers=hdr, timeout=_T, verify=False, follow_redirects=True)
             if r.status_code != 200:
                 logger.info("[MESA] reddit r/%s HTTP %s", sub, r.status_code)
                 continue
@@ -124,23 +198,9 @@ def scrape_reddit(keywords, location, date_posted="week", workplace_types=None,
             logger.warning("[MESA] reddit r/%s: %s", sub, e)
             continue
         for ch in children:
-            d = ch.get("data", {})
-            title = d.get("title") or ""
-            # forhire tags posts [Hiring]; skip [For Hire]/[Task] seekers
-            if sub == "forhire" and "[hiring]" not in title.lower():
-                continue
-            try:
-                dt = datetime.fromtimestamp(d.get("created_utc", 0), tz=timezone.utc)
-            except Exception:
-                dt = None
-            clean_title = re.sub(r"^\[hiring\]\s*", "", title, flags=re.I).strip()
-            out.append({
-                "external_id": f"rd_{d.get('id')}", "title": clean_title[:120] or title,
-                "company": (d.get("author") or "-"), "location": "Remote" if "remote" in title.lower() else "See post",
-                "posted_date": dt.date().isoformat() if dt else "",
-                "url": "https://www.reddit.com" + (d.get("permalink") or ""),
-                "post_text": (d.get("selftext") or "")[:300],
-            })
-            if len(out) >= max_results:
-                break
+            row = _parse_reddit_post(ch.get("data", {}), sub)
+            if row:
+                out.append(row)
+                if len(out) >= max_results:
+                    break
     return out

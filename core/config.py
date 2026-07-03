@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # refreshed via the login flow when it expires.
     MESA_LI_AT: str = ""
     MESA_JSESSIONID: str = ""
+    # Reddit hiring-signal OAuth app (reddit.com/prefs/apps -> "script").
+    # client_credentials works app-only; add user/pass for password grant.
+    MESA_REDDIT_CLIENT_ID: str = ""
+    MESA_REDDIT_SECRET: str = ""
+    MESA_REDDIT_USER: str = ""
+    MESA_REDDIT_PASS: str = ""
+    MESA_REDDIT_UA: str = "mesa-hiring-signal/0.1 (by Studojo)"
+    # X/Twitter hiring-signal burner (separate throwaway account). Cookie auth:
+    # auth_token + ct0 (csrf) captured from a logged-in x.com session.
+    MESA_X_AUTH_TOKEN: str = ""
+    MESA_X_CT0: str = ""
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
