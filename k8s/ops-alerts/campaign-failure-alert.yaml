@@ -53,7 +53,7 @@ data:
         FROM emails_sent e
         JOIN campaigns c ON c.id = e.campaign_id
         WHERE e.status = 'failed'
-          AND COALESCE(e.error_message, '') NOT ILIKE '%Apollo could not find%'
+          AND COALESCE(e.error_message, '') NOT ILIKE '%%Apollo could not find%%'
         GROUP BY c.id, c.name, c.status
         HAVING COUNT(*) >= %s
         ORDER BY failed DESC
