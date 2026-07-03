@@ -2,7 +2,9 @@
 # Campaign email-failure alerter.
 #
 # Every 5 hours: find campaigns with >= FAIL_THRESHOLD (6) emails in status
-# 'failed'. To avoid nagging about historical failures, it tracks the
+# 'failed', EXCLUDING benign "Apollo could not find email" skips (a lead with no
+# email is skipped by design, not a delivery failure). To avoid nagging about
+# historical failures, it tracks the
 # last-alerted failed count per campaign in a small state table and only emails
 # when a campaign's failed count has GROWN since the previous run (i.e. emails
 # are *actively* failing right now). On the very first run it seeds state
@@ -42,12 +44,16 @@ data:
         )
     """)
 
-    # campaigns with >= THRESHOLD failed emails
+    # campaigns with >= THRESHOLD *genuine* failed emails.
+    # Exclude "Apollo could not find email for this contact" — that isn't a send
+    # failure, it's a lead with no email that we skip by design. Counting those
+    # made every active campaign look broken (they dominate ~70% of 'failed').
     cur.execute("""
         SELECT c.id, COALESCE(NULLIF(c.name, ''), '(unnamed)'), c.status, COUNT(*)::int AS failed
         FROM emails_sent e
         JOIN campaigns c ON c.id = e.campaign_id
         WHERE e.status = 'failed'
+          AND COALESCE(e.error_message, '') NOT ILIKE '%Apollo could not find%'
         GROUP BY c.id, c.name, c.status
         HAVING COUNT(*) >= %s
         ORDER BY failed DESC
@@ -81,17 +87,50 @@ data:
         print("No campaigns with new failures. Nothing to send.")
         sys.exit(0)
 
+    # Surface the most common actionable cause: expired Gmail auth. Name the exact
+    # accounts with a *recent* (last 24h) auth failure so the fix is obvious. Recovered
+    # accounts stop producing auth failures, so they drop off this list on their own.
+    alert_ids = [cid for cid, *_ in to_alert]
+    cur.execute("""
+        SELECT DISTINCT ea.email_address
+        FROM emails_sent e
+        JOIN campaigns c ON c.id = e.campaign_id
+        JOIN email_accounts ea ON ea.id = c.email_account_id
+        WHERE e.campaign_id = ANY(%s)
+          AND e.status = 'failed'
+          AND (e.error_message ILIKE '%%auth%%' OR e.error_message ILIKE '%%reconnect%%'
+               OR e.error_message ILIKE '%%invalid_grant%%' OR e.error_message ILIKE '%%401%%')
+          AND COALESCE(e.sent_at, e.created_at) > now() - interval '24 hours'
+        ORDER BY ea.email_address
+    """, (alert_ids,))
+    reconnect = [r[0] for r in cur.fetchall() if r[0]]
+
+    reconnect_txt = ""
+    reconnect_html = ""
+    if reconnect:
+        reconnect_txt = (
+            "\n\nNEEDS GMAIL RECONNECT (auth expired in the last 24h):\n"
+            + "\n".join(f"- {a}" for a in reconnect)
+        )
+        reconnect_html = (
+            "<p><b>Needs Gmail reconnect</b> (auth expired in the last 24h):</p><ul>"
+            + "".join(f"<li>{a}</li>" for a in reconnect)
+            + "</ul>"
+        )
+
     text = "Campaigns with 6+ failed emails (new failures since last check):\n\n" + "\n".join(
         f"- {name} (id {cid}, {status}): {failed} failed total (+{delta} new)"
         for cid, name, status, failed, delta in to_alert
-    ) + "\n\nReview: https://admin.studojo.com/campaign-health"
+    ) + reconnect_txt + "\n\nReview: https://admin.studojo.com/campaign-health"
     html = (
         "<h3>Campaigns with failing emails</h3><ul>"
         + "".join(
             f"<li><b>{name}</b> (id {cid}, {status}): <b>{failed}</b> failed total (+{delta} new)</li>"
             for cid, name, status, failed, delta in to_alert
         )
-        + "</ul><p>Review on <a href='https://admin.studojo.com/campaign-health'>Campaign Health</a>.</p>"
+        + "</ul>"
+        + reconnect_html
+        + "<p>Review on <a href='https://admin.studojo.com/campaign-health'>Campaign Health</a>.</p>"
     )
 
     client = EmailClient.from_connection_string(ACS)
