@@ -15,6 +15,14 @@ import httpx
 
 from services.mesa.linkedin_jobs import scrape_jobs as _linkedin_scrape
 from services.mesa.linkedin_posts import scrape_posts as _linkedin_posts_scrape
+from services.mesa.boards_extra import (
+    scrape_internshala as _internshala, scrape_unstop as _unstop,
+    scrape_himalayas as _himalayas, scrape_workingnomads as _workingnomads)
+from services.mesa.ats import (
+    scrape_greenhouse as _greenhouse, scrape_ashby as _ashby,
+    scrape_lever as _lever, scrape_workable as _workable)
+from services.mesa.community import scrape_hackernews as _hackernews, scrape_reddit as _reddit
+from services.mesa.social import scrape_twitter as _twitter
 
 logger = logging.getLogger(__name__)
 
@@ -313,13 +321,32 @@ SOURCE_SCRAPERS = {
     "weworkremotely": _src_weworkremotely,
     "indeed": _src_indeed,    # best-effort — often Cloudflare-blocked
     "naukri": _src_naukri,    # best-effort — often reCAPTCHA-gated
+    # India + remote boards (keyless public endpoints)
+    "internshala": _internshala,
+    "unstop": _unstop,
+    "himalayas": _himalayas,
+    "workingnomads": _workingnomads,
+    # ATS career boards — each company's own openings, straight from the source
+    "greenhouse": _greenhouse,
+    "ashby": _ashby,
+    "lever": _lever,
+    "workable": _workable,
+    # community hiring signals (prose posts, not boards)
+    "hackernews": _hackernews,   # HN "Who is hiring" monthly thread
+    "reddit": _reddit,           # r/forhire + r/hiring, via residential proxy
+    "twitter": _twitter,         # best-effort — Nitter mirrors, often down
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
 # Sources that reliably return keyword-relevant data with no auth / captcha / paid API.
-RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "weworkremotely"]
-# Beta: auth-/bot-walled or no real keyword search — kept for when an aggregator
-# key (e.g. Adzuna / SerpApi) is wired. instahyre's public API ignores the query;
-# indeed is Cloudflare-blocked; naukri requires reCAPTCHA.
-BETA_SOURCES = ["instahyre", "indeed", "naukri"]
+RELIABLE_SOURCES = [
+    "linkedin", "linkedin_posts", "themuse", "remotive", "remoteok", "arbeitnow",
+    "jobicy", "weworkremotely", "internshala", "unstop", "himalayas", "workingnomads",
+    "greenhouse", "ashby", "lever", "hackernews",
+]
+# Beta: auth-/bot-walled or no real keyword search — kept for when access is wired.
+# instahyre's public API ignores the query; indeed is Cloudflare-blocked; naukri
+# requires reCAPTCHA; twitter rides flaky Nitter mirrors; reddit's .json now 403s
+# without OAuth (even via residential proxy); workable needs valid account slugs.
+BETA_SOURCES = ["instahyre", "indeed", "naukri", "twitter", "reddit", "workable"]
 # Defaults for a new search.
-DEFAULT_SOURCES = ["linkedin", "themuse", "remotive", "jobicy"]
+DEFAULT_SOURCES = ["linkedin", "greenhouse", "ashby", "internshala", "themuse", "remotive"]

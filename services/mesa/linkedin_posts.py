@@ -219,38 +219,43 @@ def scrape_posts(keywords: str, location: str = "", date_posted: str = "24h",
                 logger.error("[MESA_POSTS] session invalid (redirected to %s) — burner needs re-auth", page.url)
                 br.close()
                 return []
-            # Scroll until LinkedIn stops loading more (infinite scroll), not a
-            # fixed shallow count — otherwise we only saw ~12 of dozens available.
-            # Stop after several stalls (no new nodes) or a hard cap.
-            max_scrolls = max(12, min(45, max_results // 3))
-            prev = 0
+            # LinkedIn content search is a VIRTUALISED list — as you scroll it
+            # removes off-screen posts from the DOM and mounts new ones. So we must
+            # harvest the visible posts after EACH scroll and accumulate, or we'd
+            # only ever capture the ~12 posts in the current viewport (the bug that
+            # made every search return exactly ~12).
+            _EXTRACT_JS = r"""() => {
+              const out=[];
+              document.querySelectorAll('[componentkey]').forEach(n=>{
+                const text=(n.innerText||'').trim();
+                if(text.length<140 || text.length>8000) return;
+                if(!/(\b\d+\s*(m|h|d|w|mo|min|hour|day|week)\b\s*[•·])|(•\s*\d)/i.test(text)) return;
+                const links=Array.from(n.querySelectorAll('a[href]')).map(a=>a.href);
+                out.push({text:text.slice(0,2500), links});
+              });
+              return out;
+            }"""
+            harvested: dict[str, dict] = {}
+            max_scrolls = max(20, min(80, max_results // 2))
             stalls = 0
             for _ in range(max_scrolls):
-                page.mouse.wheel(0, 3200)
-                page.wait_for_timeout(1500)
                 try:
-                    n = page.locator("[componentkey]").count()
+                    for p in page.evaluate(_EXTRACT_JS):
+                        harvested.setdefault(p["text"][:120], p)  # dedupe by text prefix
                 except Exception:  # noqa: BLE001
-                    n = prev
-                if n <= prev:
+                    pass
+                before = len(harvested)
+                page.mouse.wheel(0, 3000)
+                page.wait_for_timeout(1400)
+                if len(harvested) <= before:
                     stalls += 1
-                    if stalls >= 4:  # genuinely exhausted the results
+                    if stalls >= 6:  # results genuinely exhausted
                         break
                 else:
                     stalls = 0
-                prev = n
-            raw = page.evaluate(
-                r"""() => {
-                  const out=[];
-                  document.querySelectorAll('[componentkey]').forEach(n=>{
-                    const text=(n.innerText||'').trim();
-                    if(text.length<140 || text.length>8000) return;
-                    if(!/(\b\d+\s*(m|h|d|w|mo|min|hour|day|week)\b\s*[•·])|(•\s*\d)/i.test(text)) return;
-                    const links=Array.from(n.querySelectorAll('a[href]')).map(a=>a.href);
-                    out.push({text:text.slice(0,2500), links});
-                  });
-                  return out;
-                }""")
+                if len(harvested) >= max_results:
+                    break
+            raw = list(harvested.values())
             br.close()
     except Exception as e:  # noqa: BLE001
         logger.error("[MESA_POSTS] scrape failed for %r: %s", keywords, e)
