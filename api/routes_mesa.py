@@ -20,6 +20,7 @@ from api.dependencies import get_current_user
 from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
 from database.session import SessionLocal, get_db
+from services.mesa.intelligence import attach_enrichment, enrichment_status, start_enrichment
 from services.mesa.runner import run_due_searches, run_search
 from services.mesa.signals import score_jobs
 from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
@@ -218,13 +219,39 @@ async def search_signals(
         "posted_date": j.posted_date, "url": j.url, "source": j.source, "post_text": j.post_text,
     } for j in rows]
     ranked = score_jobs(jobs)
+    # fold in any background enrichment (facts + news signals + analyst brief) and re-score
+    ranked = attach_enrichment(search_id, ranked)
     if confluence_only:
         ranked = [r for r in ranked if r["confluence"]]
     return {
         "total_companies": len(ranked),
         "confluence_count": sum(1 for r in ranked if r["confluence"]),
+        "enrichment": enrichment_status(search_id),
         "companies": ranked[:limit],
     }
+
+
+@router.post("/searches/{search_id}/signals/enrich")
+async def enrich_signals(
+    search_id: int,
+    limit: int = Query(15, le=40, description="how many top-ranked companies to deep-enrich"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kick off BACKGROUND deep enrichment for the top-ranked companies: company
+    facts (LLM + web, no Apollo), fresh-funding + leader-departure news signals,
+    and an analyst brief (confidence, signal narrative, outreach opener, kill-signal
+    check). Poll GET /signals to see results fill in (`enrichment` field shows
+    progress; enriched companies gain `facts` / `brief` / news signals and re-rank)."""
+    _owned(db, search_id, current_user)
+    rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).all()
+    jobs = [{
+        "title": j.title, "company": j.company, "location": j.location,
+        "posted_date": j.posted_date, "url": j.url, "source": j.source, "post_text": j.post_text,
+    } for j in rows]
+    ranked = score_jobs(jobs)[:limit]
+    start_enrichment(search_id, [{"company": r["company"], "families": r["families"]} for r in ranked])
+    return {"status": "started", "enriching": len(ranked)}
 
 
 # ── Internal: daily sweep (cluster-only, no auth — called by the CronJob) ─────────
