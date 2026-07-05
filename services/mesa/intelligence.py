@@ -30,11 +30,16 @@ _CACHE: dict = {}
 _STATUS: dict = {}
 _LOCK = threading.Lock()
 
-# news-derived families get folded into the confluence score when present
-NEWS_WEIGHT = {"fresh_funding": 20, "leader_departure": 30}
-NEWS_LABEL = {
+# enrichment-derived families folded into the confluence score when present
+EXTRA_WEIGHT = {
+    "fresh_funding": 20, "leader_departure": 30,   # from news
+    "enterprise_motion": 12, "enterprise_ready": 10,  # from their own website
+}
+EXTRA_LABEL = {
     "fresh_funding": "Fresh funding (budget just unlocked)",
     "leader_departure": "Sales leader just departed (seat open now)",
+    "enterprise_motion": "Moving upmarket ('Contact Sales'/Enterprise on site)",
+    "enterprise_ready": "Enterprise-ready (security/SOC2/trust page live)",
 }
 
 _FUNDING_RE = re.compile(r"\b(raises?|raised|funding|series [a-e]|seed round|bags?|secures?|\$\d|₹\d|mn\b|million|crore)\b", re.I)
@@ -76,6 +81,38 @@ def _facts(company: str) -> dict | None:
     except Exception as e:  # noqa: BLE001
         logger.info("[MESA] company research failed for %s: %s", company, e)
         return None
+
+
+_UA_WEB = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+_MOTION_RE = re.compile(r"\b(contact sales|talk to sales|book a demo|request a demo|enterprise plan|contact us for pricing|for enterprises?)\b", re.I)
+_READY_RE = re.compile(r"\b(soc\s?2|soc ii|iso\s?27001|gdpr|hipaa|trust cent(er|re)|security & compliance|\bsso\b|enterprise[- ]grade security)\b", re.I)
+
+
+def _web_surface(domain: str | None) -> dict:
+    """Best-effort read of a company's OWN site — signals they're moving upmarket
+    (needs a real sales motion) that never appear on a job board. Free; fail-soft."""
+    if not domain:
+        return {}
+    import httpx
+    dom = domain.strip().replace("https://", "").replace("http://", "").strip("/")
+    fams: dict = {}
+    pages = [f"https://{dom}", f"https://{dom}/pricing", f"https://{dom}/security"]
+    for u in pages:
+        try:
+            r = httpx.get(u, headers={"User-Agent": _UA_WEB}, timeout=6.0, verify=False, follow_redirects=True)
+            if r.status_code != 200:
+                continue
+            txt = r.text[:200000]
+            if "enterprise_motion" not in fams and _MOTION_RE.search(txt):
+                fams["enterprise_motion"] = u
+            if "enterprise_ready" not in fams and _READY_RE.search(txt):
+                fams["enterprise_ready"] = u
+        except Exception:  # noqa: BLE001
+            continue
+        if len(fams) == 2:
+            break
+    return fams
 
 
 _BRIEF_SCHEMA = {
@@ -123,10 +160,13 @@ def enrich_one(company: str, families: list[str]) -> dict:
     news = _fetch_news(company)
     news_fams = _classify_news(news)
     facts = _facts(company)
-    all_fams = list(families) + list(news_fams.keys())
+    domain = (facts or {}).get("domain")
+    web_fams = _web_surface(domain)
+    extra = {**news_fams, **web_fams}
+    all_fams = list(families) + list(extra.keys())
     brief = _brief(company, all_fams, facts, news)
     return {
-        "news_families": news_fams,          # {family: evidence_headline}
+        "extra_families": extra,             # {family: evidence} — news + website signals
         "facts": facts,                      # LLM+Bing company facts or None
         "brief": brief,                      # analyst brief or None
         "news_headlines": news[:5],
@@ -179,21 +219,21 @@ def attach_enrichment(search_id: int, companies: list[dict]) -> list[dict]:
         if not enr:
             out.append(c)
             continue
-        news_fams = enr.get("news_families") or {}
+        extra = enr.get("extra_families") or {}
         merged = dict(c)
-        if news_fams:
-            fams = sorted(set(c.get("families", [])) | set(news_fams.keys()))
+        if extra:
+            fams = sorted(set(c.get("families", [])) | set(extra.keys()))
             merged["families"] = fams
-            merged["signals"] = c.get("signals", []) + [NEWS_LABEL[f] for f in news_fams if f in NEWS_LABEL]
-            merged["n_families"] = len([f for f in fams])
+            merged["signals"] = c.get("signals", []) + [EXTRA_LABEL[f] for f in extra if f in EXTRA_LABEL]
+            merged["n_families"] = len(fams)
             merged["confluence"] = merged["n_families"] >= 2
-            bonus = sum(NEWS_WEIGHT.get(f, 0) for f in news_fams)
+            bonus = sum(EXTRA_WEIGHT.get(f, 0) for f in extra)
             conf = 25 if merged["n_families"] >= 3 else (15 if merged["n_families"] >= 2 else 0)
             merged["score"] = min(100, c["score"] + bonus + max(0, conf - (15 if c["confluence"] else 0)))
         merged["facts"] = enr.get("facts")
         merged["brief"] = enr.get("brief")
         merged["news_headlines"] = enr.get("news_headlines")
-        merged["news_evidence"] = news_fams
+        merged["signal_evidence"] = extra
         merged["enriched"] = True
         out.append(merged)
     out.sort(key=lambda x: (-x["score"], x["company"]))
