@@ -121,6 +121,7 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         n = len(fams)
         conf = 25 if n >= 3 else (15 if n >= 2 else 0)
         score = min(100, base + conf)
+        dates = [r["posted_date"] for r in rec["roles"] if r.get("posted_date")]
         out.append({
             "company": rec["company"],
             "score": score,
@@ -132,7 +133,9 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             "role_count": len(rec["roles"]),
             "sample_roles": titles[:6],
             "sources": sorted(s for s in rec["sources"] if s),
+            "freshest_posted": max(dates) if dates else None,
             "read": _read(fams, leaders[0] if leaders else ""),
+            "enriched": False,
         })
     out.sort(key=lambda x: (-x["score"], x["company"]))
     return out
