@@ -21,6 +21,7 @@ from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
 from database.session import SessionLocal, get_db
 from services.mesa.runner import run_due_searches, run_search
+from services.mesa.signals import score_jobs
 from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,35 @@ async def export_jobs_csv(search_id: int, current_user: User = Depends(get_curre
     fname = f"mesa_{s.name.replace(' ', '_')[:40]}.csv"
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ── Signals (the intelligence layer over a search's results) ─────────────────────
+@router.get("/searches/{search_id}/signals")
+async def search_signals(
+    search_id: int,
+    limit: int = Query(50, le=200),
+    confluence_only: bool = Query(False, description="only companies emitting 2+ independent signal families"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Score every company in this search's scraped jobs across independent signal
+    families (leadership seat open, army-no-general, RevOps, founder hiring post,
+    'no leader yet' language, hiring surge) and rank by CONFLUENCE — 2+ families is
+    a real buying signal, one alone is usually noise. Works over any source."""
+    _owned(db, search_id, current_user)
+    rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).all()
+    jobs = [{
+        "title": j.title, "company": j.company, "location": j.location,
+        "posted_date": j.posted_date, "url": j.url, "source": j.source, "post_text": j.post_text,
+    } for j in rows]
+    ranked = score_jobs(jobs)
+    if confluence_only:
+        ranked = [r for r in ranked if r["confluence"]]
+    return {
+        "total_companies": len(ranked),
+        "confluence_count": sum(1 for r in ranked if r["confluence"]),
+        "companies": ranked[:limit],
+    }
 
 
 # ── Internal: daily sweep (cluster-only, no auth — called by the CronJob) ─────────
