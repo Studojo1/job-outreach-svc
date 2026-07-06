@@ -37,8 +37,32 @@ _REVOPS = re.compile(
     r"\b(revenue operations|revops|rev ops|sales operations|sales ops|gtm operations|"
     r"crm (admin|manager)|salesforce admin|hubspot admin|sales enablement|deal desk)\b", re.I)
 
+# ── Additional signal families (all computed from the same scraped job data) ──
+# Funding / scaling: an explicit fundraise or "we're scaling" marker in the post.
+_FUNDING = re.compile(
+    r"\b(series [a-e]\b|seed round|pre[- ]?seed|just raised|recently raised|raised (\$|usd|inr|₹|€|£)|"
+    r"well[- ]funded|backed by|y[- ]?combinator|yc ?[swf]?\d{2}|angel[- ]backed|newly funded|"
+    r"fresh (round of )?funding|closed our (seed|series)|hyper[- ]?growth|scaling (fast|rapidly))\b", re.I)
+# Org maturity / churn: a seat opened by turnover or team expansion, not greenfield.
+_CHURN = re.compile(
+    r"\b(back[- ]?fill|replacing|replacement for|maternity cover|parental cover|"
+    r"due to (growth|expansion|attrition)|re[- ]?hir(e|ing)|newly vacated|stepping (down|into))\b", re.I)
+# GTM build: marketing / demand-gen / growth LEADERSHIP alongside sales = full engine.
+_MKTG_LEAD = re.compile(
+    r"\b(head of (marketing|growth|demand|brand|content)|vp (of )?(marketing|growth)|"
+    r"marketing director|director of (marketing|growth|demand)|cmo\b|demand gen(eration)?|"
+    r"growth (lead|head|manager)|brand (lead|head|director)|head of performance)\b", re.I)
+# Geo expansion language: entering a new market / first person on the ground.
+_GEO = re.compile(
+    r"\b(first (hire|employee|team member|person) in|expanding (in|into|to)|"
+    r"new (office|market|region) in|opening (our|a)[^.]{0,25}office|launching in|"
+    r"establish(ing)? (our )?presence in|ground zero for)\b", re.I)
+# "Remote"/generic locations that must NOT count as distinct geos for expansion.
+_GENERIC_LOC = re.compile(r"^(remote|anywhere|flexible|worldwide|global|india|—|n/?a|)$", re.I)
+
 _FAMILY_WEIGHT = {
     "leader_seat": 25, "no_leader": 18, "army": 18, "surge": 10, "revops": 12, "founder_post": 20,
+    "funding": 16, "geo_expansion": 14, "org_maturity": 12, "gtm_build": 14,
 }
 _FAMILY_LABEL = {
     "leader_seat": "Leadership sales seat open (live)",
@@ -47,6 +71,10 @@ _FAMILY_LABEL = {
     "surge": "Hiring surge (3+ sales roles)",
     "revops": "RevOps hire (systematizing sales)",
     "founder_post": "Founder/recruiter hiring post (high intent)",
+    "funding": "Funded / scaling fast",
+    "geo_expansion": "Expanding into a new market",
+    "org_maturity": "Team churn or seniority ladder (org maturing)",
+    "gtm_build": "Building the full GTM engine (marketing + sales)",
 }
 
 
@@ -70,6 +98,14 @@ def _read(families: set, top_leader: str) -> str:
         bits.append("Job language says the sales org is being built from zero — greenfield leadership seat.")
     if "surge" in families and not bits:
         bits.append("Hiring across sales at volume — a leader to run it is the natural next hire.")
+    if "funding" in families:
+        bits.append("Fresh funding or explicit scaling language — budget is unlocked and hiring is a priority right now.")
+    if "geo_expansion" in families:
+        bits.append("Opening the same role in a new market — they're expanding and need people on the ground.")
+    if "gtm_build" in families:
+        bits.append("Hiring marketing/growth leadership next to sales — they're building the whole GTM engine, not one seat.")
+    if "org_maturity" in families and not bits:
+        bits.append("Backfills and a junior-to-senior ladder — the org is maturing and formalizing its team.")
     return " ".join(bits) or "Sales hiring detected — watch for a second signal before investing time."
 
 
@@ -92,7 +128,8 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         text = f"{title} {j.get('post_text') or ''}"
         rec["roles"].append({
             "title": title, "url": j.get("url"), "source": j.get("source"),
-            "posted_date": j.get("posted_date"), "_text": text,
+            "posted_date": j.get("posted_date"), "location": j.get("location") or "",
+            "_text": text,
         })
         role_titles[k].append(title)
 
@@ -115,6 +152,27 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             fams.add("revops")
         if "linkedin_posts" in rec["sources"] and any(_SALES.search(t) for t in titles):
             fams.add("founder_post")
+        # Funding / scaling: fundraise or hyper-growth language anywhere in the posts.
+        if any(_FUNDING.search(x) for x in texts):
+            fams.add("funding")
+        # GTM build: a marketing/growth leadership role present (ideally alongside sales).
+        if any(_MKTG_LEAD.search(t) for t in titles):
+            fams.add("gtm_build")
+        # Org maturity: churn/backfill language, OR a junior->senior ladder in sales.
+        if any(_CHURN.search(x) for x in texts) or (leaders and juniors):
+            fams.add("org_maturity")
+        # Geo expansion: explicit expansion language, OR the SAME role open in 2+ real geos.
+        if any(_GEO.search(x) for x in texts):
+            fams.add("geo_expansion")
+        else:
+            by_role_geo: dict = defaultdict(set)
+            for r in rec["roles"]:
+                loc = re.sub(r"\(.*?\)", " ", (r.get("location") or "")).strip()
+                city = re.split(r"[,/|]", loc)[0].strip()
+                if city and not _GENERIC_LOC.match(city):
+                    by_role_geo[_norm(r["title"])].add(city.lower())
+            if any(len(geos) >= 2 for geos in by_role_geo.values()):
+                fams.add("geo_expansion")
         if not fams:
             continue
         base = sum(_FAMILY_WEIGHT[f] for f in fams)
