@@ -120,11 +120,20 @@ async def send_message(chat_id: int, req: SendMessageRequest, db: Session = Depe
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
+    # A run whose thread died (pod restart, crash) stays 'running' forever —
+    # treat anything silent for 15+ minutes as dead so the chat never wedges.
     running = db.execute(
-        text("SELECT id FROM bob_runs WHERE chat_id = :c AND status = 'running'"), {"c": chat_id}
+        text("SELECT id FROM bob_runs WHERE chat_id = :c AND status = 'running' "
+             "AND updated_at > now() - interval '15 minutes'"),
+        {"c": chat_id},
     ).fetchone()
     if running:
         raise HTTPException(status_code=409, detail="Bob is still working on this chat")
+    db.execute(
+        text("UPDATE bob_runs SET status = 'error', error = 'stale run reaped', updated_at = now() "
+             "WHERE chat_id = :c AND status = 'running'"),
+        {"c": chat_id},
+    )
 
     db.execute(
         text("INSERT INTO bob_messages (chat_id, role, content) VALUES (:c, 'user', :m)"),
