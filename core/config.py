@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     POSTHOG_KEY: str = ""
     POSTHOG_HOST: str = "https://eu.i.posthog.com"
 
+    # BOB (Mesa) — placement intelligence workspace
+    CONTEXT_DEV_API_KEY: str = ""   # Context.dev API key (web search + scrape)
+    BOB_ACCESS_CODE: str = ""       # shared workspace access code; Bob is disabled when empty
+
     # LINKEDIN OUTREACH
     # Generate: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
     LINKEDIN_ENCRYPTION_KEY: str = ""  # base64-encoded 32-byte AES key

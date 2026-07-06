@@ -85,6 +85,18 @@ jobs:
           # Wire the residential proxy (LinkedIn discovery + sending) from app-secrets.
           kubectl set env deployment/${{ env.SERVICE_NAME }} -n studojo \
             --from=secret/app-secrets --keys=linkedin-proxy-url
+          # Bob (Mesa) secrets — only set when configured in GitHub secrets,
+          # so an empty secret never wipes a value already on the deployment.
+          if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \
+              -n studojo
+          fi
+          if [ -n "${{ secrets.BOB_ACCESS_CODE }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              BOB_ACCESS_CODE="${{ secrets.BOB_ACCESS_CODE }}" \
+              -n studojo
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n studojo --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."
             kubectl get pods -n studojo -l app=${{ env.SERVICE_NAME }} -o wide

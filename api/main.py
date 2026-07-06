@@ -18,6 +18,7 @@ from api.routes_linkedin_automation import router as linkedin_automation_router
 from api.routes_partners import router as partners_router
 from api.routes_marketing import router as marketing_router
 from api.routes_mesa import router as mesa_router
+from api.routes_bob import router as bob_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -79,6 +80,7 @@ app.include_router(linkedin_automation_router, prefix="/api/v1")
 app.include_router(partners_router, prefix="/api/v1")
 app.include_router(marketing_router, prefix="/api/v1")
 app.include_router(mesa_router, prefix="/api/v1")
+app.include_router(bob_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

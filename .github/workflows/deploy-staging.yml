@@ -83,6 +83,18 @@ jobs:
             AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4o-mini \
             AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
             -n ${{ env.NAMESPACE }}
+          # Bob (Mesa) secrets — only set when configured in GitHub secrets,
+          # so an empty secret never wipes a value already on the deployment.
+          if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \
+              -n ${{ env.NAMESPACE }}
+          fi
+          if [ -n "${{ secrets.BOB_ACCESS_CODE }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              BOB_ACCESS_CODE="${{ secrets.BOB_ACCESS_CODE }}" \
+              -n ${{ env.NAMESPACE }}
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."

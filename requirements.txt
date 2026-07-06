@@ -29,3 +29,4 @@ beautifulsoup4==4.12.3
 lxml==5.3.0
 linkedin-api==2.3.1
 playwright==1.49.1
+openpyxl==3.1.5
