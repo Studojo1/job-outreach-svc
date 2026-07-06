@@ -1,53 +1,51 @@
-"""Mesa Signal Engine — turn a pile of scraped jobs into ranked company SIGNALS.
+"""Mesa Signal Engine — turn a search's scraped jobs into ranked company SIGNALS.
 
-Same idea the paid tools use (Honeylead / dfy.outreachai / TheirStack): a single
-job posting is noise, but the *combination* of independent signals a company emits
-is intent. This scores every company across independent signal families and
-rewards CONFLUENCE (2+ families = a real signal). Pure function over the standard
-Mesa job dicts — no external calls, no auth, no Apollo — so it runs instantly over
-whatever a search already scraped, from any source.
+General-purpose (works for ANY search, not just sales): a single posting is noise,
+but the combination of independent signals a company emits is intent. Scores every
+company across independent families and rewards CONFLUENCE (2+ = a real signal).
+Pure function over the standard Mesa job dicts — no external calls, no auth.
 
-Signal families (computable from title / company / posted_date / source / post_text):
-  leader_seat   a live Head/VP/Director/Chief of Sales/Revenue/GTM role
-  no_leader     'no leader yet' language in a title/post (founding / first / 0-to-1 / build GTM)
-  army          hiring junior sales roles (SDR/AE/BDR) but NO leadership sales role
-  surge         3+ open sales roles at once
-  revops        a RevOps / Sales Ops hire = they're systematizing sales; a leader usually follows
-  founder_post  the role came from a founder/recruiter hiring POST (source=linkedin_posts) = high intent
+Signal families (all keyword-agnostic — the jobs are already the search's matches):
+  multi_role       hiring 3+ roles you're tracking = actively scaling in your area
+  leadership_open  a Head/VP/Director/Chief/Lead/Chief-of-Staff role is open
+  founder_post     a role came from a founder/recruiter hiring post (high intent)
+  fresh            a role was posted in the last ~10 days
+  multi_source     the company shows up from 2+ sources (corroboration)
+  sales_build      (sales searches only) hiring junior sales but no sales leader
+  revops           (sales searches only) a RevOps / Sales Ops hire = leader follows
+Plus enrichment families folded in later by intelligence.attach_enrichment
+(fresh_funding, leader_departure, enterprise_motion, enterprise_ready).
 """
 
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 
 _LEADER = re.compile(
-    r"\b(head of|head[,\- ]|vp\b|v\.p|vice president|director of|director[,\- ]|chief|cro\b|"
-    r"national head|country head|country manager|zonal head|regional head|business head|"
-    r"global head|svp|founding (gtm|sales|revenue))\b", re.I)
-_SALES = re.compile(
-    r"\b(sales|revenue|gtm|go[- ]to[- ]market|growth|partnership|business development|"
-    r"enterprise|commercial|account)\b", re.I)
-_JUNIOR = re.compile(
-    r"\b(sdr|bdr|account executive|\bae\b|inside sales|sales development|sales executive|"
-    r"business development (rep|associate|executive)|sales associate|sales representative|telecaller)\b", re.I)
-_INTENT = re.compile(
-    r"\b(founding|first (sales|commercial|gtm|revenue) hire|0[ -]?to[ -]?1|0-1|from scratch|"
-    r"build (the|our|out) (sales|gtm|go[- ]to[- ]market|revenue|commercial)|establish (the )?sales|"
-    r"player[- ]coach|set up (the )?sales|reports? (directly )?to (the )?(founder|ceo))\b", re.I)
-_REVOPS = re.compile(
-    r"\b(revenue operations|revops|rev ops|sales operations|sales ops|gtm operations|"
-    r"crm (admin|manager)|salesforce admin|hubspot admin|sales enablement|deal desk)\b", re.I)
+    r"\b(head of|head[,\- ]|vp\b|v\.p|vice president|director of|director[,\- ]|chief|"
+    r"cro\b|cmo\b|cto\b|cfo\b|coo\b|chief of staff|founder'?s office|country head|country manager|"
+    r"national head|regional head|global head|svp|principal|\blead\b)\b", re.I)
+_SALES = re.compile(r"\b(sales|revenue|gtm|go[- ]to[- ]market|business development|account executive|\bae\b|quota)\b", re.I)
+_JUNIOR_SALES = re.compile(r"\b(sdr|bdr|account executive|\bae\b|inside sales|sales development|sales executive|business development (rep|associate|executive)|sales associate)\b", re.I)
+_SALES_LEADER = re.compile(r"\b(head|vp|vice president|director|chief|cro)\b.*\b(sales|revenue|gtm|commercial)\b", re.I)
+_REVOPS = re.compile(r"\b(revenue operations|revops|rev ops|sales operations|sales ops|gtm operations|sales enablement|deal desk)\b", re.I)
 
 _FAMILY_WEIGHT = {
-    "leader_seat": 25, "no_leader": 18, "army": 18, "surge": 10, "revops": 12, "founder_post": 20,
+    "multi_role": 18, "leadership_open": 16, "founder_post": 22, "fresh": 8,
+    "multi_source": 6, "sales_build": 12, "revops": 8,
 }
 _FAMILY_LABEL = {
-    "leader_seat": "Leadership sales seat open (live)",
-    "no_leader": "'No leader yet' language",
-    "army": "Hiring an army, no general",
-    "surge": "Hiring surge (3+ sales roles)",
-    "revops": "RevOps hire (systematizing sales)",
+    "multi_role": "Hiring surge (3+ roles you track)",
+    "leadership_open": "Leadership role open",
     "founder_post": "Founder/recruiter hiring post (high intent)",
+    "fresh": "Fresh posting (last ~10 days)",
+    "multi_source": "Corroborated across 2+ sources",
+    "sales_build": "Building a sales team, no leader yet",
+    "revops": "RevOps hire (systematizing sales)",
 }
+# families that are meaningful enough to count toward confluence (exclude the two
+# soft ones so 'fresh + multi_source' alone isn't treated as strong intent)
+_CORE = {"multi_role", "leadership_open", "founder_post", "sales_build", "revops"}
 
 
 def _norm(name: str) -> str:
@@ -56,29 +54,40 @@ def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", n)
 
 
-def _read(families: set, top_leader: str) -> str:
-    if "founder_post" in families:
-        return "A founder/recruiter is personally posting the hire — reach them directly, the intent is explicit."
+def _is_fresh(posted: str) -> bool:
+    if not posted:
+        return False
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(posted))
+    if not m:
+        return False
+    try:
+        d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - d).days <= 10
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _read(fams: set, lead_title: str, n_roles: int) -> str:
+    if "founder_post" in fams:
+        return "A founder/recruiter is personally posting this hire — reach them directly, the intent is explicit."
     bits = []
-    if "leader_seat" in families:
-        bits.append(f"Live leadership role ({top_leader[:40]}) — apply direct and own the function.")
-    if "army" in families:
-        bits.append("Building a sales team with no leader — pitch the Head-of-Sales seat.")
-    if "revops" in families:
-        bits.append("A RevOps hire means they're systematizing sales; a VP Sales hire usually follows within a quarter.")
-    if "no_leader" in families:
-        bits.append("Job language says the sales org is being built from zero — greenfield leadership seat.")
-    if "surge" in families and not bits:
-        bits.append("Hiring across sales at volume — a leader to run it is the natural next hire.")
-    return " ".join(bits) or "Sales hiring detected — watch for a second signal before investing time."
+    if "leadership_open" in fams and lead_title:
+        bits.append(f"Opening a leadership role ({lead_title[:40]}) — they're building this function out.")
+    if "multi_role" in fams:
+        bits.append(f"Hiring {n_roles} roles you're tracking — actively scaling in your area.")
+    if "sales_build" in fams:
+        bits.append("Building a sales team with no leader yet — the leadership seat is the gap.")
+    if "revops" in fams:
+        bits.append("A RevOps hire usually precedes a VP Sales hire by a quarter.")
+    if not bits:
+        bits.append("On your radar — watch for a second signal before investing time.")
+    return " ".join(bits)
 
 
 def score_jobs(jobs: list[dict]) -> list[dict]:
-    """Group jobs by company and score each on the signal families above.
-    Returns companies ranked by score (highest first). Confluence (2+ families)
-    earns a bonus; single-signal companies are kept but ranked below."""
+    """Group a search's jobs by company and score each on the signal families.
+    Ranked by score; confluence (2+ core families) earns a bonus."""
     by_company: dict[str, dict] = {}
-    role_titles: dict[str, list] = defaultdict(list)
     for j in jobs:
         company = (j.get("company") or "").strip()
         if not company or company == "—":
@@ -88,53 +97,58 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             continue
         rec = by_company.setdefault(k, {"company": company, "sources": set(), "roles": []})
         rec["sources"].add(j.get("source") or "")
-        title = j.get("title") or ""
-        text = f"{title} {j.get('post_text') or ''}"
         rec["roles"].append({
-            "title": title, "url": j.get("url"), "source": j.get("source"),
-            "posted_date": j.get("posted_date"), "_text": text,
+            "title": j.get("title") or "", "posted_date": j.get("posted_date"),
+            "source": j.get("source"), "text": f"{j.get('title') or ''} {j.get('post_text') or ''}",
         })
-        role_titles[k].append(title)
 
     out = []
     for k, rec in by_company.items():
-        titles = [r["title"] for r in rec["roles"]]
-        texts = [r["_text"] for r in rec["roles"]]
+        roles = rec["roles"]
+        titles = [r["title"] for r in roles]
         fams: set = set()
-        leaders = [t for t in titles if _LEADER.search(t) and _SALES.search(t)]
+        # general families
+        if len(roles) >= 3:
+            fams.add("multi_role")
+        leaders = [t for t in titles if _LEADER.search(t)]
         if leaders:
-            fams.add("leader_seat")
-        if any(_INTENT.search(t) for t in texts):
-            fams.add("no_leader")
-        juniors = [t for t in titles if _JUNIOR.search(t)]
-        if juniors and not leaders:
-            fams.add("army")
-        if len([t for t in titles if _SALES.search(t)]) >= 3:
-            fams.add("surge")
-        if any(_REVOPS.search(t) for t in titles):
-            fams.add("revops")
-        if "linkedin_posts" in rec["sources"] and any(_SALES.search(t) for t in titles):
+            fams.add("leadership_open")
+        if "linkedin_posts" in rec["sources"]:
             fams.add("founder_post")
+        if any(_is_fresh(r["posted_date"]) for r in roles):
+            fams.add("fresh")
+        if len([s for s in rec["sources"] if s]) >= 2:
+            fams.add("multi_source")
+        # sales-specific (only when the roles are clearly sales)
+        sales_titles = [t for t in titles if _SALES.search(t)]
+        if sales_titles:
+            junior = [t for t in sales_titles if _JUNIOR_SALES.search(t)]
+            has_sales_leader = any(_SALES_LEADER.search(t) for t in sales_titles)
+            if junior and not has_sales_leader:
+                fams.add("sales_build")
+            if any(_REVOPS.search(t) for t in titles):
+                fams.add("revops")
         if not fams:
             continue
+
         base = sum(_FAMILY_WEIGHT[f] for f in fams)
-        n = len(fams)
-        conf = 25 if n >= 3 else (15 if n >= 2 else 0)
+        n_core = len(fams & _CORE)
+        conf = 25 if n_core >= 3 else (15 if n_core >= 2 else 0)
         score = min(100, base + conf)
-        dates = [r["posted_date"] for r in rec["roles"] if r.get("posted_date")]
+        dates = [r["posted_date"] for r in roles if r.get("posted_date")]
         out.append({
             "company": rec["company"],
             "score": score,
-            "n_families": n,
-            "confluence": n >= 2,
+            "n_families": len(fams),
+            "confluence": n_core >= 2,
             "families": sorted(fams),
             "signals": [_FAMILY_LABEL[f] for f in sorted(fams)],
-            "top_role": leaders[0] if leaders else (titles[0] if titles else ""),
-            "role_count": len(rec["roles"]),
+            "top_role": (leaders[0] if leaders else (titles[0] if titles else "")),
+            "role_count": len(roles),
             "sample_roles": titles[:6],
             "sources": sorted(s for s in rec["sources"] if s),
             "freshest_posted": max(dates) if dates else None,
-            "read": _read(fams, leaders[0] if leaders else ""),
+            "read": _read(fams, leaders[0] if leaders else "", len(roles)),
             "enriched": False,
         })
     out.sort(key=lambda x: (-x["score"], x["company"]))

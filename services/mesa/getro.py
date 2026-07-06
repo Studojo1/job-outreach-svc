@@ -22,7 +22,14 @@ logger = logging.getLogger(__name__)
 # Board numeric collection ids (from each board's __NEXT_DATA__.network.id).
 # Extend by fetching a board URL and reading network.id. Peak XV / Lightspeed /
 # Nexus / Bessemer are NOT on Getro (other platforms) — omitted deliberately.
-GETRO_BOARDS = {"accel": 8672, "blume": 32333}
+# Large accelerator portfolios (Techstars, Antler) + big VCs give broad, multi-
+# function, multi-geo coverage; Accel/Blume anchor India.
+GETRO_BOARDS = {
+    "accel": 8672, "blume": 32333,
+    "techstars": 89, "antler": 7715, "generalcatalyst": 222, "insight": 246,
+    "menlo": 767, "ggv": 764, "scalevp": 776, "nfx": 307, "uncork": 247,
+    "susa": 386, "craft": 340, "eniac": 117,
+}
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
