@@ -18,6 +18,28 @@ logger = logging.getLogger(__name__)
 # runtime per Run-now.
 _MAX_TERMS = 8
 
+# Sources that genuinely search server-side by the query — trust their results.
+# The rest are aggregated FEEDS (jobicy/remotive/...) that return loosely- or
+# un-filtered jobs (e.g. jobicy only tags on the first keyword token), so we
+# relevance-filter their output against the searched term.
+_TRUSTED_SEARCH = {"linkedin", "linkedin_posts", "getro", "indeed", "naukri"}
+
+
+def _relevant(job: dict, term: str) -> bool:
+    """Keep a feed job only if its title/company (or post text) actually relates
+    to the searched term. Stem-aware (founders -> founder) so 'founders office'
+    matches "Founder's Office" but drops "Customer Success Manager"."""
+    toks = [t for t in re.sub(r"[^a-z0-9]", " ", (term or "").lower()).split() if len(t) >= 3]
+    if not toks:
+        return True
+    hay = " " + re.sub(r"[^a-z0-9]", " ",
+        f"{job.get('title', '')} {job.get('company', '')} {job.get('post_text', '') or ''}".lower()) + " "
+    for t in toks:
+        stem = t[:-1] if (t.endswith("s") and len(t) > 3) else t
+        if f" {t}" in hay or f" {stem}" in hay:
+            return True
+    return False
+
 
 def _terms(keywords: str) -> list[str]:
     parts = [p.strip() for p in re.split(r"[,/;|]| or | OR ", keywords or "") if p.strip()]
@@ -57,6 +79,8 @@ def run_search(db: Session, search: MesaSearch) -> dict:
                 if not eid or eid in src_seen:
                     continue
                 src_seen.add(eid)
+                if src not in _TRUSTED_SEARCH and not _relevant(j, term):
+                    continue  # feed board returned an off-keyword job — drop the noise
                 j["source"] = src
                 scraped.append(j)
                 per_source[src] += 1
