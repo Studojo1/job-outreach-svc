@@ -41,5 +41,9 @@ class MesaJob(Base):
     company = Column(Text)
     location = Column(Text)
     posted_date = Column(String(40))  # LinkedIn's listdate, e.g. '2026-06-24'
-    url = Column(Text)
+    url = Column(Text)                 # jobs: listing url · posts: poster's LinkedIn profile
+    # Post-only fields (null for job-board rows). Added by migration 041.
+    author = Column(Text)              # who posted the hiring post
+    apply_link = Column(Text)          # apply email/form pulled from the post body
+    post_text = Column(Text)           # first ~1500 chars of the post
     scraped_at = Column(DateTime, default=datetime.utcnow)

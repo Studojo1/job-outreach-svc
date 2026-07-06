@@ -75,6 +75,7 @@ def run_search(db: Session, search: MesaSearch) -> dict:
             search_id=search.id, source=j["source"], linkedin_job_id=eid,
             title=j.get("title"), company=j.get("company"), location=j.get("location"),
             posted_date=j.get("posted_date"), url=j.get("url"),
+            author=j.get("author"), apply_link=j.get("apply_link"), post_text=j.get("post_text"),
         ))
         existing.add(key)
         new += 1

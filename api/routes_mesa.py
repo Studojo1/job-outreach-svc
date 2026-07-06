@@ -20,7 +20,9 @@ from api.dependencies import get_current_user
 from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
 from database.session import SessionLocal, get_db
+from services.mesa.intelligence import attach_enrichment, enrichment_status, start_enrichment
 from services.mesa.runner import run_due_searches, run_search
+from services.mesa.signals import score_jobs
 from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -173,6 +175,7 @@ async def list_jobs(
         "jobs": [{
             "id": j.id, "title": j.title, "company": j.company, "location": j.location,
             "posted_date": j.posted_date, "url": j.url, "source": j.source,
+            "author": j.author, "apply_link": j.apply_link, "post_text": j.post_text,
             "scraped_at": j.scraped_at.isoformat() if j.scraped_at else None,
         } for j in rows],
     }
@@ -184,14 +187,71 @@ async def export_jobs_csv(search_id: int, current_user: User = Depends(get_curre
     rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).order_by(MesaJob.scraped_at.desc()).all()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["title", "company", "location", "posted_date", "source", "url", "scraped_at"])
+    w.writerow(["title", "company", "author", "apply_link", "linkedin_url", "location",
+                "posted_date", "source", "post_text", "scraped_at"])
     for j in rows:
-        w.writerow([j.title, j.company, j.location, j.posted_date, j.source, j.url,
+        w.writerow([j.title, j.company, j.author, j.apply_link, j.url, j.location,
+                    j.posted_date, j.source, j.post_text,
                     j.scraped_at.isoformat() if j.scraped_at else ""])
     buf.seek(0)
     fname = f"mesa_{s.name.replace(' ', '_')[:40]}.csv"
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ── Signals (the intelligence layer over a search's results) ─────────────────────
+@router.get("/searches/{search_id}/signals")
+async def search_signals(
+    search_id: int,
+    limit: int = Query(50, le=200),
+    confluence_only: bool = Query(False, description="only companies emitting 2+ independent signal families"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Score every company in this search's scraped jobs across independent signal
+    families (leadership seat open, army-no-general, RevOps, founder hiring post,
+    'no leader yet' language, hiring surge) and rank by CONFLUENCE — 2+ families is
+    a real buying signal, one alone is usually noise. Works over any source."""
+    _owned(db, search_id, current_user)
+    rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).all()
+    jobs = [{
+        "title": j.title, "company": j.company, "location": j.location,
+        "posted_date": j.posted_date, "url": j.url, "source": j.source, "post_text": j.post_text,
+    } for j in rows]
+    ranked = score_jobs(jobs)
+    # fold in any background enrichment (facts + news signals + analyst brief) and re-score
+    ranked = attach_enrichment(search_id, ranked)
+    if confluence_only:
+        ranked = [r for r in ranked if r["confluence"]]
+    return {
+        "total_companies": len(ranked),
+        "confluence_count": sum(1 for r in ranked if r["confluence"]),
+        "enrichment": enrichment_status(search_id),
+        "companies": ranked[:limit],
+    }
+
+
+@router.post("/searches/{search_id}/signals/enrich")
+async def enrich_signals(
+    search_id: int,
+    limit: int = Query(15, le=40, description="how many top-ranked companies to deep-enrich"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Kick off BACKGROUND deep enrichment for the top-ranked companies: company
+    facts (LLM + web, no Apollo), fresh-funding + leader-departure news signals,
+    and an analyst brief (confidence, signal narrative, outreach opener, kill-signal
+    check). Poll GET /signals to see results fill in (`enrichment` field shows
+    progress; enriched companies gain `facts` / `brief` / news signals and re-rank)."""
+    _owned(db, search_id, current_user)
+    rows = db.query(MesaJob).filter(MesaJob.search_id == search_id).all()
+    jobs = [{
+        "title": j.title, "company": j.company, "location": j.location,
+        "posted_date": j.posted_date, "url": j.url, "source": j.source, "post_text": j.post_text,
+    } for j in rows]
+    ranked = score_jobs(jobs)[:limit]
+    start_enrichment(search_id, [{"company": r["company"], "families": r["families"]} for r in ranked])
+    return {"status": "started", "enriching": len(ranked)}
 
 
 # ── Internal: daily sweep (cluster-only, no auth — called by the CronJob) ─────────
