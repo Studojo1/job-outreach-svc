@@ -60,6 +60,61 @@ _GEO = re.compile(
 # "Remote"/generic locations that must NOT count as distinct geos for expansion.
 _GENERIC_LOC = re.compile(r"^(remote|anywhere|flexible|worldwide|global|india|—|n/?a|)$", re.I)
 
+# ── Negative signals (suppressors) — dock the score, they mean bad timing ──────
+# Leader already hired: pitching a Head-of-Sales seat they just filled is wasted.
+_FILLED = re.compile(
+    r"\b(welcome[sd]? (our )?new (head|vp|chief|director|cro|cmo)|"
+    r"(thrilled|excited|happy) to (welcome|announce)[^.]{0,40}(joined|joins|as (our )?(head|vp|chief|cro))|"
+    r"has joined (us )?as (our )?(head|vp|chief|cro|cmo)|role (has been )?filled|position closed)\b", re.I)
+# Contraction, not expansion: worst possible time to sell into them.
+_LAYOFF = re.compile(
+    r"\b(layoff|lay off|laid off|restructur|downsiz|hiring freeze|freeze on hiring|"
+    r"reduction in force|\brif\b|winding down|shutting down)\b", re.I)
+
+
+def _age_days(s, now=None):
+    """Best-effort age of a posting in days from a messy posted_date string.
+    Handles ISO dates and relative labels ('3 days ago', 'today'). Returns None
+    when unparseable so the caller can treat it as neutral, not stale."""
+    if not s:
+        return None
+    from datetime import datetime, timedelta
+    now = now or datetime.utcnow()
+    txt = str(s).strip().lower()
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", txt)
+    if m:
+        try:
+            d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return max(0, (now - d).days)
+        except ValueError:
+            return None
+    if "today" in txt or "just" in txt or "hour" in txt or "minute" in txt:
+        return 0
+    if "yesterday" in txt:
+        return 1
+    m = re.search(r"(\d+)\s*(day|week|month)", txt)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        return n * (1 if unit == "day" else 7 if unit == "week" else 30)
+    return None
+
+
+def _recency_factor(age):
+    """Multiplier that keeps fresh signals ahead of stale ones. Unknown age is a
+    mild discount, not a penalty (many good sources omit dates)."""
+    if age is None:
+        return 0.9
+    if age <= 7:
+        return 1.0
+    if age <= 14:
+        return 0.95
+    if age <= 30:
+        return 0.85
+    if age <= 60:
+        return 0.7
+    return 0.55
+
 _FAMILY_WEIGHT = {
     "leader_seat": 25, "no_leader": 18, "army": 18, "surge": 10, "revops": 12, "founder_post": 20,
     "funding": 16, "geo_expansion": 14, "org_maturity": 12, "gtm_build": 14,
@@ -178,7 +233,29 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         base = sum(_FAMILY_WEIGHT[f] for f in fams)
         n = len(fams)
         conf = 25 if n >= 3 else (15 if n >= 2 else 0)
-        score = min(100, base + conf)
+        # Source diversity: the same intent seen across independent sources
+        # (ATS + founder post + aggregator) is far more credible than one feed.
+        n_src = len([s for s in rec["sources"] if s])
+        src_bonus = 10 if n_src >= 3 else (5 if n_src >= 2 else 0)
+
+        # Recency: weight the whole score by how fresh the freshest role is.
+        ages = [a for a in (_age_days(r.get("posted_date")) for r in rec["roles"]) if a is not None]
+        freshest_age = min(ages) if ages else None
+        rf = _recency_factor(freshest_age)
+
+        raw = base + conf + src_bonus
+        score = raw * rf
+
+        # Negative signals: they already solved it, or it's the wrong time.
+        warnings: list[str] = []
+        if any(_FILLED.search(x) for x in texts) and "leader_seat" not in fams:
+            score *= 0.4
+            warnings.append("Leadership role looks recently filled — likely too late.")
+        if any(_LAYOFF.search(x) for x in texts):
+            score *= 0.3
+            warnings.append("Layoff / hiring-freeze language — bad timing to sell in.")
+
+        score = max(0, min(100, round(score)))
         dates = [r["posted_date"] for r in rec["roles"] if r.get("posted_date")]
         out.append({
             "company": rec["company"],
@@ -187,13 +264,17 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             "confluence": n >= 2,
             "families": sorted(fams),
             "signals": [_FAMILY_LABEL[f] for f in sorted(fams)],
+            "warnings": warnings,
             "top_role": leaders[0] if leaders else (titles[0] if titles else ""),
             "role_count": len(rec["roles"]),
             "sample_roles": titles[:6],
             "sources": sorted(s for s in rec["sources"] if s),
             "freshest_posted": max(dates) if dates else None,
+            "freshest_age_days": freshest_age,
+            "recency_factor": round(rf, 2),
             "read": _read(fams, leaders[0] if leaders else ""),
             "enriched": False,
         })
-    out.sort(key=lambda x: (-x["score"], x["company"]))
+    # Rank by score, then confluence, then most-recent, then name (stable).
+    out.sort(key=lambda x: (-x["score"], -x["n_families"], x["freshest_age_days"] if x["freshest_age_days"] is not None else 999, x["company"]))
     return out
