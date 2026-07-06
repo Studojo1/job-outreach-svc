@@ -228,23 +228,32 @@ def _now_iso() -> str:
 
 
 def _push_event(db, run_id: int, ev_type: str, label: str, detail: str = "", credits: int = 0) -> None:
+    """Best-effort progress event — must never abort the run's DB session."""
     ev = {"ts": _now_iso(), "type": ev_type, "label": label[:160], "detail": detail[:400], "credits": credits}
-    db.execute(
-        text(
-            "UPDATE bob_runs SET events = events || :ev::jsonb, "
-            "credits_used = credits_used + :credits, updated_at = now() WHERE id = :id"
-        ),
-        {"ev": json.dumps([ev]), "credits": credits, "id": run_id},
-    )
-    db.commit()
+    try:
+        db.execute(
+            text(
+                "UPDATE bob_runs SET events = events || CAST(:ev AS jsonb), "
+                "credits_used = credits_used + :credits, updated_at = now() WHERE id = :id"
+            ),
+            {"ev": json.dumps([ev]), "credits": credits, "id": run_id},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("[BOB] push_event failed (run %s)", run_id, exc_info=True)
 
 
 def _set_counters(db, run_id: int, counters: dict) -> None:
-    db.execute(
-        text("UPDATE bob_runs SET counters = :c::jsonb, updated_at = now() WHERE id = :id"),
-        {"c": json.dumps(counters), "id": run_id},
-    )
-    db.commit()
+    try:
+        db.execute(
+            text("UPDATE bob_runs SET counters = CAST(:c AS jsonb), updated_at = now() WHERE id = :id"),
+            {"c": json.dumps(counters), "id": run_id},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("[BOB] set_counters failed (run %s)", run_id, exc_info=True)
 
 
 def _finish_run(db, run_id: int, chat_id: int, status: str, answer: str = "", error: str = "") -> None:
@@ -354,7 +363,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
     if name == "create_table":
         cols = args.get("columns") or []
         row = db.execute(
-            text("INSERT INTO bob_tables (chat_id, name, columns) VALUES (:c, :n, :cols::jsonb) RETURNING id"),
+            text("INSERT INTO bob_tables (chat_id, name, columns) VALUES (:c, :n, CAST(:cols AS jsonb)) RETURNING id"),
             {"c": chat_id, "n": (args.get("name") or "Results")[:120], "cols": json.dumps(cols)},
         ).fetchone()
         db.commit()
@@ -368,7 +377,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         for i, r in enumerate(rows):
             if isinstance(r, dict):
                 db.execute(
-                    text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, :c::jsonb)"),
+                    text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb))"),
                     {"t": tid, "p": pos + i + 1, "c": json.dumps(r, ensure_ascii=False)},
                 )
         db.execute(text("UPDATE bob_tables SET updated_at = now() WHERE id=:t"), {"t": tid})
@@ -384,7 +393,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         keys = {c.get("key") for c in existing}
         merged = list(existing) + [c for c in new_cols if c.get("key") not in keys]
         db.execute(
-            text("UPDATE bob_tables SET columns=:c::jsonb, updated_at=now() WHERE id=:t"),
+            text("UPDATE bob_tables SET columns=CAST(:c AS jsonb), updated_at=now() WHERE id=:t"),
             {"c": json.dumps(merged), "t": tid},
         )
         db.commit()
@@ -400,7 +409,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             cells = u.get("cells") or {}
             if rid and isinstance(cells, dict):
                 db.execute(
-                    text("UPDATE bob_rows SET cells = cells || :c::jsonb, updated_at=now() WHERE id=:r AND table_id=:t"),
+                    text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at=now() WHERE id=:r AND table_id=:t"),
                     {"c": json.dumps(cells, ensure_ascii=False), "r": rid, "t": tid},
                 )
                 n += 1
@@ -489,6 +498,7 @@ def run_agent(run_id: int, chat_id: int) -> None:
                     _push_event(db, run_id, "error", "Retrieval error", str(e)[:200])
                 except Exception as e:  # noqa: BLE001 — agent must survive tool failures
                     logger.exception("[BOB] tool %s failed", fname)
+                    db.rollback()  # clear any aborted transaction so the run can continue
                     result = f"TOOL ERROR: {e}. Adapt or finish."
 
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
@@ -511,6 +521,7 @@ def run_agent(run_id: int, chat_id: int) -> None:
     except Exception as e:  # noqa: BLE001
         logger.exception("[BOB] run %s crashed", run_id)
         try:
+            db.rollback()  # session may hold an aborted transaction
             _finish_run(db, run_id, chat_id, "error",
                         answer="Something went wrong during this run. Please try again.",
                         error=str(e))

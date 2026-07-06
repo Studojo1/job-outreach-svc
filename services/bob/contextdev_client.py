@@ -70,8 +70,8 @@ def _cache_put(db, key: str, kind: str, request: dict, payload: dict, credits: i
         db.execute(
             text(
                 "INSERT INTO bob_evidence_cache (cache_key, kind, request, payload, credits_used, expires_at) "
-                "VALUES (:k, :kind, :req::jsonb, :payload::jsonb, :credits, :exp) "
-                "ON CONFLICT (cache_key) DO UPDATE SET payload = :payload::jsonb, credits_used = :credits, "
+                "VALUES (:k, :kind, CAST(:req AS jsonb), CAST(:payload AS jsonb), :credits, :exp) "
+                "ON CONFLICT (cache_key) DO UPDATE SET payload = CAST(:payload AS jsonb), credits_used = :credits, "
                 "created_at = now(), expires_at = :exp"
             ),
             {
