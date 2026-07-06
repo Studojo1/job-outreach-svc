@@ -22,7 +22,7 @@ _MAX_TERMS = 8
 # The rest are aggregated FEEDS (jobicy/remotive/...) that return loosely- or
 # un-filtered jobs (e.g. jobicy only tags on the first keyword token), so we
 # relevance-filter their output against the searched term.
-_TRUSTED_SEARCH = {"linkedin", "linkedin_posts", "getro", "indeed", "naukri"}
+_TRUSTED_SEARCH = {"linkedin", "linkedin_posts", "getro", "indeed", "naukri", "ats"}
 
 
 def _relevant(job: dict, term: str) -> bool:
@@ -60,6 +60,7 @@ def run_search(db: Session, search: MesaSearch) -> dict:
     terms = _terms(search.keywords)
     scraped: list[dict] = []
     per_source: Counter = Counter()
+    raw_source: Counter = Counter()  # raw returns per source (before relevance filter)
     for src in sources:
         fn = SOURCE_SCRAPERS.get(src)
         if not fn:
@@ -74,6 +75,7 @@ def run_search(db: Session, search: MesaSearch) -> dict:
             except Exception as e:  # noqa: BLE001 — one bad source/term must not sink the rest
                 logger.error("[MESA] %s/%r failed for search %s: %s", src, term, search.id, e)
                 jobs = []
+            raw_source[src] += len(jobs)
             for j in jobs:
                 eid = j.get("external_id")
                 if not eid or eid in src_seen:
@@ -105,8 +107,12 @@ def run_search(db: Session, search: MesaSearch) -> dict:
         new += 1
     search.last_run_at = datetime.utcnow()
     db.commit()
-    logger.info("[MESA] search %s: %d scraped %s, %d new", search.id, len(scraped), per_source, new)
-    return {"scraped": len(scraped), "new": new, "by_source": per_source}
+    # Health line: raw returns vs kept-after-filter, per source. A source showing
+    # raw=0 is silently blocked/broken; kept<<raw means it's returning off-keyword noise.
+    health = {s: f"{per_source[s]}/{raw_source[s]}" for s in raw_source}
+    logger.info("[MESA] search %s: %d scraped, %d new | kept/raw by source: %s",
+                search.id, len(scraped), new, health)
+    return {"scraped": len(scraped), "new": new, "by_source": dict(per_source), "raw_by_source": dict(raw_source)}
 
 
 def run_due_searches(db: Session, min_hours: float = 20.0) -> dict:

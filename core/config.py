@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     APOLLO_API_KEY_2: str = ""  # fallback key when primary is exhausted
     APOLLO_API_KEY_3: str = ""  # third key slot (optional)
 
+    # MESA job scraping (optional)
+    MESA_ATS_BOARDS: str = ""   # override ATS boards: "greenhouse:stripe,ashby:ramp,..."
+    ADZUNA_APP_ID: str = ""     # Adzuna aggregated jobs API (source "adzuna")
+    ADZUNA_APP_KEY: str = ""
+    ADZUNA_COUNTRY: str = "in"
+
     # GMAIL OAUTH
     GMAIL_CLIENT_ID: str
     GMAIL_CLIENT_SECRET: str
