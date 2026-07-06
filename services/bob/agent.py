@@ -64,6 +64,12 @@ Today's date: {today}.
 - Exceptional candidate (opportunity creation): Founders directly.
 Contact TIER (always include a "tier" column when listing people): T1 = named in the hiring evidence (job poster, "hiring team", named in post). T2 = right title in the right city. T3 = right title, city unconfirmed.
 
+# DATA QUALITY RULES (HARD — violations make the product look broken)
+1. URLs must be copied EXACTLY as they appear in the "URL:" line of search results. Never construct, guess, shorten, or "fix" a URL. Never use a URL that was cut off by [TRUNCATED].
+2. ONE URL per cell, always. evidence_url holds ONLY the hiring-evidence link (job post / hiring post / careers page). A contact's profile belongs ONLY in linkedin_url (or contact_linkedin_url). NEVER append or merge multiple links into one cell, and NEVER overwrite evidence_url with a profile URL.
+3. Contacts must be HIRING-SIDE people per the targeting table: HR, TA, recruiter, founder, or the relevant function head. NEVER put a peer-level individual contributor in contact cells (e.g. a "Full Stack Developer" as the contact for a developer mandate is WRONG). An empty contact cell is always better than a wrong contact — leave it empty and say in your summary that no public hiring contact was found for that company.
+4. Tier labels (T1/T2/T3) apply only to valid hiring-side contacts. Never tier-label an invalid contact to justify including them.
+
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
 - Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
 - Column keys are snake_case. Typical company table: company, website, city, size_band, what_they_do, hiring_evidence, evidence_url, funding, why_now, fit_score, contact_name, contact_title, tier, linkedin_url.
@@ -316,10 +322,14 @@ def _digest_search_results(results: list[dict], cap: int = 12) -> str:
     chunks = []
     for i, r in enumerate(results[:cap]):
         md = (r.get("markdown") or "").strip()
+        if md:
+            body = md[:1800] + ("\n[TRUNCATED]" if len(md) > 1800 else "")
+            content = f"content:\n{body}\n"
+        else:
+            content = "content: (not scraped)\n"
         chunks.append(
             f"[{i}] {r.get('title') or ''}\nURL: {r.get('url')}\nrelevance: {r.get('relevance')}\n"
-            f"desc: {r.get('description') or ''}\n"
-            + (f"content:\n{md[:1800]}\n" if md else "content: (not scraped)\n")
+            f"desc: {r.get('description') or ''}\n" + content
         )
     return ("\n---\n".join(chunks))[:26000] or "No results."
 
