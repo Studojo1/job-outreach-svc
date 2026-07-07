@@ -110,6 +110,68 @@ def health_check():
     return {"status": "online"}
 
 
+# ── Open-tracking pixel ───────────────────────────────────────────────────────
+# Public (unauthenticated) — loaded by the recipient's mail client. Records an
+# open against the emails_sent row that carries this token, then returns a 1x1
+# transparent GIF. Always returns the pixel (never errors to the client).
+#
+# NOTE: pixel opens are approximate. Apple Mail Privacy Protection and Gmail's
+# image proxy pre-fetch images, so we filter opens that arrive within a couple
+# of seconds of send (proxy prefetch) and count repeats separately.
+import base64 as _b64
+from datetime import datetime as _dt, timedelta as _td
+from fastapi import Response
+from fastapi.responses import Response as _FResponse
+
+# 1x1 transparent GIF
+_TRACKING_PIXEL = _b64.b64decode(
+    "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+)
+_PIXEL_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+# Ignore a pixel load arriving within this window of send_at — almost certainly
+# a mail-provider image prefetch, not a human open.
+_OPEN_PREFETCH_GUARD_SECONDS = 3
+
+
+@app.get("/t/{token}.png")
+@app.get("/t/{token}.gif")
+def tracking_pixel(token: str):
+    """Record an email open and return a 1x1 transparent pixel."""
+    from database.session import SessionLocal
+    from database.models import EmailSent
+
+    try:
+        db = SessionLocal()
+        try:
+            email = (
+                db.query(EmailSent)
+                .filter(EmailSent.tracking_token == token)
+                .first()
+            )
+            if email is not None:
+                now = _dt.utcnow()
+                is_prefetch = (
+                    email.sent_at is not None
+                    and now - email.sent_at < _td(seconds=_OPEN_PREFETCH_GUARD_SECONDS)
+                )
+                if not is_prefetch:
+                    email.open_count = (email.open_count or 0) + 1
+                    email.last_opened_at = now
+                    if email.first_opened_at is None:
+                        email.first_opened_at = now
+                    db.commit()
+        finally:
+            db.close()
+    except Exception as e:  # never let tracking break the pixel response
+        logger.warning("tracking_pixel failed for token=%s: %s", token, e)
+
+    return _FResponse(content=_TRACKING_PIXEL, media_type="image/gif", headers=_PIXEL_HEADERS)
+
+
 # ── Debug Console ─────────────────────────────────────────────────────────────
 import collections
 import logging

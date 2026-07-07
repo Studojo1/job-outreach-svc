@@ -58,6 +58,21 @@ REPLY_CHECK_INTERVAL = 300  # 5 minutes between reply checks
 _last_reply_check: float = 0.0  # module-level timestamp for throttling
 
 
+def _ensure_tracking_token(email) -> str:
+    """Assign a random open-tracking token to an email row if it lacks one.
+
+    Returns the pixel URL to embed in the email so that a load of the pixel is
+    recorded against this row by GET /job-outreach/t/{token}.png.
+    """
+    import secrets
+    from core.config import settings
+
+    if not email.tracking_token:
+        email.tracking_token = secrets.token_urlsafe(24)
+    base = settings.PUBLIC_BASE_URL.rstrip("/")
+    return f"{base}/job-outreach/t/{email.tracking_token}.png"
+
+
 # ── Schedule Computation ─────────────────────────────────────────────────────
 
 def compute_campaign_schedule(db, campaign_id: int):
@@ -495,8 +510,10 @@ def _send_ready(db) -> tuple:
 
         access_token = token_cache[acct_id]
 
-        # Lock this email so concurrent cycles cannot re-send it
+        # Lock this email so concurrent cycles cannot re-send it. Mint the
+        # open-tracking token now so it is persisted before the send.
         email.status = "sending"
+        pixel_url = _ensure_tracking_token(email)
         db.commit()
 
         # Send the email
@@ -510,6 +527,7 @@ def _send_ready(db) -> tuple:
                 subject=email.subject,
                 body=email.body,
                 from_email=account.email_address,
+                pixel_url=pixel_url,
             )
 
             email.status = "sent"
@@ -689,9 +707,10 @@ def _process_followups(db) -> tuple:
                 continue
         access_token = token_cache[acct_id]
 
-        # Lock this follow-up as sending
+        # Lock this follow-up as sending. Mint its own open-tracking token.
         fu.status = "sending"
         fu.body = body
+        pixel_url = _ensure_tracking_token(fu)
         db.commit()
 
         try:
@@ -703,6 +722,7 @@ def _process_followups(db) -> tuple:
                 from_email=account.email_address,
                 thread_id=parent.thread_id,
                 in_reply_to_header=parent.message_id_header,
+                pixel_url=pixel_url,
             )
 
             fu.status = "sent"

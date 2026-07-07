@@ -203,6 +203,13 @@ class EmailSent(Base):
     reply_received_at = Column(DateTime)               # When first reply was received
     reply_sentiment = Column(String(20))               # positive, negative, neutral
     bounce_reason = Column(Text)                       # Bounce reason if bounced
+    # Open tracking via 1x1 pixel. tracking_token is embedded in the pixel URL;
+    # the public /t/{token}.png endpoint stamps these when the lead loads it.
+    # Approximate — mail-client image prefetch (Apple MPP, Gmail proxy) inflates.
+    tracking_token = Column(String(64))                # Random per-email pixel token
+    first_opened_at = Column(DateTime)                 # First pixel load
+    last_opened_at = Column(DateTime)                  # Most recent pixel load
+    open_count = Column(Integer, default=0)            # Total pixel loads
     is_test = Column(Boolean, default=False)           # True for "Send Test Emails" feature
     followup_number = Column(Integer, nullable=False, default=0)  # 0 = Touch 1, 1 = Touch 2, 2 = Touch 3
     parent_email_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="CASCADE"))  # Points to Touch 1 for follow-ups

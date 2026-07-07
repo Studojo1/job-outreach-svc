@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # FRONTEND
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Public base URL of this service, used to build the open-tracking pixel URL
+    # embedded in outreach emails. Must be the externally reachable host that
+    # serves /job-outreach/t/{token}.png (ingress), e.g. https://api.studojo.com
+    PUBLIC_BASE_URL: str = "http://localhost:8000"
+
     # OBSERVABILITY
     SENTRY_DSN: str = ""
     SERVICE_NAME: str = "job-outreach-svc"

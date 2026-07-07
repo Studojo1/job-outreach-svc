@@ -164,6 +164,17 @@ async def outreach_overview(
     total_replied = email_map.get("replied", 0)
     total_bounced = email_map.get("bounced", 0)
 
+    # Opened is orthogonal to status: a sent/replied email may also be opened.
+    # Count rows with at least one pixel load. Approximate (mail-client image
+    # prefetch inflates); shown as "Open rate (approx)" in the dashboard.
+    total_opened = (
+        db.query(func.count())
+        .select_from(EmailSent)
+        .filter(EmailSent.open_count > 0)
+        .scalar()
+    ) or 0
+    open_rate_pct = round((total_opened / total_sent * 100), 1) if total_sent > 0 else 0.0
+
     # Correct reply rate: unique leads replied / unique leads contacted (initial only,
     # paid non-internal campaigns, excl bounced from denominator)
     _STATS_EXCL = {
@@ -237,6 +248,7 @@ async def outreach_overview(
             func.to_char(EmailSent.sent_at, "YYYY-MM").label("month"),
             func.count().label("emails_sent"),
             func.sum(case((EmailSent.status == "replied", 1), else_=0)).label("emails_replied"),
+            func.sum(case((EmailSent.open_count > 0, 1), else_=0)).label("emails_opened"),
         )
         .filter(EmailSent.sent_at.isnot(None), EmailSent.sent_at >= twelve_months_ago)
         .group_by("month")
@@ -253,6 +265,7 @@ async def outreach_overview(
         m = months.setdefault(row.month, {})
         m["emails_sent"] = row.emails_sent
         m["emails_replied"] = int(row.emails_replied or 0)
+        m["emails_opened"] = int(row.emails_opened or 0)
 
     monthly_metrics = sorted(
         [
@@ -262,6 +275,7 @@ async def outreach_overview(
                 "revenue_cents": d.get("revenue_cents", 0),
                 "emails_sent": d.get("emails_sent", 0),
                 "emails_replied": d.get("emails_replied", 0),
+                "emails_opened": d.get("emails_opened", 0),
             }
             for m, d in months.items()
         ],
@@ -379,7 +393,9 @@ async def outreach_overview(
         "total_emails_sent": total_sent,
         "total_emails_replied": total_replied,
         "total_emails_bounced": total_bounced,
+        "total_emails_opened": total_opened,
         "reply_rate_pct": reply_rate_pct,
+        "open_rate_pct": open_rate_pct,
         "leads_contacted": leads_contacted_total,
         "leads_replied": leads_replied_total,
         "period_reply_rates": period_reply_rates,
@@ -904,6 +920,8 @@ async def admin_campaign_emails(
             "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
             "bounce_reason": email.bounce_reason,
             "error_message": email.error_message,
+            "first_opened_at": email.first_opened_at.isoformat() if email.first_opened_at else None,
+            "open_count": email.open_count or 0,
         })
 
     # Resolve the campaign owner via the linked order
