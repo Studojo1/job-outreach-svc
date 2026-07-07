@@ -80,7 +80,7 @@ Today's date: {today}.
 
 # CONTACT WATERFALL (strict order — stop at the first hit)
 1. THE EVIDENCE ITSELF: the job page's "meet the hiring team"; an insider post author. The author's name and headline are IN the post markdown and their slug is in the post URL — extract them directly. NEVER run a search to identify the author of a post you already retrieved.
-2. find_contacts (FREE): company domain (preferred) or exact company name, plus titles per the targeting table (HR / talent acquisition / recruiter / founder / relevant function head). One call per company; broaden titles once if empty.
+2. find_contacts (FREE): company domain (preferred) or exact company name, plus titles per the targeting table (HR / talent acquisition / recruiter / founder / relevant function head). For common or generic company names ALWAYS pass locations=[city] or the domain — name matching is global and same-named foreign companies pollute results; discard returned people whose city conflicts with the mandate. One call per company; broaden titles once if empty.
 3. ONLY if 1 and 2 fail: ONE web_search `"{{company}}" recruiter OR "talent acquisition" {{city}} site:linkedin.com/in`. Never repeat a failed people query with the same terms, and never run more than one per company (this pattern burned half a run's budget for near-zero yield).
 
 # WHO TO TARGET (mandate x company size) — TPO/BD lens, NOT job-seeker lens
@@ -706,10 +706,13 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             return ("No people matched. Retry ONCE with broader titles "
                     "(['HR', 'Talent', 'Recruiter', 'Founder']) or the company domain instead of "
                     "the name; if still empty, leave contact cells empty for this company.")
-        return "PEOPLE (names/titles/LinkedIn only, no emails or phones):\n" + "\n".join(
-            f"- {p['name']} | {p['title']} | {p['city'] or 'city n/a'} | {p['linkedin_url']}"
+        return ("PEOPLE (names/titles/city; LinkedIn URLs are not returned by search — leave "
+                "contact_linkedin_url empty unless it appears in evidence). Company NAME matching is "
+                "global: discard people whose city conflicts with the mandate (same-named foreign "
+                "companies pollute results; prefer domain or a locations filter):\n" + "\n".join(
+            f"- {p['name']} | {p['title']} | {p['city'] or 'city n/a'}"
             for p in people
-        )
+        ))
 
     if name == "create_table":
         cols = args.get("columns") or []

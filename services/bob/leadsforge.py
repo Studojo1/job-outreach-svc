@@ -31,7 +31,9 @@ def find_people(company: str = "", domain: str = "", titles: list[str] | None = 
     if not key:
         raise LeadsForgeError("LEADSFORGE_API_KEY is not configured")
 
-    body: dict = {"maxContactsPerCompany": max(1, min(int(limit or 8), 25)),
+    n = max(1, min(int(limit or 8), 25))
+    body: dict = {"limit": n,  # required by the API (400 without it)
+                  "maxContactsPerCompany": n,
                   "companyRequired": True}
     domain = (domain or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/")[0]
     if domain:
@@ -63,7 +65,7 @@ def find_people(company: str = "", domain: str = "", titles: list[str] | None = 
 
     leads = (r.json() or {}).get("leads") or []
     out = []
-    for l in leads[:limit]:
+    for l in leads[:n]:
         loc = l.get("location") or {}
         comp = l.get("company") or {}
         out.append({
