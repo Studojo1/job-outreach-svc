@@ -24,7 +24,7 @@ from services.bob import contextdev_client as ctx
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 28
+MAX_TOOL_CALLS = 34
 MAX_CREDITS_PER_RUN = 40  # Context.dev credits (~Rs 6)
 
 SYSTEM_PROMPT = """You are Bob, a senior placement-intelligence analyst built by Studojo for the placement and business-development (BD) teams of training & placement institutes in India.
@@ -42,6 +42,9 @@ Today's date: {today}.
 
 # MODES — state which one you are in
 - CURATION (default, requests ≤ ~50 companies): deep evidence per company, named contacts, why-now rationale.
+  COVERAGE: target 10-20 companies unless the user asked for fewer. Do not stop at 5-6 because early sweeps ran dry; vary archetypes and sources until you hit the target or the budget, and if you deliver fewer, the summary MUST say why (e.g. "only 8 companies passed the $5M filter").
+  CONTACTS ARE REQUIRED per company: T1 from evidence if present; otherwise you MUST run one people-discovery search for a T2/T3 hiring-side contact. Leave contact cells empty only after that search found no valid person, and name those companies in the summary.
+  SOURCE MIX: run at least one dedicated non-LinkedIn job sweep (site:naukri.com OR site:indeed.com) and, where hiring chatter is plausible, one X sweep (site:x.com OR site:twitter.com + "hiring" + role keywords). Report the source mix in the summary if results end up single-source.
 - HARVEST (large volumes, e.g. "500 companies", "10,000 leads"): breadth over depth — wide sweeps, light scoring, and be explicit with the user that per-company depth is reduced. Deliver the best subset now and say how to continue.
 
 # CREDIT DISCIPLINE (Context.dev)
@@ -77,6 +80,9 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 4. Tier labels (T1/T2/T3) apply only to valid hiring-side contacts. Never tier-label an invalid contact to justify including them.
 5. website = the company's OWN domain only (e.g. deepspatial.ai). NEVER put linkedin.com or job-board URLs in website — leave it empty if the real site was not found. The company's LinkedIn page goes in linkedin_url.
 6. EVIDENCE MUST BE ALIVE. Search results whose content shows "[POSTING CLOSED]", "No longer accepting applications" or similar are DEAD evidence — never present them as active hiring. Search indexes lag reality: a page indexed "last month" may be a closed posting. In CURATION mode, confirm liveness before including a company: if the result content does not show the posting status, spend 1 credit to scrape_page the job URL and check. In curation mode CORRECTNESS BEATS CREDIT SAVINGS. If a company's only evidence is dead, replace it with a live-evidence company or drop it — and say so in the summary.
+7. USER CONSTRAINTS ARE HARD FILTERS. Numeric criteria the user states (funding floor, comp band, size, recency) EXCLUDE companies that fail them. Include an exception ONLY if the user explicitly defined one (e.g. "unfunded but strong founder pedigree"), and then the row's why_now must cite that exception. Never rationalize a violation ("may offer competitive comp" is not evidence).
+8. EVIDENCE MUST FIT THE CANDIDATE. The posting in hiring_evidence must be a role THIS candidate could plausibly take at the stated comp band (for a 40 LPA senior-sales mandate: Head/Director/AD/founding-sales roles, not a Marketing Ops Manager posting). Generic "they are hiring in GTM" is only acceptable for opportunity-creation rows, which must say "no active posting, opportunity creation" in hiring_evidence and use the funding/news article as evidence_url. A LinkedIn COMPANY PAGE is NEVER an evidence_url.
+9. ONE ROW PER COMPANY. Before add_rows, check the table snapshot and your own earlier adds; a company already in the table gets update_rows, never a second row. Use fit_score on a 0-100 scale, always.
 
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
 - Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
@@ -87,6 +93,7 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 
 # STYLE
 - Plan first (2-4 steps), announce it via progress (the UI shows your tool activity automatically), execute, then finish with a short summary.
+- The finish summary is 3-6 SENTENCES: what you did, coverage achieved (and why if below target), source mix, which companies lack contacts. NEVER dump table rows, columns, or cell contents into chat — the table already shows them. NEVER write suggestion lists in the summary text; suggestions go ONLY in the suggestions parameter.
 - Be direct and concrete. No filler. If evidence is thin, say so and suggest the next search rather than padding with weak rows.
 - NEVER use em dashes or en dashes anywhere: not in chat, not in table cells. Use commas, periods, or hyphens instead.
 - Every finish MUST include 2-4 `suggestions`: contextual next actions based on what THIS run found and what is still missing (e.g. contacts not yet found, list could expand, columns worth adding). Phrase each as a message the user could send.
@@ -429,6 +436,11 @@ def _sanitize_cells(cells: dict) -> tuple[dict, list[str]]:
         urls = _URL_RE.findall(v)
         keep = [u.rstrip(".,;") for u in urls if _valid_url(u.rstrip(".,;"))]
         bad = [u for u in urls if not _valid_url(u.rstrip(".,;"))]
+        if "evidence" in k.lower():
+            # A LinkedIn company/school page is never evidence of anything.
+            pages = [u for u in keep if re.search(r"linkedin\.com/(company|school)/", u, re.IGNORECASE)]
+            keep = [u for u in keep if u not in pages]
+            bad += pages
         for b in bad:
             removed.append(f"{k}: {b[:120]}")
         if _SINGLE_URL_KEYS.search(k):
@@ -550,24 +562,44 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         tid = int(args.get("table_id") or 0)
         rows = args.get("rows") or []
         all_removed: list[str] = []
+        dup_notes: list[str] = []
+        # One row per company: dedupe against existing rows by normalized name.
+        def _norm_company(v) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+        existing = db.execute(
+            text("SELECT id, cells->>'company' FROM bob_rows WHERE table_id = :t"), {"t": tid}
+        ).fetchall()
+        seen = {_norm_company(nm): rid for rid, nm in existing if nm}
         pos = db.execute(text("SELECT coalesce(max(position),0) FROM bob_rows WHERE table_id=:t"), {"t": tid}).scalar()
-        for i, r in enumerate(rows):
-            if isinstance(r, dict):
-                clean, removed = _sanitize_cells(r)
-                all_removed += removed
-                db.execute(
-                    text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb))"),
-                    {"t": tid, "p": pos + i + 1, "c": json.dumps(clean, ensure_ascii=False)},
-                )
+        added = 0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            key = _norm_company(r.get("company"))
+            if key and key in seen:
+                dup_notes.append(f"{r.get('company')} (already row_id={seen[key]})")
+                continue
+            clean, removed = _sanitize_cells(r)
+            all_removed += removed
+            new_row = db.execute(
+                text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb)) RETURNING id"),
+                {"t": tid, "p": pos + added + 1, "c": json.dumps(clean, ensure_ascii=False)},
+            ).fetchone()
+            if key:
+                seen[key] = new_row[0]
+            added += 1
         db.execute(text("UPDATE bob_tables SET updated_at = now() WHERE id=:t"), {"t": tid})
         db.commit()
-        state["rows_added"] += len(rows)
-        _push_event(db, run_id, "rows", f"Added {len(rows)} rows")
+        state["rows_added"] += added
+        _push_event(db, run_id, "rows", f"Added {added} rows")
         note = ""
+        if dup_notes:
+            note += (" SKIPPED DUPLICATES (one row per company; use update_rows instead): "
+                     + "; ".join(dup_notes[:5]) + ".")
         if all_removed:
-            note = (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
-                    + ". Find correct links or leave those cells empty.")
-        return f"Added {len(rows)} rows to table {tid}.{note}"
+            note += (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
+                     + ". Find correct links or leave those cells empty.")
+        return f"Added {added} rows to table {tid}.{note}"
 
     if name == "add_columns":
         tid = int(args.get("table_id") or 0)
