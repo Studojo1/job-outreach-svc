@@ -12,6 +12,7 @@ so rows stream into the right panel while the agent works.
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -65,10 +66,12 @@ Today's date: {today}.
 Contact TIER (always include a "tier" column when listing people): T1 = named in the hiring evidence (job poster, "hiring team", named in post). T2 = right title in the right city. T3 = right title, city unconfirmed.
 
 # DATA QUALITY RULES (HARD — violations make the product look broken)
-1. URLs must be copied EXACTLY as they appear in the "URL:" line of search results. Never construct, guess, shorten, or "fix" a URL. Never use a URL that was cut off by [TRUNCATED].
-2. ONE URL per cell, always. evidence_url holds ONLY the hiring-evidence link (job post / hiring post / careers page). A contact's profile belongs ONLY in linkedin_url (or contact_linkedin_url). NEVER append or merge multiple links into one cell, and NEVER overwrite evidence_url with a profile URL.
+1. URLs must be copied EXACTLY as they appear in the "URL:" line of search results. Never construct, guess, shorten, or "fix" a URL. Never use a URL that was cut off by [TRUNCATED]. A valid LinkedIn job URL ends in a ~10-digit numeric ID — if the ID looks short or cut, the URL is truncated: do NOT use it.
+2. ONE URL per cell, always. evidence_url holds ONLY the hiring-evidence link (job post / hiring post / careers page). A contact's profile belongs ONLY in contact_linkedin_url. NEVER append or merge multiple links into one cell, and NEVER overwrite evidence_url with a profile URL.
 3. Contacts must be HIRING-SIDE people per the targeting table: HR, TA, recruiter, founder, or the relevant function head. NEVER put a peer-level individual contributor in contact cells (e.g. a "Full Stack Developer" as the contact for a developer mandate is WRONG). An empty contact cell is always better than a wrong contact — leave it empty and say in your summary that no public hiring contact was found for that company.
 4. Tier labels (T1/T2/T3) apply only to valid hiring-side contacts. Never tier-label an invalid contact to justify including them.
+5. website = the company's OWN domain only (e.g. deepspatial.ai). NEVER put linkedin.com or job-board URLs in website — leave it empty if the real site was not found. The company's LinkedIn page goes in linkedin_url.
+6. EVIDENCE MUST BE ALIVE. Search results whose content shows "[POSTING CLOSED]", "No longer accepting applications" or similar are DEAD evidence — never present them as active hiring. Search indexes lag reality: a page indexed "last month" may be a closed posting. In CURATION mode, confirm liveness before including a company: if the result content does not show the posting status, spend 1 credit to scrape_page the job URL and check. In curation mode CORRECTNESS BEATS CREDIT SAVINGS. If a company's only evidence is dead, replace it with a live-evidence company or drop it — and say so in the summary.
 
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
 - Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
@@ -323,12 +326,23 @@ def _digest_search_results(results: list[dict], cap: int = 12) -> str:
     for i, r in enumerate(results[:cap]):
         md = (r.get("markdown") or "").strip()
         if md:
-            body = md[:1800] + ("\n[TRUNCATED]" if len(md) > 1800 else "")
+            if len(md) > 1800:
+                # Cut at a whitespace boundary so a URL can never be split mid-way.
+                cut = md.rfind(" ", 1200, 1800)
+                body = md[: cut if cut > 0 else 1800] + "\n[TRUNCATED]"
+            else:
+                body = md
             content = f"content:\n{body}\n"
         else:
             content = "content: (not scraped)\n"
+        # Deterministic closed-posting flag — the model must never miss this.
+        closed = bool(re.search(
+            r"no longer accepting applications|applications? (are )?closed|this job is no longer available|position has been filled",
+            md, re.IGNORECASE,
+        )) if md else False
+        flag = "⚠ [POSTING CLOSED — DEAD EVIDENCE, do not use as active hiring]\n" if closed else ""
         chunks.append(
-            f"[{i}] {r.get('title') or ''}\nURL: {r.get('url')}\nrelevance: {r.get('relevance')}\n"
+            f"[{i}] {r.get('title') or ''}\nURL: {r.get('url')}\n{flag}relevance: {r.get('relevance')}\n"
             f"desc: {r.get('description') or ''}\n" + content
         )
     return ("\n---\n".join(chunks))[:26000] or "No results."
