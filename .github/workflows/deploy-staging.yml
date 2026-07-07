@@ -95,6 +95,11 @@ jobs:
               BOB_ACCESS_CODE="${{ secrets.BOB_ACCESS_CODE }}" \
               -n ${{ env.NAMESPACE }}
           fi
+          if [ -n "${{ secrets.LEADSFORGE_API_KEY }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              LEADSFORGE_API_KEY="${{ secrets.LEADSFORGE_API_KEY }}" \
+              -n ${{ env.NAMESPACE }}
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."
