@@ -102,6 +102,10 @@ spec:
                 configMapKeyRef:
                   name: app-config
                   key: INTERNREACH_FRONTEND_URL
+            # Public host used to build the open-tracking pixel URL embedded in
+            # outreach emails: {PUBLIC_BASE_URL}/api/v1/outreach/track/{token}.png
+            - name: PUBLIC_BASE_URL
+              value: "https://studojo.com"
           resources:
             requests:
               cpu: 200m
