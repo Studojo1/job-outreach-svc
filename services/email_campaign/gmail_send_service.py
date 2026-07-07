@@ -2,6 +2,8 @@
 
 import base64
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from html import escape
 from typing import Dict, Any, Optional
 
 import requests
@@ -15,6 +17,21 @@ GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 GMAIL_MESSAGE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
 
+def _build_html_body(body: str, pixel_url: str) -> str:
+    """Wrap a plain-text body as HTML and append a 1x1 tracking pixel.
+
+    The visible text is HTML-escaped and newlines become <br> so the HTML part
+    renders the same as the plain-text alternative. The pixel is a hidden 1x1
+    image whose load is recorded by the tracking endpoint.
+    """
+    safe = escape(body).replace("\n", "<br>\n")
+    pixel = (
+        f'<img src="{escape(pixel_url, quote=True)}" width="1" height="1" '
+        f'style="display:none;max-height:0;overflow:hidden" alt="">'
+    )
+    return f'<html><body>{safe}{pixel}</body></html>'
+
+
 def send_gmail_email(
     access_token: str,
     to_email: str,
@@ -23,6 +40,7 @@ def send_gmail_email(
     from_email: str = "me",
     thread_id: Optional[str] = None,
     in_reply_to_header: Optional[str] = None,
+    pixel_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send an email using the Gmail API.
 
@@ -38,6 +56,9 @@ def send_gmail_email(
         from_email: Sender address (default "me" uses the authenticated account).
         thread_id: Gmail threadId to reply into (optional, for follow-ups).
         in_reply_to_header: The original Message-ID header value, e.g. "<abc@mail.gmail.com>".
+        pixel_url: Open-tracking pixel URL. When given, the message is sent as
+            multipart/alternative (text/plain + text/html) with a hidden 1x1
+            pixel in the HTML part. When None, sends plain text only.
 
     Returns:
         Dict with Gmail API response (id, threadId, labelIds).
@@ -48,7 +69,15 @@ def send_gmail_email(
     logger.info("Sending email to %s (subject: %s, thread_id=%s)", to_email, subject, thread_id)
 
     # ── Build MIME message ───────────────────────────────────────────────
-    message = MIMEText(body)
+    # With a pixel: multipart/alternative so clients that block images still
+    # see the plain-text part; the HTML part carries the tracking pixel.
+    # Without: plain text only (unchanged legacy behaviour, e.g. test emails).
+    if pixel_url:
+        message = MIMEMultipart("alternative")
+        message.attach(MIMEText(body, "plain"))
+        message.attach(MIMEText(_build_html_body(body, pixel_url), "html"))
+    else:
+        message = MIMEText(body)
     message["to"] = to_email
     message["subject"] = subject
     if from_email != "me":
