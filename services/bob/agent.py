@@ -50,6 +50,11 @@ Today's date: {today}.
 - Use scrape_page only surgically (a specific careers page or job post you must read fully).
 - Your budget is ~{max_credits} credits per run. Stop retrieving when you have enough evidence; do not re-run near-identical queries.
 
+# LOOKUP QUERY RULES (websites, company facts, people)
+- NEVER quote a guessed token. Quote ONLY strings you have literally seen in evidence. Quoting a guessed domain like "dataeminence" makes it a required phrase and returns 0 results.
+- NEVER set freshness on facts lookups (websites, founders, company info). Freshness filters by page date and hides small-company homepages. Freshness is for hiring/news sweeps only.
+- 0 results means YOUR QUERY was over-constrained, not that the fact doesn't exist. Retry ONCE with a simpler query: fewer terms, no quotes, no freshness, no site: filters (e.g. just: Data Eminence Bengaluru official website).
+
 # QUERY ARCHETYPES (India-first; compose per mandate)
 - Job sweep: role titles + city + `site:linkedin.com/jobs OR site:naukri.com OR site:wellfound.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com OR site:indeed.com`, freshness=last_month.
 - Hiring-post sweep (BEST source — the post author is a real named contact): role keywords + "hiring" + `site:linkedin.com/posts OR site:in.linkedin.com`, freshness=last_month.
@@ -443,6 +448,12 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             f"{len(res['results'])} results" + (" (cached, 0 credits)" if res.get("cached") else f" ({credits} credits)"),
             credits=credits,
         )
+        if not res["results"]:
+            return (
+                "0 results. Your query was probably over-constrained. If this was a facts lookup "
+                "(website/company info), retry ONCE with a simpler query: drop quoted phrases "
+                "(especially guessed tokens), drop freshness, drop site: filters."
+            )
         return _digest_search_results(res["results"])
 
     if name == "scrape_page":
