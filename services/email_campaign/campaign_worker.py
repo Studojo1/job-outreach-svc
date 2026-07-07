@@ -70,7 +70,9 @@ def _ensure_tracking_token(email) -> str:
     if not email.tracking_token:
         email.tracking_token = secrets.token_urlsafe(24)
     base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/job-outreach/t/{email.tracking_token}.png"
+    # Public path: the ingress rewrites /api/v1/outreach/(.*) -> /api/v1/$1 on the
+    # pod, so this maps to the /api/v1/track/{token}.png route in api/main.py.
+    return f"{base}/api/v1/outreach/track/{email.tracking_token}.png"
 
 
 # ── Schedule Computation ─────────────────────────────────────────────────────

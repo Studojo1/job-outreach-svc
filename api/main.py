@@ -137,8 +137,12 @@ _PIXEL_HEADERS = {
 _OPEN_PREFETCH_GUARD_SECONDS = 3
 
 
-@app.get("/t/{token}.png")
-@app.get("/t/{token}.gif")
+# Path note: the public ingress rewrites studojo.pro/api/v1/outreach/(.*) to
+# /api/v1/$1 on the pod, so this route is registered at /api/v1/track/... and is
+# reached publicly at https://<host>/api/v1/outreach/track/{token}.png (see
+# _ensure_tracking_token in campaign_worker for the URL that is embedded).
+@app.get("/api/v1/track/{token}.png")
+@app.get("/api/v1/track/{token}.gif")
 def tracking_pixel(token: str):
     """Record an email open and return a 1x1 transparent pixel."""
     from database.session import SessionLocal
