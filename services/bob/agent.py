@@ -83,6 +83,12 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 # STYLE
 - Plan first (2-4 steps), announce it via progress (the UI shows your tool activity automatically), execute, then finish with a short summary.
 - Be direct and concrete. No filler. If evidence is thin, say so and suggest the next search rather than padding with weak rows.
+- NEVER use em dashes or en dashes anywhere: not in chat, not in table cells. Use commas, periods, or hyphens instead.
+
+# KNOWN SCRAPED-PAGE GARBAGE (never copy these into cells)
+- linkedin.com/company/unavailable is a placeholder LinkedIn shows anonymous scrapers, it is NOT a real company page.
+- linkedin.com/signup/... and lnkd.in/... links are redirect wrappers, not destinations.
+- If the only company-page link available is one of these, leave linkedin_url empty.
 """
 
 # ── Tool schemas (OpenAI function-calling) ─────────────────────────────────────
@@ -266,6 +272,7 @@ def _set_counters(db, run_id: int, counters: dict) -> None:
 
 
 def _finish_run(db, run_id: int, chat_id: int, status: str, answer: str = "", error: str = "") -> None:
+    answer = _strip_em_dashes(answer)
     db.execute(
         text("UPDATE bob_runs SET status = :s, answer = :a, error = :e, updated_at = now() WHERE id = :id"),
         {"s": status, "a": answer, "e": error[:2000], "id": run_id},
@@ -316,6 +323,71 @@ def _tables_snapshot(db, chat_id: int) -> str:
             f"rows(sample): {json.dumps(sample, ensure_ascii=False)[:4000]}"
         )
     return "\n\n".join(parts)
+
+
+# ── URL validation rail ────────────────────────────────────────────────────────
+# The model transcribes URLs from scraped pages, and scraped pages lie:
+# LinkedIn's logged-out HTML anonymizes company links as /company/unavailable,
+# wraps links in signup redirects, and postings expire. Prompt rules reduce
+# these errors; this rail guarantees invalid URLs never enter a table cell.
+
+_GARBAGE_URL = re.compile(
+    r"linkedin\.com/(company|school)/unavailable"   # logged-out anonymized placeholder
+    r"|linkedin\.com/signup"                          # signup/cold-join redirect wrappers
+    r"|/cold-join"
+    r"|linkedin\.com/authwall"
+    r"|lnkd\.in/",                                    # shortener — target unknown
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s;,\"'<>()\[\]]+")
+# Keys that must hold at most ONE link.
+_SINGLE_URL_KEYS = re.compile(r"(_url$|^website$)", re.IGNORECASE)
+
+
+def _valid_url(u: str) -> bool:
+    if _GARBAGE_URL.search(u):
+        return False
+    # LinkedIn job URLs carry a long numeric id; a short one means truncation.
+    m = re.search(r"linkedin\.com/jobs/view/[^\s]*?(\d+)/?$", u)
+    if m and len(m.group(1)) < 9:
+        return False
+    return True
+
+
+def _strip_em_dashes(t: str) -> str:
+    """Product rule: no em/en dashes anywhere in Bob's output, ever."""
+    t = re.sub(r"(?<=\d)\s*[—–]\s*(?=\d)", "-", t)   # numeric ranges: 2–5 → 2-5
+    return re.sub(r"\s*[—–]+\s*", ", ", t)
+
+
+def _sanitize_cells(cells: dict) -> tuple[dict, list[str]]:
+    """Strip invalid URLs and em dashes from cell values. Returns (clean_cells, removals)."""
+    removed: list[str] = []
+    out: dict = {}
+    for k, v in cells.items():
+        if not isinstance(v, str):
+            out[k] = v
+            continue
+        v = _strip_em_dashes(v)
+        if "http" not in v:
+            out[k] = v
+            continue
+        urls = _URL_RE.findall(v)
+        keep = [u.rstrip(".,;") for u in urls if _valid_url(u.rstrip(".,;"))]
+        bad = [u for u in urls if not _valid_url(u.rstrip(".,;"))]
+        for b in bad:
+            removed.append(f"{k}: {b[:120]}")
+        if _SINGLE_URL_KEYS.search(k):
+            # URL-typed field: exactly the first valid URL, or empty.
+            if len(keep) > 1:
+                removed.append(f"{k}: kept first URL, dropped {len(keep) - 1} extra")
+            out[k] = keep[0] if keep else ""
+        else:
+            nv = v
+            for b in bad:
+                nv = nv.replace(b, "").strip(" ;,")
+            out[k] = nv
+    return out, removed
 
 
 # ── Tool execution ─────────────────────────────────────────────────────────────
@@ -397,18 +469,25 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
     if name == "add_rows":
         tid = int(args.get("table_id") or 0)
         rows = args.get("rows") or []
+        all_removed: list[str] = []
         pos = db.execute(text("SELECT coalesce(max(position),0) FROM bob_rows WHERE table_id=:t"), {"t": tid}).scalar()
         for i, r in enumerate(rows):
             if isinstance(r, dict):
+                clean, removed = _sanitize_cells(r)
+                all_removed += removed
                 db.execute(
                     text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb))"),
-                    {"t": tid, "p": pos + i + 1, "c": json.dumps(r, ensure_ascii=False)},
+                    {"t": tid, "p": pos + i + 1, "c": json.dumps(clean, ensure_ascii=False)},
                 )
         db.execute(text("UPDATE bob_tables SET updated_at = now() WHERE id=:t"), {"t": tid})
         db.commit()
         state["rows_added"] += len(rows)
         _push_event(db, run_id, "rows", f"Added {len(rows)} rows")
-        return f"Added {len(rows)} rows to table {tid}."
+        note = ""
+        if all_removed:
+            note = (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
+                    + ". Find correct links or leave those cells empty.")
+        return f"Added {len(rows)} rows to table {tid}.{note}"
 
     if name == "add_columns":
         tid = int(args.get("table_id") or 0)
@@ -428,18 +507,25 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         tid = int(args.get("table_id") or 0)
         updates = args.get("updates") or []
         n = 0
+        all_removed: list[str] = []
         for u in updates:
             rid = u.get("row_id")
             cells = u.get("cells") or {}
             if rid and isinstance(cells, dict):
+                clean, removed = _sanitize_cells(cells)
+                all_removed += removed
                 db.execute(
                     text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at=now() WHERE id=:r AND table_id=:t"),
-                    {"c": json.dumps(cells, ensure_ascii=False), "r": rid, "t": tid},
+                    {"c": json.dumps(clean, ensure_ascii=False), "r": rid, "t": tid},
                 )
                 n += 1
         db.commit()
         _push_event(db, run_id, "rows", f"Updated {n} rows")
-        return f"Updated {n} rows."
+        note = ""
+        if all_removed:
+            note = (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
+                    + ". Find correct links or leave those cells empty.")
+        return f"Updated {n} rows.{note}"
 
     return f"Unknown tool: {name}"
 
