@@ -82,7 +82,7 @@ async def get_chat(chat_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Chat not found")
 
     messages = db.execute(
-        text("SELECT id, role, content, created_at FROM bob_messages WHERE chat_id = :c ORDER BY id"),
+        text("SELECT id, role, content, created_at, meta FROM bob_messages WHERE chat_id = :c ORDER BY id"),
         {"c": chat_id},
     ).fetchall()
     run = db.execute(
@@ -95,7 +95,8 @@ async def get_chat(chat_id: int, db: Session = Depends(get_db)):
         "id": chat[0],
         "title": chat[1],
         "messages": [
-            {"id": m[0], "role": m[1], "content": m[2], "created_at": str(m[3])} for m in messages
+            {"id": m[0], "role": m[1], "content": m[2], "created_at": str(m[3]), "meta": m[4] or {}}
+            for m in messages
         ],
         "latest_run": _run_payload(run) if run else None,
         "tables": _tables_payload(db, chat_id),

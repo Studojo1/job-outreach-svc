@@ -81,7 +81,7 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
 - Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
 - Column keys are snake_case. Typical company table: company, website, city, size_band, what_they_do, hiring_evidence, evidence_url, funding, why_now, fit_score, contact_name, contact_title, tier, linkedin_url.
-- Follow-up questions in the same chat MUTATE the existing table (add_columns / update_rows / add_rows) — do not create duplicate tables for the same mandate.
+- Follow-up questions in the same chat MUTATE the existing table (add_columns / update_rows / add_rows). NEVER create a second table for the same mandate. If CURRENT TABLES already lists a table for this mandate, even with 0 rows (e.g. you created it before asking a clarifying question), you MUST reuse its id.
 - Every evidence-based cell should be traceable: put the source URL in evidence_url (or in the cell itself when a row has multiple sources).
 - Chat text (finish summary) is for narrative only: what you did, what you found, what to do next. NEVER dump the table contents into the summary.
 
@@ -89,6 +89,8 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 - Plan first (2-4 steps), announce it via progress (the UI shows your tool activity automatically), execute, then finish with a short summary.
 - Be direct and concrete. No filler. If evidence is thin, say so and suggest the next search rather than padding with weak rows.
 - NEVER use em dashes or en dashes anywhere: not in chat, not in table cells. Use commas, periods, or hyphens instead.
+- Every finish MUST include 2-4 `suggestions`: contextual next actions based on what THIS run found and what is still missing (e.g. contacts not yet found, list could expand, columns worth adding). Phrase each as a message the user could send.
+- When ask_user is a choice between a few values, pass them as `options` so the user can tap instead of type.
 
 # KNOWN SCRAPED-PAGE GARBAGE (never copy these into cells)
 - linkedin.com/company/unavailable is a placeholder LinkedIn shows anonymous scrapers, it is NOT a real company page.
@@ -221,7 +223,14 @@ TOOLS = [
             "description": "Ask the user a short clarifying question and STOP until they reply. Only for load-bearing gaps, before spending credits.",
             "parameters": {
                 "type": "object",
-                "properties": {"question": {"type": "string"}},
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "2-4 short answer choices when the question is a small choice set. Rendered as one-tap reply chips.",
+                    },
+                },
                 "required": ["question"],
             },
         },
@@ -230,10 +239,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "End the run with a short narrative summary (what you did, key findings, suggested next steps). Do NOT repeat table contents.",
+            "description": "End the run with a short narrative summary (what you did, key findings). Do NOT repeat table contents.",
             "parameters": {
                 "type": "object",
-                "properties": {"summary": {"type": "string"}},
+                "properties": {
+                    "summary": {"type": "string"},
+                    "suggestions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "2-4 contextual next actions phrased as messages the user could send (max ~80 chars each). Rendered as one-tap chips. Base them on what THIS run found and what is missing.",
+                    },
+                },
                 "required": ["summary"],
             },
         },
@@ -276,16 +292,31 @@ def _set_counters(db, run_id: int, counters: dict) -> None:
         logger.warning("[BOB] set_counters failed (run %s)", run_id, exc_info=True)
 
 
-def _finish_run(db, run_id: int, chat_id: int, status: str, answer: str = "", error: str = "") -> None:
+def _finish_run(db, run_id: int, chat_id: int, status: str, answer: str = "",
+                error: str = "", suggestions: list | None = None) -> None:
     answer = _strip_em_dashes(answer)
+    sugg = [
+        _strip_em_dashes(s.strip())[:90]
+        for s in (suggestions or [])[:4]
+        if isinstance(s, str) and s.strip()
+    ]
     db.execute(
         text("UPDATE bob_runs SET status = :s, answer = :a, error = :e, updated_at = now() WHERE id = :id"),
         {"s": status, "a": answer, "e": error[:2000], "id": run_id},
     )
     if answer:
         db.execute(
-            text("INSERT INTO bob_messages (chat_id, role, content) VALUES (:c, 'assistant', :m)"),
-            {"c": chat_id, "m": answer},
+            text("INSERT INTO bob_messages (chat_id, role, content, meta) "
+                 "VALUES (:c, 'assistant', :m, CAST(:meta AS jsonb))"),
+            {"c": chat_id, "m": answer, "meta": json.dumps({"suggestions": sugg})},
+        )
+    if status == "done":
+        # Sweep empty leftover tables (e.g. created before an ask_user pause,
+        # then superseded). An empty table is never a deliverable.
+        db.execute(
+            text("DELETE FROM bob_tables WHERE chat_id = :c AND NOT EXISTS "
+                 "(SELECT 1 FROM bob_rows r WHERE r.table_id = bob_tables.id)"),
+            {"c": chat_id},
         )
     db.commit()
 
@@ -487,12 +518,32 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
 
     if name == "create_table":
         cols = args.get("columns") or []
+        tname = (args.get("name") or "Results")[:120]
+        # Duplicate-table rail: a run that resumes after ask_user (or a sloppy
+        # follow-up) must reuse the mandate's existing table, never fork it.
+        norm = re.sub(r"[^a-z0-9]+", "", tname.lower())
+        existing = db.execute(
+            text("SELECT id, name, columns FROM bob_tables WHERE chat_id = :c ORDER BY id"),
+            {"c": chat_id},
+        ).fetchall()
+        for tid, ename, ecols in existing:
+            if re.sub(r"[^a-z0-9]+", "", (ename or "").lower()) == norm:
+                keys = {col.get("key") for col in (ecols or [])}
+                merged = list(ecols or []) + [col for col in cols if col.get("key") not in keys]
+                db.execute(
+                    text("UPDATE bob_tables SET columns = CAST(:cols AS jsonb), updated_at = now() WHERE id = :t"),
+                    {"cols": json.dumps(merged), "t": tid},
+                )
+                db.commit()
+                _push_event(db, run_id, "table", f"Reusing table: {ename}")
+                return (f"Table {ename!r} ALREADY EXISTS as id={tid}. Reusing it (new columns merged). "
+                        f"Do NOT create another table; add rows with add_rows(table_id={tid}).")
         row = db.execute(
             text("INSERT INTO bob_tables (chat_id, name, columns) VALUES (:c, :n, CAST(:cols AS jsonb)) RETURNING id"),
-            {"c": chat_id, "n": (args.get("name") or "Results")[:120], "cols": json.dumps(cols)},
+            {"c": chat_id, "n": tname, "cols": json.dumps(cols)},
         ).fetchone()
         db.commit()
-        _push_event(db, run_id, "table", f"Created table: {args.get('name', 'Results')}")
+        _push_event(db, run_id, "table", f"Created table: {tname}")
         return f"Table created with id={row[0]}. Add rows with add_rows."
 
     if name == "add_rows":
@@ -630,12 +681,14 @@ def run_agent(run_id: int, chat_id: int) -> None:
 
                 if fname == "finish":
                     _set_counters(db, run_id, state)
-                    _finish_run(db, run_id, chat_id, "done", answer=args.get("summary") or "Done.")
+                    _finish_run(db, run_id, chat_id, "done", answer=args.get("summary") or "Done.",
+                                suggestions=args.get("suggestions"))
                     return
                 if fname == "ask_user":
                     q = args.get("question") or "Could you clarify your request?"
                     _set_counters(db, run_id, state)
-                    _finish_run(db, run_id, chat_id, "waiting_user", answer=q)
+                    _finish_run(db, run_id, chat_id, "waiting_user", answer=q,
+                                suggestions=args.get("options"))
                     return
 
                 try:
