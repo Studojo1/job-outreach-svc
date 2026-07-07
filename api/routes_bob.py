@@ -8,7 +8,7 @@ import io
 import json
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -100,6 +100,38 @@ async def get_chat(chat_id: int, db: Session = Depends(get_db)):
         "latest_run": _run_payload(run) if run else None,
         "tables": _tables_payload(db, chat_id),
     }
+
+
+# ── File attachments ───────────────────────────────────────────────────────────
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+@router.post("/chats/{chat_id}/files", dependencies=[Depends(_guard)])
+async def upload_chat_file(chat_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    from services.bob.files import extract_text, FileExtractionError
+
+    chat = db.execute(text("SELECT id FROM bob_chats WHERE id = :c"), {"c": chat_id}).fetchone()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
+
+    try:
+        extracted = extract_text(file.filename or "upload", data)
+    except FileExtractionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    row = db.execute(
+        text("INSERT INTO bob_files (chat_id, filename, mime, text_content) "
+             "VALUES (:c, :f, :m, :t) RETURNING id"),
+        {"c": chat_id, "f": (file.filename or "upload")[:200],
+         "m": (file.content_type or "")[:100], "t": extracted},
+    ).fetchone()
+    db.commit()
+    return {"file_id": row[0], "filename": file.filename, "chars_extracted": len(extracted)}
 
 
 # ── Messages / runs ────────────────────────────────────────────────────────────

@@ -53,6 +53,16 @@ CREATE TABLE IF NOT EXISTS bob_rows (
 );
 CREATE INDEX IF NOT EXISTS ix_bob_rows_table ON bob_rows(table_id);
 
+CREATE TABLE IF NOT EXISTS bob_files (
+    id          SERIAL PRIMARY KEY,
+    chat_id     INTEGER NOT NULL REFERENCES bob_chats(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    mime        TEXT NOT NULL DEFAULT '',
+    text_content TEXT NOT NULL DEFAULT '',   -- extracted text, capped at ingest
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_bob_files_chat ON bob_files(chat_id);
+
 CREATE TABLE IF NOT EXISTS bob_evidence_cache (
     id            SERIAL PRIMARY KEY,
     cache_key     TEXT NOT NULL UNIQUE,   -- sha256 of normalized request
