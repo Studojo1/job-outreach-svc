@@ -57,10 +57,18 @@ Today's date: {today}.
 - NEVER quote a guessed token. Quote ONLY strings you have literally seen in evidence. Quoting a guessed domain like "dataeminence" makes it a required phrase and returns 0 results.
 - NEVER set freshness on facts lookups (websites, founders, company info). Freshness filters by page date and hides small-company homepages. Freshness is for hiring/news sweeps only.
 - 0 results means YOUR QUERY was over-constrained, not that the fact doesn't exist. Retry ONCE with a simpler query: fewer terms, no quotes, no freshness, no site: filters (e.g. just: Data Eminence Bengaluru official website).
+- ONE fact query per company, maximum. If it misses, scrape the company site once or move on — never iterate fact queries (this was 40% of historical credit waste).
+- NEVER search for salary strings ("40 LPA", "Up to 45 LPA") — Indian postings rarely state comp; infer comp-plausibility from title seniority + company stage.
+- Negative terms barely work: one -term is weakly honored, several stacked return 0 results. Do noise-filtering yourself, never in the query.
 
-# QUERY ARCHETYPES (India-first; compose per mandate)
+# QUERY ARCHETYPES (India-first; compose per mandate; all lab-validated)
 - Job sweep: role titles + city + `site:linkedin.com/jobs OR site:naukri.com OR site:wellfound.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com OR site:indeed.com`, freshness=last_month.
-- Hiring-post sweep (BEST source — the post author is a real named contact): role keywords + "hiring" + `site:linkedin.com/posts OR site:in.linkedin.com`, freshness=last_month.
+- LINKEDIN POST SWEEPS (highest-value source: full post text + author + often an inline EMAIL, all for 1 credit). `site:linkedin.com/posts` is MANDATORY, and a city/India token IN THE QUERY is mandatory (country=IN does NOT localize posts — without a city token results drift abroad). Run at least 2 of these 3 variants on every curation mandate:
+  * `site:linkedin.com/posts "we're hiring" <role keywords> <city>` — company announcements; highest inline-email rate.
+  * `site:linkedin.com/posts "I'm hiring" OR "I am hiring" <function> <city>` — first-person: the author IS the hiring manager.
+  * `site:linkedin.com/posts "hiring" <senior-title OR-stack> <city>` — senior roles; expect staffing-agency noise and filter it yourself (do NOT use negative terms in the query).
+  Emails found in post bodies go into a contact_email cell — that is free enrichment, capture it.
+- X SWEEP (supplementary, 1 credit per mandate): `site:x.com "hiring" <city OR India> <role keywords>` + freshness. ONLY URLs containing /status/ are posts; x.com profile URLs without /status/ are useless stubs — discard them. Coverage is thinner than LinkedIn; the author handle is a contact pointer to verify, not a confirmed contact.
 - Funding sweep: "raised" OR "Series A" OR "seed" + sector + `site:inc42.com OR site:entrackr.com OR site:yourstory.com OR site:techcrunch.com`, freshness=last_year.
 - Mass-hiring sweep (cohorts): "walk-in" OR "mass hiring" OR "hiring freshers" + role + city + naukri/indeed/news.
 - Company deep-dive: `"{{company}}" hiring OR funding OR careers`, num_results=10, NO fanout.
@@ -72,6 +80,11 @@ Today's date: {today}.
 - Single candidate: tiny → Founder; growth → HR/TA first; enterprise → TA/recruiter attached to the posting.
 - Exceptional candidate (opportunity creation): Founders directly.
 Contact TIER (always include a "tier" column when listing people): T1 = named in the hiring evidence (job poster, "hiring team", named in post). T2 = right title in the right city. T3 = right title, city unconfirmed.
+POST AUTHOR AFFILIATION (critical): a post's author is a T1 contact ONLY if they are INSIDE the hiring company — verify from the post text and author identity ("my team", "our", posted from the company page, headline shows the company). Classify every post author:
+  * Insider (employee/founder) → T1 contact.
+  * Recruiter/staffing agency → usable contact, but append "(recruiter)" to contact_title.
+  * Investor/VC or friend boosting a portfolio/other company → EVIDENCE ONLY, NEVER the contact. You MUST then run people discovery inside the actual company for a T2 (e.g. its Sales Director or founder).
+  * Job aggregator account → treat as weak evidence, verify the role elsewhere.
 
 # DATA QUALITY RULES (HARD — violations make the product look broken)
 1. URLs must be copied EXACTLY as they appear in the "URL:" line of search results. Never construct, guess, shorten, or "fix" a URL. Never use a URL that was cut off by [TRUNCATED]. A valid LinkedIn job URL ends in a ~10-digit numeric ID — if the ID looks short or cut, the URL is truncated: do NOT use it.
@@ -83,6 +96,7 @@ Contact TIER (always include a "tier" column when listing people): T1 = named in
 7. USER CONSTRAINTS ARE HARD FILTERS. Numeric criteria the user states (funding floor, comp band, size, recency) EXCLUDE companies that fail them. Include an exception ONLY if the user explicitly defined one (e.g. "unfunded but strong founder pedigree"), and then the row's why_now must cite that exception. Never rationalize a violation ("may offer competitive comp" is not evidence).
 8. EVIDENCE MUST FIT THE CANDIDATE. The posting in hiring_evidence must be a role THIS candidate could plausibly take at the stated comp band (for a 40 LPA senior-sales mandate: Head/Director/AD/founding-sales roles, not a Marketing Ops Manager posting). Generic "they are hiring in GTM" is only acceptable for opportunity-creation rows, which must say "no active posting, opportunity creation" in hiring_evidence and use the funding/news article as evidence_url. A LinkedIn COMPANY PAGE is NEVER an evidence_url.
 9. ONE ROW PER COMPANY. Before add_rows, check the table snapshot and your own earlier adds; a company already in the table gets update_rows, never a second row. Use fit_score on a 0-100 scale, always.
+10. OPEN LINKED BOARDS BEFORE TRUSTING THEM. If evidence claims open roles and links an Ashby/Greenhouse/Lever board (jobs.ashbyhq.com, boards.greenhouse.io, jobs.lever.co), call check_job_board (FREE, zero credits) and confirm a role matching the mandate exists IN THE RIGHT LOCATION before presenting the company. "16 open roles" with the only sales role in San Francisco is a failed check — drop or re-frame the company honestly.
 
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
 - Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
@@ -137,6 +151,21 @@ TOOLS = [
                 "properties": {
                     "url": {"type": "string"},
                     "label": {"type": "string", "description": "Short human label for the progress feed."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_job_board",
+            "description": "Read a hosted job board's live roles for FREE (zero credits). Works for Ashby (jobs.ashbyhq.com/org), Greenhouse (boards.greenhouse.io/org) and Lever (jobs.lever.co/org) URLs. Use whenever evidence links one of these, to confirm a mandate-matching role exists in the right location before presenting the company.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The board URL seen in evidence."},
+                    "label": {"type": "string", "description": "Short human label for the progress feed, e.g. 'Checking WisdomAI board'."},
                 },
                 "required": ["url"],
             },
@@ -437,8 +466,11 @@ def _sanitize_cells(cells: dict) -> tuple[dict, list[str]]:
         keep = [u.rstrip(".,;") for u in urls if _valid_url(u.rstrip(".,;"))]
         bad = [u for u in urls if not _valid_url(u.rstrip(".,;"))]
         if "evidence" in k.lower():
-            # A LinkedIn company/school page is never evidence of anything.
-            pages = [u for u in keep if re.search(r"linkedin\.com/(company|school)/", u, re.IGNORECASE)]
+            # A LinkedIn company/school page is never evidence of anything, and
+            # an X profile URL (no /status/) is a useless stub, not a post.
+            pages = [u for u in keep if re.search(r"linkedin\.com/(company|school)/", u, re.IGNORECASE)
+                     or (re.search(r"(?:^|\.)((x|twitter)\.com)/", u, re.IGNORECASE)
+                         and "/status/" not in u.lower())]
             keep = [u for u in keep if u not in pages]
             bad += pages
         for b in bad:
@@ -527,6 +559,22 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         state["credits"] += credits
         state["scrapes"] += 1
         return (res.get("markdown") or "")[:12000] or "Page returned no content."
+
+    if name == "check_job_board":
+        from services.bob import job_boards
+        url = args.get("url", "")
+        _push_event(db, run_id, "scrape", args.get("label") or f"Checking board {url[:50]}", url[:200])
+        try:
+            roles = job_boards.fetch_board(url)
+        except job_boards.BoardError as e:
+            return f"BOARD CHECK FAILED: {e}"
+        if not roles:
+            return "Board is live but currently lists ZERO open roles."
+        listing = "\n".join(
+            f"- {r['title']} | {r.get('location') or 'location n/a'}" + (f" | {r['department']}" if r.get("department") else "")
+            for r in roles
+        )
+        return f"LIVE BOARD ({len(roles)} roles, free check):\n{listing}"
 
     if name == "create_table":
         cols = args.get("columns") or []
