@@ -70,35 +70,32 @@ def _search(key: str, company: str, domain: str, titles: list | None,
     return [p for p in out if p["name"]]
 
 
-def find_people(company: str = "", domain: str = "", titles: list[str] | None = None,
-                locations: list[str] | None = None, seniorities: list[str] | None = None,
-                limit: int = 8) -> tuple[list[dict], str]:
-    """Two-step people search at a company. Returns (people, mode):
+def find_people(company: str = "", domain: str = "",
+                locations: list[str] | None = None,
+                limit: int = 20) -> tuple[list[dict], str]:
+    """People search at a company: company + location ONLY, never title
+    keywords. Titles vary too much — a title filter silently misses the right
+    HR when their title is nonstandard, which reads as 'no contact exists'.
+    The CALLER filters the full list down to the best hiring-side person.
 
-    mode 'titled'       — the title filter matched people
-    mode 'all_people'   — no titled match; returning EVERYONE found at the
-                          company (+location) so the caller picks the most
-                          hiring-adjacent person (small startups rarely have
-                          an HR-titled employee)
-    mode 'not_found'    — the company itself has no people in the database
+    Returns (people, mode):
+      'people'             — people at the company matching the location
+      'people_no_location' — location matched nobody (profiles often lack a
+                             parsed city); returning company-wide people
+      'not_found'          — the company has no people in the database
     """
     key = settings.LEADSFORGE_API_KEY
     if not key:
         raise LeadsForgeError("LEADSFORGE_API_KEY is not configured")
 
-    n = max(1, min(int(limit or 8), 25))
+    n = max(5, min(int(limit or 20), 25))
     domain = (domain or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/")[0]
 
-    if titles:
-        people = _search(key, company, domain, titles, locations, seniorities, n)
-        if people:
-            return people, "titled"
-    people = _search(key, company, domain, None, locations, None, max(n, 15))
+    people = _search(key, company, domain, None, locations, None, n)
     if people:
-        return people, "all_people"
+        return people, "people"
     if locations:
-        # Location can be over-strict (profiles often lack a parsed city).
-        people = _search(key, company, domain, None, None, None, max(n, 15))
+        people = _search(key, company, domain, None, None, None, n)
         if people:
-            return people, "all_people"
+            return people, "people_no_location"
     return [], "not_found"

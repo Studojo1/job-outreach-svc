@@ -72,7 +72,7 @@ Today's date: {today}.
 - Negative terms barely work: one -term is weakly honored, several stacked return 0 results. Do noise-filtering yourself, never in the query.
 
 # QUERY ARCHETYPES (India-first; compose per mandate; all lab-validated)
-- Job sweep, LinkedIn: use the search_linkedin_jobs TOOL (free, live index, results are NEVER stale). Do NOT use web_search with site:linkedin.com/jobs — the web index ships closed postings and they will be rejected at add_rows.
+- Job sweep, LinkedIn: use the search_linkedin_jobs TOOL (free, live index, results are NEVER stale). Do NOT use web_search with site:linkedin.com/jobs — the web index ships closed postings and they will be rejected at add_rows. Then call read_linkedin_job (FREE) on every job you intend to ship: it confirms the function from the DESCRIPTION (mandatory for generic titles like "Intern"), and often hands you the job poster as a T1 contact.
 - Job sweep, other boards: role titles + city + `site:naukri.com OR site:wellfound.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com OR site:indeed.com`, freshness=last_month.
 - LINKEDIN POST SWEEPS (highest-value source: full post text + author + often an inline EMAIL, all for 1 credit). `site:linkedin.com/posts` is MANDATORY, and a city/India token IN THE QUERY is mandatory (country=IN does NOT localize posts — without a city token results drift abroad). Run at least 2 of these 3 variants on every curation mandate:
   * `site:linkedin.com/posts "we're hiring" <role keywords> <city>` — company announcements; highest inline-email rate.
@@ -86,8 +86,8 @@ Today's date: {today}.
 - Company deep-dive: `"{{company}}" hiring OR funding OR careers`, num_results=10, NO fanout.
 
 # CONTACT WATERFALL (strict order — stop at the first hit)
-1. THE EVIDENCE ITSELF: the job page's "meet the hiring team"; an insider post author. The author's name and headline are IN the post markdown and their slug is in the post URL — extract them directly. NEVER run a search to identify the author of a post you already retrieved.
-2. find_contacts (FREE): company domain (preferred) or exact company name, plus titles per the targeting table (HR / talent acquisition / recruiter / founder / relevant function head). For common or generic company names ALWAYS pass locations=[city] or the domain — name matching is global and same-named foreign companies pollute results; discard returned people whose city conflicts with the mandate. One call per company; broaden titles once if empty.
+1. THE EVIDENCE ITSELF: for LinkedIn jobs, read_linkedin_job (FREE) returns the JOB POSTER (name, headline, profile) when exposed — that is your T1 (append "(recruiter)" if their headline shows a different company/agency). For posts, the author's name and headline are IN the post markdown and their slug is in the post URL — extract them directly. NEVER run a search to identify the author of a post you already retrieved.
+2. find_contacts (FREE): company domain (preferred) or exact company name + locations=[city]. It returns ALL people at the company — NO title filtering, because titles vary and a keyword filter hides the right person. YOU pick the best hiring-side contact from the list: HR/TA/recruiter first, else people ops, else founder/exec for startups, else the relevant team lead. Discard people whose city conflicts with the mandate. One call per company.
 3. ONLY if 1 and 2 fail: ONE web_search `"{{company}}" recruiter OR "talent acquisition" {{city}} site:linkedin.com/in`. Never repeat a failed people query with the same terms, and never run more than one per company (this pattern burned half a run's budget for near-zero yield).
 Run the waterfall ONLY for rows that already passed the fit bar — contacts for off-mandate companies are wasted work.
 
@@ -214,16 +214,30 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "read_linkedin_job",
+            "description": "Read a LinkedIn job's guest page for FREE (zero credits): liveness, title, company, location, posted date, DESCRIPTION (confirm the function of generic titles), and the JOB POSTER with name/headline/profile when the hirer enabled messaging (a T1 contact — but check the headline: a different company there means agency recruiter). Call this for EVERY LinkedIn job you intend to ship.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "linkedin.com/jobs/view/... URL"},
+                    "label": {"type": "string", "description": "Short human label for the progress feed."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_contacts",
-            "description": "FREE people search (structured database, zero Context.dev credits): named hiring-side contacts at a company with title, city and LinkedIn URL (no emails/phones). ALWAYS use this before any Context.dev people query. Prefer searching by company domain; filter titles per the targeting table.",
+            "description": "FREE people search (structured database, zero Context.dev credits). Returns ALL people at a company filtered ONLY by location — never by title, so nonstandard titles cannot hide the right person. YOU then pick the best hiring-side contact from the list. ALWAYS use this before any Context.dev people query. Prefer searching by company domain.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "company": {"type": "string", "description": "Exact company name as seen in evidence."},
                     "domain": {"type": "string", "description": "Company website domain, e.g. 'cashfree.com'. More precise than name; use it when known."},
-                    "titles": {"type": "array", "items": {"type": "string"}, "description": "Title keywords, e.g. ['HR', 'Talent Acquisition', 'Recruiter', 'Founder']."},
-                    "locations": {"type": "array", "items": {"type": "string"}, "description": "Optional person-location filter, e.g. ['Bengaluru']."},
-                    "limit": {"type": "integer", "description": "Max people. Default 6."},
+                    "locations": {"type": "array", "items": {"type": "string"}, "description": "Person-location filter, e.g. ['Bengaluru']. Strongly recommended for common company names."},
+                    "limit": {"type": "integer", "description": "Max people. Default 20, max 25."},
                     "label": {"type": "string", "description": "Short human label for the progress feed."},
                 },
             },
@@ -752,6 +766,32 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             for j in jobs
         )
 
+    if name == "read_linkedin_job":
+        from services.bob import livecheck
+        url = args.get("url", "")
+        _push_event(db, run_id, "scrape", args.get("label") or f"Reading job {url[:50]}", url[:200])
+        try:
+            d = livecheck.read_job(url)
+        except livecheck.LinkedInSearchError as e:
+            return f"JOB READ UNAVAILABLE ({e}). Treat liveness as unknown; retry once later if needed."
+        state["free_lookups"] += 1
+        lines = [
+            f"STATUS: {d.get('status')} ({d.get('reason')})",
+            f"ROLE: {d.get('title')} | {d.get('company')} | {d.get('location')} | posted {d.get('posted') or 'n/a'}",
+        ]
+        poster = d.get("poster")
+        if poster:
+            lines.append(
+                f"JOB POSTER (T1 candidate): {poster['name']} | {poster['headline'] or 'headline n/a'} | "
+                f"{poster['profile_url'] or 'profile n/a'}"
+                " — if the headline names a DIFFERENT company, they are an agency recruiter: usable but append '(recruiter)'."
+            )
+        else:
+            lines.append("JOB POSTER: not exposed on this posting (hirer did not enable messaging).")
+        if d.get("description"):
+            lines.append("DESCRIPTION (confirm function match from this, not the title):\n" + d["description"][:1100])
+        return "\n".join(lines)
+
     if name == "find_contacts":
         from services.bob import leadsforge
         company = args.get("company", "")
@@ -762,9 +802,8 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         try:
             people, mode = leadsforge.find_people(
                 company=company, domain=domain,
-                titles=args.get("titles") or [],
                 locations=args.get("locations") or [],
-                limit=int(args.get("limit") or 6),
+                limit=int(args.get("limit") or 20),
             )
         except leadsforge.LeadsForgeError as e:
             return (f"CONTACT SEARCH UNAVAILABLE: {e}. Fall back to ONE web_search people query "
@@ -772,16 +811,18 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         state["free_lookups"] += 1
         _push_event(db, run_id, "search_done", f"{len(people)} people (free, 0 credits)")
         if mode == "not_found":
-            return (f"COMPANY NOT IN THE PEOPLE DATABASE ({company or domain}): zero people at any title. "
-                    "Common for very small startups. Do not retry; use the evidence itself (post author, "
-                    "job poster) or ONE web_search people query, else leave contact cells empty.")
-        header = ("PEOPLE (names/titles/city; LinkedIn URLs are not returned by search — leave "
-                  "contact_linkedin_url empty unless it appears in evidence). Company NAME matching is "
-                  "global: discard people whose city conflicts with the mandate.")
-        if mode == "all_people":
-            header = ("NO HR/TA-TITLED PERSON at this company; here is EVERYONE found there instead. "
-                      "Pick the most hiring-adjacent person per the targeting table (founder/CEO/COO for "
-                      "startups, else a team lead) and tier honestly. " + header)
+            return (f"COMPANY NOT IN THE PEOPLE DATABASE ({company or domain}). Common for very small "
+                    "startups. Do not retry; use the evidence itself (post author, job poster) or ONE "
+                    "web_search people query, else leave contact cells empty.")
+        header = ("ALL PEOPLE at this company (no title filter — YOU pick the best hiring-side contact "
+                  "per the targeting table: HR/TA/recruiter first, else people ops, else founder/exec "
+                  "for startups, else the relevant team lead; tier honestly). Names/titles/city only; "
+                  "LinkedIn URLs are not returned by search, leave contact_linkedin_url empty unless it "
+                  "appears in evidence. Company NAME matching is global: discard people whose city "
+                  "conflicts with the mandate.")
+        if mode == "people_no_location":
+            header = ("LOCATION FILTER MATCHED NOBODY (profiles often lack a parsed city); showing "
+                      "company-wide people instead — check cities yourself. " + header)
         return header + "\n" + "\n".join(
             f"- {p['name']} | {p['title']} | {p['city'] or 'city n/a'}"
             for p in people

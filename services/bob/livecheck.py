@@ -38,6 +38,96 @@ _LI_JOB_ID = re.compile(r"linkedin\.com/jobs/view/(?:[^\s/?#]*?-)?(\d{9,})", re.
 _BOARD_HOST = re.compile(r"jobs\.ashbyhq\.com|greenhouse\.io|jobs\.lever\.co", re.IGNORECASE)
 
 
+def _fetch_guest_job(job_id: str) -> tuple[str, str]:
+    """Fetch a job's guest HTML. Returns (body, err); err 'removed' on 404.
+    The guest endpoints soft-rate-limit by alternating real payloads with a
+    ~26-byte empty stub, so a tiny 200 means retry, not 'no data'."""
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}",
+                headers=_HEADERS, timeout=_TIMEOUT,
+            )
+        except requests.RequestException as e:
+            return "", f"fetch failed ({e.__class__.__name__})"
+        if r.status_code in (404, 410):
+            return "", "removed"
+        if r.status_code == 200 and len(r.text) >= 500:
+            return r.text, ""
+        time.sleep(0.8 * (attempt + 1))
+    return "", "guest endpoint kept returning empty stubs"
+
+
+def _strip_tags(fragment: str) -> str:
+    import html as _html
+    return _html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+def read_job(url: str) -> dict:
+    """Full free read of a LinkedIn job's guest page: liveness, role facts,
+    DESCRIPTION (for function confirmation) and the JOB POSTER when the hirer
+    enabled 'message the job poster' (rendered logged-out too — validated on
+    Meetxo/Prashob P, 2026-07-09). Raises LinkedInSearchError on fetch failure."""
+    m = _LI_JOB_ID.search(url or "")
+    if not m:
+        raise LinkedInSearchError("not a linkedin job url")
+    body, err = _fetch_guest_job(m.group(1))
+    if err == "removed":
+        return {"status": "closed", "reason": "posting removed (404)"}
+    if not body:
+        raise LinkedInSearchError(err)
+
+    if re.search(r"no longer accepting applications|closed-job", body, re.IGNORECASE):
+        status, reason = "closed", "no longer accepting applications"
+    elif "apply-button" in body:
+        status, reason = "open", "apply button live"
+    elif "message-the-recruiter" in body:
+        # Easy-Apply/DM jobs hide the apply button from guests but render the
+        # poster module — the module only exists on live postings.
+        status, reason = "open", "job-poster module live (Easy Apply job)"
+    else:
+        status, reason = "closed", "no apply affordance on guest page (expired promoted posting)"
+
+    def _pick(rx):
+        mm = re.search(rx, body, re.S)
+        return _strip_tags(mm.group(1))[:200] if mm else ""
+
+    out = {
+        "status": status, "reason": reason,
+        "title": _pick(r'top-card-layout__title[^>]*>\s*(.*?)</'),
+        "company": _pick(r'topcard__org-name-link[^>]*>\s*(.*?)</a>'),
+        "location": _pick(r'topcard__flavor--bullet[^>]*>\s*(.*?)</'),
+        "posted": _pick(r'posted-time-ago__text[^>]*>\s*(.*?)</'),
+    }
+    md = re.search(r'show-more-less-html__markup[^>]*>(.*?)</div>', body, re.S)
+    out["description"] = _strip_tags(md.group(1))[:1500] if md else ""
+
+    # Job-poster module ("message the job poster") — present when the hirer
+    # opted in; the poster is a T1 contact.
+    i = body.lower().find("message the job poster")
+    if i == -1:
+        i = body.find("message-the-recruiter")
+    if i != -1:
+        seg = body[max(0, i - 200): i + 3000]
+        name_m = re.search(r"view ([^<>\"]{2,60}?)[’']s profile", seg)
+        slug_m = re.search(r"(?:%2Fin%2F|/in/)([A-Za-z0-9\-_%.]+)", seg)
+        headline = ""
+        for t in re.findall(r">\s*([^<>]{5,160}?)\s*<", seg):
+            t = re.sub(r"\s+", " ", t).strip()
+            if name_m and t == name_m.group(1).strip():
+                continue
+            if ("|" in t or " - " in t) and "profile" not in t.lower() and "message" not in t.lower():
+                headline = t
+                break
+        if name_m:
+            out["poster"] = {
+                "name": name_m.group(1).strip()[:80],
+                "headline": headline[:150],
+                "profile_url": f"https://www.linkedin.com/in/{slug_m.group(1)}" if slug_m else "",
+            }
+    return out
+
+
 def linkedin_job_liveness(url: str) -> tuple[str, str]:
     """Return (status, reason) for a linkedin.com/jobs/view URL.
 
@@ -46,25 +136,11 @@ def linkedin_job_liveness(url: str) -> tuple[str, str]:
     m = _LI_JOB_ID.search(url or "")
     if not m:
         return "unknown", "not a linkedin job url"
-    # The guest endpoints soft-rate-limit by alternating real payloads with a
-    # ~26-byte empty stub, so a tiny 200 means retry, not "no data".
-    body = ""
-    for attempt in range(3):
-        try:
-            r = requests.get(
-                f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{m.group(1)}",
-                headers=_HEADERS, timeout=_TIMEOUT,
-            )
-        except requests.RequestException as e:
-            return "unknown", f"liveness fetch failed ({e.__class__.__name__})"
-        if r.status_code in (404, 410):
-            return "closed", "posting removed (404)"
-        if r.status_code == 200 and len(r.text) >= 500:
-            body = r.text
-            break
-        time.sleep(0.8 * (attempt + 1))
+    body, err = _fetch_guest_job(m.group(1))
+    if err == "removed":
+        return "closed", "posting removed (404)"
     if not body:
-        return "unknown", "guest endpoint kept returning empty stubs"
+        return "unknown", err or "guest endpoint kept returning empty stubs"
     if re.search(r"no longer accepting applications|closed-job", body, re.IGNORECASE):
         return "closed", "no longer accepting applications"
     if "apply-button" in body:
