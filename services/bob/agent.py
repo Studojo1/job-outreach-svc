@@ -49,6 +49,12 @@ Today's date: {today}.
   SOURCE MIX AND DIVERSITY: LinkedIn job postings come from the search_linkedin_jobs tool (free, live). Also run at least one non-LinkedIn job sweep (site:naukri.com OR site:indeed.com), the LinkedIn post sweeps, and where plausible one X sweep. NEVER let one author or account be the sole source for more than 2 rows (rule 11). Report the source mix in the summary if results end up single-source.
 - HARVEST (large volumes, e.g. "500 companies", "10,000 leads"): breadth over depth — wide sweeps, light scoring, and be explicit with the user that per-company depth is reduced. Deliver the best subset now and say how to continue.
 
+# FOLLOW-UP DISCIPLINE (the mandate's constraints PERSIST for the whole chat)
+- The original mandate's function, city, comp/stipend band and company-type constraints apply to EVERY follow-up. "Give me 15 more" means 15 more THAT MEET THE ORIGINAL CONSTRAINTS. "Purely internships" NARROWS to internships; it does not erase the function filter. Re-read the resumes and first message before every follow-up run.
+- For a frontend + ML mandate, an Operations intern, Data Entry intern, Content Moderation intern or Talent Outreach intern is NEVER a row, whatever the count pressure. If you cannot reach the requested count within constraints, deliver fewer and say exactly why and what you tried.
+- The system REJECTS rows with fit_score below 55. NEVER inflate a score to pass the gate; a row you would honestly score below 60 should not be attempted at all.
+- A search that returns broad results does not widen the mandate: filter to the mandate before adding rows.
+
 # CREDIT DISCIPLINE (Context.dev)
 - FREE TOOLS COST ZERO CREDITS: search_linkedin_jobs, check_job_board, find_contacts. Prefer them aggressively; spend credits only on what web search alone can do (posts, news, funding, non-LinkedIn boards).
 - web_search costs 1 credit per 10 results and INCLUDES page markdown. scrape_page costs 1 credit for one URL.
@@ -82,6 +88,7 @@ Today's date: {today}.
 1. THE EVIDENCE ITSELF: the job page's "meet the hiring team"; an insider post author. The author's name and headline are IN the post markdown and their slug is in the post URL — extract them directly. NEVER run a search to identify the author of a post you already retrieved.
 2. find_contacts (FREE): company domain (preferred) or exact company name, plus titles per the targeting table (HR / talent acquisition / recruiter / founder / relevant function head). For common or generic company names ALWAYS pass locations=[city] or the domain — name matching is global and same-named foreign companies pollute results; discard returned people whose city conflicts with the mandate. One call per company; broaden titles once if empty.
 3. ONLY if 1 and 2 fail: ONE web_search `"{{company}}" recruiter OR "talent acquisition" {{city}} site:linkedin.com/in`. Never repeat a failed people query with the same terms, and never run more than one per company (this pattern burned half a run's budget for near-zero yield).
+Run the waterfall ONLY for rows that already passed the fit bar — contacts for off-mandate companies are wasted work.
 
 # WHO TO TARGET (mandate x company size) — TPO/BD lens, NOT job-seeker lens
 - Cohort / mass placement: tiny startup → Founder; growth/mid → HR or TA lead; enterprise → TA person IN THE JOB'S CITY.
@@ -103,10 +110,10 @@ POST AUTHOR AFFILIATION (critical): a post's author is a T1 contact ONLY if they
 5. website = the company's OWN domain only (e.g. deepspatial.ai). NEVER put linkedin.com or job-board URLs in website — leave it empty if the real site was not found. The company's LinkedIn page goes in linkedin_url.
 6. EVIDENCE MUST BE ALIVE. The system auto-verifies liveness of linkedin.com/jobs and hosted-board evidence URLs at add_rows and REJECTS dead rows — so source LinkedIn jobs from search_linkedin_jobs (always live) instead of the stale web index. For sources without a free check (Naukri, Indeed, Wellfound, news), treat "[POSTING CLOSED]" flags as dead, and when liveness is uncertain in CURATION mode spend 1 credit to scrape and check. CORRECTNESS BEATS CREDIT SAVINGS. If a company's only evidence is dead, replace it or drop the company — and say so in the summary.
 7. USER CONSTRAINTS ARE HARD FILTERS. Numeric criteria the user states (funding floor, comp band, size, recency) EXCLUDE companies that fail them. Include an exception ONLY if the user explicitly defined one (e.g. "unfunded but strong founder pedigree"), and then the row's why_now must cite that exception. Never rationalize a violation ("may offer competitive comp" is not evidence).
-8. EVIDENCE MUST FIT THE CANDIDATE. The posting in hiring_evidence must be a role THIS candidate could plausibly take at the stated comp band (for a 40 LPA senior-sales mandate: Head/Director/AD/founding-sales roles, not a Marketing Ops Manager posting). FUNCTION MATCH IS BINARY: the evidence role must be in the candidate's function family (a UX Research role is NEVER evidence for a frontend or ML candidate). COVERAGE NEVER OVERRIDES FIT: 8 correct rows beat 12 padded ones. Generic "they are hiring in GTM" is only acceptable for opportunity-creation rows, which must say "no active posting, opportunity creation" in hiring_evidence and use the funding/news article as evidence_url. A LinkedIn COMPANY PAGE is NEVER an evidence_url.
+8. EVIDENCE MUST FIT THE CANDIDATE. The posting in hiring_evidence must be a role THIS candidate could plausibly take at the stated comp band (for a 40 LPA senior-sales mandate: Head/Director/AD/founding-sales roles, not a Marketing Ops Manager posting). FUNCTION MATCH IS BINARY: the evidence role must be in the candidate's function family (a UX Research role is NEVER evidence for a frontend or ML candidate). A posting titled just "Internship" or "Intern" with no function stated must be confirmed in-function from its description (check_job_board or 1-credit scrape) or dropped. COVERAGE NEVER OVERRIDES FIT: 8 correct rows beat 12 padded ones. Generic "they are hiring in GTM" is only acceptable for opportunity-creation rows, which must say "no active posting, opportunity creation" in hiring_evidence and use the funding/news article as evidence_url. A LinkedIn COMPANY PAGE is NEVER an evidence_url.
 9. ONE ROW PER COMPANY. Before add_rows, check the table snapshot and your own earlier adds; a company already in the table gets update_rows, never a second row. Use fit_score on a 0-100 scale, always.
 10. OPEN LINKED BOARDS BEFORE TRUSTING THEM. If evidence claims open roles and links an Ashby/Greenhouse/Lever board (jobs.ashbyhq.com, boards.greenhouse.io, jobs.lever.co), call check_job_board (FREE, zero credits) and confirm a role matching the mandate exists IN THE RIGHT LOCATION before presenting the company. "16 open roles" with the only sales role in San Francisco is a failed check — drop or re-frame the company honestly. A bare board root (jobs.ashbyhq.com with no company path) is NEVER a valid URL; find the company's actual board path or leave the cell empty.
-11. SOURCE DIVERSITY. At most 2 rows may rely on posts from the same author or account. If most rows came from one sweep or one account, run other archetypes before finishing. Aggregator posts are never final evidence (see POST AUTHOR AFFILIATION).
+11. SOURCE DIVERSITY. At most 2 rows may rely on posts from the same author or account (the system enforces this cap at add_rows). If most rows came from one sweep or one account, run other archetypes before finishing. Aggregator posts are never final evidence (see POST AUTHOR AFFILIATION). Rows must name a REAL company: "Early-stage AI startup" is not a company, find the name or drop the row (also enforced).
 12. NO MESSENGER APPLY LINKS. Telegram/WhatsApp links (t.me, wa.me, chat.whatsapp.com) are scam-grade and stripped by validation. A posting whose ONLY apply path is a messenger link is disqualified unless the role is corroborated on an official channel.
 13. COMPANY NAMES use the company's own spelling from its site/board/LinkedIn page ("Jumbotail", not "Jumbotai"). A misspelled company name is a defect.
 
@@ -187,7 +194,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_linkedin_jobs",
-            "description": "Search LinkedIn's LIVE job index for FREE (zero credits; results are current, never stale). This is THE way to find LinkedIn job postings — do not use web_search for them. Returns title, company, location, posted date and canonical URL per job.",
+            "description": "Search LinkedIn's LIVE job index for FREE (zero credits; results are current, never stale). This is THE way to find LinkedIn job postings — do not use web_search for them. Use SIMPLE keywords (2-4 words, e.g. 'frontend intern'); run separate calls for variants instead of OR-stacks. If the tool reports rate-limiting, retry the SAME query after other work — NEVER broaden keywords because of it. Returns title, company, location, posted date and canonical URL per job.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -223,11 +230,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_table",
-            "description": "Create a results table in the right panel. Do this early; add rows incrementally afterwards.",
+            "description": "Create a results table in the right panel. Do this early; add rows incrementally afterwards. One mandate = one table: follow-ups mutate the existing table.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "separate_mandate": {"type": "boolean", "description": "Set true ONLY when the user explicitly asked for a separate table for a genuinely different mandate. Otherwise the system refuses a second table in the chat."},
                     "columns": {
                         "type": "array",
                         "items": {
@@ -492,6 +500,26 @@ _NON_COMPANY_SITE = re.compile(
     r"|youtube\.com|(?:/|\.)t\.me/",
     re.IGNORECASE,
 )
+# Placeholder "company" names that must never become rows.
+_PLACEHOLDER_COMPANY = re.compile(r"\b(startup|stealth|unknown|unnamed|various|n/?a)\b", re.IGNORECASE)
+
+
+def _post_author(url: str) -> str:
+    """Author handle/slug from a social evidence URL ('' when not a post)."""
+    m = re.search(r"(?:x|twitter)\.com/([^/]+)/status/", url, re.IGNORECASE)
+    if m:
+        return "x:" + m.group(1).lower()
+    m = re.search(r"linkedin\.com/posts/([^_/?#]+)", url, re.IGNORECASE)
+    if m:
+        return "li:" + m.group(1).lower()
+    return ""
+
+
+def _coerce_score(v) -> int | None:
+    try:
+        return int(round(float(str(v).strip().rstrip("%"))))
+    except (ValueError, TypeError):
+        return None
 _URL_RE = re.compile(r"https?://[^\s;,\"'<>()\[\]]+")
 # Keys that must hold at most ONE link.
 _SINGLE_URL_KEYS = re.compile(r"(_url$|^website$)", re.IGNORECASE)
@@ -544,6 +572,13 @@ def _sanitize_cells(cells: dict) -> tuple[dict, list[str]]:
             keep = [u for u in keep if u not in nonsite]
             for b in nonsite:
                 removed.append(f"{k}: {b[:80]} is a job board or social page, not the company website")
+        if "linkedin" in k.lower():
+            # A linkedin_* column holds LinkedIn URLs of the right kind, or nothing.
+            want = r"linkedin\.com/in/" if "contact" in k.lower() else r"linkedin\.com/(company|school|showcase)/"
+            wrong = [u for u in keep if not re.search(want, u, re.IGNORECASE)]
+            keep = [u for u in keep if u not in wrong]
+            for b in wrong:
+                removed.append(f"{k}: {b[:90]} does not belong in a LinkedIn column (X links and non-LinkedIn URLs are never valid here)")
         if _SINGLE_URL_KEYS.search(k):
             # URL-typed field: exactly the first valid URL, or empty.
             if len(keep) > 1:
@@ -736,6 +771,17 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                 _push_event(db, run_id, "table", f"Reusing table: {ename}")
                 return (f"Table {ename!r} ALREADY EXISTS as id={tid}. Reusing it (new columns merged). "
                         f"Do NOT create another table; add rows with add_rows(table_id={tid}).")
+        # A chat is one mandate: renaming a table does not make it a new mandate.
+        occupied = db.execute(
+            text("SELECT t.id, t.name FROM bob_tables t WHERE t.chat_id = :c AND EXISTS "
+                 "(SELECT 1 FROM bob_rows r WHERE r.table_id = t.id) ORDER BY t.id LIMIT 1"),
+            {"c": chat_id},
+        ).fetchone()
+        if occupied and not args.get("separate_mandate"):
+            return (f"REFUSED: this chat already has table id={occupied[0]} ({occupied[1]!r}). Follow-ups mutate "
+                    f"that table (add_rows/add_columns/update_rows); splitting results across tables duplicates "
+                    f"companies and confuses the user. Retry with separate_mandate=true ONLY if the user "
+                    f"explicitly asked for a separate table.")
         row = db.execute(
             text("INSERT INTO bob_tables (chat_id, name, columns) VALUES (:c, :n, CAST(:cols AS jsonb)) RETURNING id"),
             {"c": chat_id, "n": tname, "cols": json.dumps(cols)},
@@ -756,27 +802,52 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             s = re.sub(r"\([^)]*\)", " ", str(v or "").lower())
             return re.sub(r"[^a-z0-9]+", "", s)
         existing = db.execute(
-            text("SELECT id, cells->>'company' FROM bob_rows WHERE table_id = :t"), {"t": tid}
+            text("SELECT id, cells->>'company', cells->>'evidence_url' FROM bob_rows WHERE table_id = :t"),
+            {"t": tid},
         ).fetchall()
-        seen = {_norm_company(nm): rid for rid, nm in existing if nm}
+        seen = {_norm_company(nm): rid for rid, nm, _ in existing if nm}
+        # Source-diversity ledger: rule 11's per-author cap, enforced in code.
+        author_counts: dict = {}
+        for _, _, ev_u in existing:
+            a = _post_author(ev_u or "")
+            if a:
+                author_counts[a] = author_counts.get(a, 0) + 1
+        unfit_notes: list[str] = []
         pos = db.execute(text("SELECT coalesce(max(position),0) FROM bob_rows WHERE table_id=:t"), {"t": tid}).scalar()
         added = 0
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            key = _norm_company(r.get("company"))
+            cname = str(r.get("company") or "").strip()
+            if not cname or _PLACEHOLDER_COMPANY.search(cname):
+                unfit_notes.append(f"{cname or '(no company)'}: not a real company name; find the actual company or drop the row")
+                continue
+            key = _norm_company(cname)
             if key and key in seen:
-                dup_notes.append(f"{r.get('company')} (already row_id={seen[key]})")
+                dup_notes.append(f"{cname} (already row_id={seen[key]})")
                 continue
             clean, removed = _sanitize_cells(r)
             all_removed += removed
+            # Fit floor: off-mandate padding never ships, whatever the count pressure.
+            score = _coerce_score(clean.get("fit_score"))
+            if score is not None and score < 55:
+                unfit_notes.append(f"{cname}: fit_score {score} is below the bar")
+                continue
             # Liveness gate: a row whose evidence is verifiably dead never ships.
             ev = str(clean.get("evidence_url") or "")
             if ev:
                 status, reason = _evidence_liveness(ev, state.setdefault("_gate_cache", {}))
                 if status == "closed":
-                    dead_notes.append(f"{r.get('company')}: {reason}")
+                    dead_notes.append(f"{cname}: {reason}")
                     continue
+            author = _post_author(ev)
+            if author:
+                if author_counts.get(author, 0) >= 2:
+                    unfit_notes.append(
+                        f"{cname}: already 2 rows from post author '{author.split(':', 1)[1]}'; "
+                        "corroborate on an official source or diversify")
+                    continue
+                author_counts[author] = author_counts.get(author, 0) + 1
             new_row = db.execute(
                 text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb)) RETURNING id"),
                 {"t": tid, "p": pos + added + 1, "c": json.dumps(clean, ensure_ascii=False)},
@@ -790,6 +861,8 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         _push_event(db, run_id, "rows", f"Added {added} rows")
         if dead_notes:
             _push_event(db, run_id, "guard", f"Rejected {len(dead_notes)} rows with dead evidence")
+        if unfit_notes:
+            _push_event(db, run_id, "guard", f"Rejected {len(unfit_notes)} rows by quality gate")
         note = ""
         if dup_notes:
             note += (" SKIPPED DUPLICATES (one row per company; use update_rows instead): "
@@ -798,6 +871,10 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             note += (" REJECTED ROWS, evidence verifiably DEAD (liveness check): "
                      + "; ".join(dead_notes[:6])
                      + ". Replace with LIVE evidence (prefer search_linkedin_jobs) or drop those companies.")
+        if unfit_notes:
+            note += (" REJECTED by quality gate: " + "; ".join(unfit_notes[:6])
+                     + ". Do NOT inflate fit scores or rename companies to pass this gate; "
+                     "deliver fewer, on-mandate rows and explain the shortfall in the summary.")
         if all_removed:
             note += (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
                      + ". Find correct links or leave those cells empty.")

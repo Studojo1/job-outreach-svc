@@ -112,6 +112,7 @@ def search_linkedin_jobs(keywords: str, location: str, hours_back: int = 0,
     if hours_back:
         params["f_TPR"] = f"r{int(hours_back) * 3600}"
     html_text = ""
+    saw_real_page = False
     for attempt in range(4):
         try:
             r = requests.get(
@@ -125,9 +126,19 @@ def search_linkedin_jobs(keywords: str, location: str, hours_back: int = 0,
         if "data-entity-urn" in r.text:
             html_text = r.text
             break
-        time.sleep(0.8 * (attempt + 1))  # empty stub = soft rate limit, retry
+        if len(r.text) >= 500:
+            saw_real_page = True  # a real page without job cards = genuinely 0 results
+        time.sleep(0.8 * (attempt + 1))  # ~26-byte empty stub = soft rate limit, retry
     if not html_text:
-        return []
+        if saw_real_page:
+            return []
+        # Only stubs seen: this is RATE LIMITING, not an empty result set. The
+        # caller must not mistake it for 0 results and broaden its query — that
+        # exact confusion turned a frontend-intern mandate into bare "intern".
+        raise LinkedInSearchError(
+            "guest index is rate-limiting right now (empty stubs). This is NOT a 0-result "
+            "answer. Retry the SAME query after other work; do not broaden keywords."
+        )
     marks = list(_CARD_URN.finditer(html_text))
     jobs: list[dict] = []
     for i, m in enumerate(marks[:limit]):
