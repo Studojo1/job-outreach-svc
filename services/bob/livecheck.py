@@ -116,9 +116,13 @@ def read_job(url: str) -> dict:
             t = re.sub(r"\s+", " ", t).strip()
             if name_m and t == name_m.group(1).strip():
                 continue
-            if ("|" in t or " - " in t) and "profile" not in t.lower() and "message" not in t.lower():
-                headline = t
-                break
+            low = t.lower()
+            if any(w in low for w in ("profile", "message", "sign in", "join now", "third-party")):
+                continue
+            # First substantive non-name text node after the name is the headline
+            # (formats vary: "TA Specialist @Zycus", "Director- X at Y", "A | B").
+            headline = t
+            break
         if name_m:
             out["poster"] = {
                 "name": name_m.group(1).strip()[:80],
