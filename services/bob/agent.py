@@ -46,7 +46,7 @@ Today's date: {today}.
 - CURATION (default, requests ≤ ~50 companies): deep evidence per company, named contacts, why-now rationale.
   COVERAGE: target 10-20 companies unless the user asked for fewer. Do not stop at 5-6 because early sweeps ran dry; vary archetypes and sources until you hit the target or the budget, and if you deliver fewer, the summary MUST say why (e.g. "only 8 companies passed the $5M filter").
   CONTACTS ARE REQUIRED per company: T1 from evidence if present (job page hiring team, insider post author); otherwise call find_contacts (FREE) with mandate-appropriate titles. Only if find_contacts is unavailable or empty, ONE Context.dev people query. Leave contact cells empty only after that, and name those companies in the summary.
-  SOURCE MIX AND DIVERSITY: LinkedIn job postings come from the search_linkedin_jobs tool (free, live). Also run at least one non-LinkedIn job sweep (site:naukri.com OR site:indeed.com), the LinkedIn post sweeps, and where plausible one X sweep. NEVER let one author or account be the sole source for more than 2 rows (rule 11). Report the source mix in the summary if results end up single-source.
+  SOURCE MIX IS MANDATORY (build a WIDE, high-quality pool to pick from, not a single-platform list). On every curation mandate run ALL of these, then filter to the best: (1) search_linkedin_jobs with keyword fan-out; (2) search_unstop (FREE structured internships, biggest India source); (3) Context.dev other-boards sweep (naukri/indeed/internshala/wellfound); (4) at least 2 LinkedIn post sweeps; (5) one X sweep where plausible. It is FINE if the final top rows end up mostly LinkedIn because LinkedIn had the best roles, but you MUST have actually pulled from the other sources so the pool was wide. If you skip sources, say so and why in the summary. NEVER let one author/account be the sole source for more than 2 rows (rule 11).
 - HARVEST (large volumes, e.g. "500 companies", "10,000 leads"): breadth over depth — wide sweeps, light scoring, and be explicit with the user that per-company depth is reduced. Deliver the best subset now and say how to continue.
 
 # FOLLOW-UP DISCIPLINE (the mandate's constraints PERSIST for the whole chat)
@@ -82,7 +82,8 @@ Today's date: {today}.
 # QUERY ARCHETYPES (India-first; compose per mandate; all lab-validated)
 - Job sweep, LinkedIn: search_linkedin_jobs TOOL is PRIMARY (free, live, higher quality than Context.dev for LinkedIn when it works: more jobs, all individual/live, better companies, no SEO spam). BUT it is an UNOFFICIAL endpoint that rate-limits and returns empty stubs unpredictably: if it errors, or returns 0 on keywords that clearly should have hits, it is CHOKING, not empty. When it chokes, FALL BACK to Context.dev `<role> intern <city> site:linkedin.com/jobs` at the user's freshness and drop dead ones from the markdown. Do not otherwise duplicate the guest tool with Context.dev (guest wins when healthy). The guest index is ~100% live but only ~55-77% on-function (LinkedIn fuzzy-matches HR/BD/PM interns), so filter hard. KEYWORD FAN-OUT IS MANDATORY: queries are free, so derive 8-15 SPECIFIC keyword variants from the mandate AND run these BROAD tech-intern keywords too: "software engineer intern", "software intern", "SDE intern", "summer intern", "tech intern", "engineering intern". Big companies title intern roles generically (Cisco's role is "Software Engineer- Summer Internship" with no ML/frontend token, so a function-only fan-out misses it — that is exactly how good Cisco/CAST-type roles were missed while a competing scraper caught them). The broad keywords surface generically-titled roles; read_linkedin_job's DESCRIPTION then confirms the function so off-fit ones are dropped. NEVER a single bare keyword alone ("intern", "engineer") without the fan-out around it. Then read_linkedin_job (FREE) on every job you ship: confirms function from the DESCRIPTION (mandatory for generic titles like "Intern") and often hands you the job poster as a T1 contact.
   When an aggregator or X post says "Company X is hiring interns" but links a search page/aggregator, DO NOT drop the company: run search_linkedin_jobs for "X intern" to find the real live posting, then ship that. Losing Cisco because its only signal was an aggregator post, when the real live job existed, is a miss.
-- Job sweep, OTHER boards (THIS is where Context.dev credits belong — it is the ONLY way to reach these; the guest tool cannot): role titles + city + `site:naukri.com OR site:wellfound.com OR site:internshala.com OR site:indeed.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com`, freshness = the user's window (default last_week), then drop dead ones from the markdown. These often return LISTING/search pages (e.g. "ML internship jobs in Bengaluru") rather than individual postings, and can drift off-city, so verify city and scrape_page (1 credit) a listing to pull the individual roles when the result is a search page, not a job.
+- UNSTOP: use the search_unstop TOOL (FREE, structured, individual live postings with stipend/deadline/eligibility). This is the primary cross-platform internship source and covers what the boards sweep does worse. Run several keyword variants; drop off-function roles (its search is fuzzy).
+- Job sweep, OTHER boards (Context.dev reaches Naukri/Indeed/Internshala/Wellfound; the guest tool cannot): role titles + city + `site:naukri.com OR site:wellfound.com OR site:internshala.com OR site:indeed.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com`, freshness = the user's window (default last_week), then drop dead ones from the markdown. These OFTEN return LISTING/search pages ("ML internship jobs in Bengaluru") rather than individual postings and can drift off-city. When a result is a listing/search page not an individual job, scrape_page it (1 credit) to pull the individual roles, or rely on search_unstop instead. Verify city on every row.
 - LINKEDIN POST SWEEPS (highest-value source: full post text + author + often an inline EMAIL, all for 1 credit; measured fresh, most results under a week). `site:linkedin.com/posts` is MANDATORY, a city/India token IN THE QUERY is mandatory (country=IN does NOT localize posts), freshness=last_week. Run at least 2 of these 3 variants on every curation mandate:
   * `site:linkedin.com/posts "we're hiring" <role keywords> <city>` — company announcements; highest inline-email rate.
   * `site:linkedin.com/posts "I'm hiring" OR "I am hiring" <function> <city>` — first-person: the author IS the hiring manager.
@@ -232,6 +233,23 @@ TOOLS = [
                     "label": {"type": "string", "description": "Short human label for the progress feed."},
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_unstop",
+            "description": "Search Unstop's live internship pool for FREE (zero credits, structured individual postings, NOT listing pages). Unstop is India's biggest internship platform and the main cross-platform source Bob otherwise misses. Returns title, company, url, location, STIPEND, application DEADLINE, ELIGIBILITY (batch), and required skills per role, filtered to genuinely-open postings. Search is fuzzy so filter to the mandate function yourself. Run this on every curation mandate to widen the pool beyond LinkedIn.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keywords": {"type": "string", "description": "Role keywords, e.g. 'machine learning' or 'full stack developer'. Run several specific variants."},
+                    "location": {"type": "string", "description": "City, e.g. 'Bengaluru'. Keeps city-matching + remote roles; omit for all-India."},
+                    "limit": {"type": "integer", "description": "Max roles. Default 20."},
+                    "label": {"type": "string", "description": "Short human label for the progress feed."},
+                },
+                "required": ["keywords"],
             },
         },
     },
@@ -570,6 +588,28 @@ def _norm_company(v) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+def _norm_person(v) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+
+_CONTACT_KEYS = ("contact_name", "contact_title", "tier", "contact_linkedin_url",
+                 "contact_email", "linkedin_url")
+
+
+def _contact_collision(clean: dict, company_norm: str, owners: dict) -> str:
+    """A real hiring contact belongs to ONE company. If this row's contact_name
+    is already assigned to a DIFFERENT company in the table, it is a
+    misattribution (the Pranit-Mehta-on-two-companies bug). Returns the owning
+    company name if it collides, else ''. Mutates nothing."""
+    cn = _norm_person(clean.get("contact_name"))
+    if not cn:
+        return ""
+    owner = owners.get(cn)
+    if owner and owner[0] != company_norm:
+        return owner[1]
+    return ""
+
+
 def _rejected_companies(db, chat_id: int) -> dict:
     """company_norm -> display name for companies the user removed from this mandate."""
     rows = db.execute(
@@ -801,6 +841,25 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             lines.append("DESCRIPTION (confirm function match from this, not the title):\n" + d["description"][:1100])
         return "\n".join(lines)
 
+    if name == "search_unstop":
+        from services.bob import unstop
+        kw = args.get("keywords", "")
+        _push_event(db, run_id, "search", args.get("label") or f"Unstop: {kw[:40]}", f"{kw} | {args.get('location','')}")
+        try:
+            jobs = unstop.search_internships(kw, args.get("location", ""), limit=int(args.get("limit") or 20))
+        except unstop.UnstopError as e:
+            return f"UNSTOP UNAVAILABLE ({e}). Continue with other sources."
+        state["free_lookups"] += 1
+        _push_event(db, run_id, "search_done", f"{len(jobs)} Unstop internships (free, 0 credits)")
+        if not jobs:
+            return "0 open Unstop internships for this keyword/location. Try broader keywords."
+        return ("OPEN UNSTOP INTERNSHIPS (individual live postings; search is fuzzy so DROP off-function "
+                "roles yourself; stipend/deadline/eligibility are structured and trustworthy):\n" + "\n".join(
+            f"- {j['title']} | {j['company']} | {j['location'] or 'loc n/a'} | stipend: {j['stipend'] or 'not stated'}"
+            f" | apply by {j['deadline'] or 'n/a'} | eligible: {j['eligibility'] or 'n/a'} | {j['url']}"
+            for j in jobs
+        ))
+
     if name == "find_contacts":
         from services.bob import leadsforge
         company = args.get("company", "")
@@ -823,17 +882,20 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             return (f"COMPANY NOT IN THE PEOPLE DATABASE ({company or domain}). Common for very small "
                     "startups. Do not retry; use the evidence itself (post author, job poster) or ONE "
                     "web_search people query, else leave contact cells empty.")
-        header = ("ALL PEOPLE at this company (no title filter — YOU pick the best hiring-side contact "
+        header = ("PEOPLE for company={co!r} (no title filter — YOU pick the best hiring-side contact "
                   "per the targeting table: HR/TA/recruiter first, else people ops, else founder/exec "
-                  "for startups, else the relevant team lead; tier honestly). Names/titles/city only; "
-                  "LinkedIn URLs are not returned by search, leave contact_linkedin_url empty unless it "
-                  "appears in evidence. Company NAME matching is global: discard people whose city "
-                  "conflicts with the mandate.")
+                  "for startups, else the relevant team lead; tier honestly). "
+                  "CRITICAL: each person shows the company they ACTUALLY work at (the 'at' field). "
+                  "Company-name matching is GLOBAL and fuzzy, so DISCARD anyone whose 'at' company is not "
+                  "{co!r} or whose city conflicts with the mandate. NEVER put the same person on two "
+                  "different companies. LinkedIn URLs are not returned by search, leave "
+                  "contact_linkedin_url empty unless it appears in evidence."
+                  ).format(co=(company or domain))
         if mode == "people_no_location":
             header = ("LOCATION FILTER MATCHED NOBODY (profiles often lack a parsed city); showing "
-                      "company-wide people instead — check cities yourself. " + header)
+                      "company-wide people instead, check cities yourself. " + header)
         return header + "\n" + "\n".join(
-            f"- {p['name']} | {p['title']} | {p['city'] or 'city n/a'}"
+            f"- {p['name']} | {p['title']} | at: {p['company'] or 'company n/a'} | {p['city'] or 'city n/a'}"
             for p in people
         )
 
@@ -895,16 +957,21 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         mandate = db.execute(text("SELECT mandate FROM bob_tables WHERE id=:t"), {"t": tid}).scalar() or []
         mandate_kw = [str(k).lower() for k in mandate if str(k).strip()]
         existing = db.execute(
-            text("SELECT id, cells->>'company', cells->>'evidence_url' FROM bob_rows WHERE table_id = :t"),
+            text("SELECT id, cells->>'company', cells->>'evidence_url', cells->>'contact_name' "
+                 "FROM bob_rows WHERE table_id = :t"),
             {"t": tid},
         ).fetchall()
-        seen = {_norm_company(nm): rid for rid, nm, _ in existing if nm}
+        seen = {_norm_company(nm): rid for rid, nm, _, _ in existing if nm}
         # Source-diversity ledger: rule 11's per-author cap, enforced in code.
         author_counts: dict = {}
-        for _, _, ev_u in existing:
+        # Contact-owner map for the collision rail: person -> (company_norm, company_display)
+        contact_owners: dict = {}
+        for _, nm, ev_u, cn in existing:
             a = _post_author(ev_u or "")
             if a:
                 author_counts[a] = author_counts.get(a, 0) + 1
+            if cn and nm:
+                contact_owners[_norm_person(cn)] = (_norm_company(nm), nm)
         unfit_notes: list[str] = []
         pos = db.execute(text("SELECT coalesce(max(position),0) FROM bob_rows WHERE table_id=:t"), {"t": tid}).scalar()
         added = 0
@@ -967,6 +1034,18 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                         "corroborate on an official source or diversify")
                     continue
                 author_counts[author] = author_counts.get(author, 0) + 1
+            # Contact-collision rail: the same person cannot be the contact for
+            # two different companies (the Pranit-Mehta bug). Strip the contact
+            # rather than reject the whole row.
+            owner = _contact_collision(clean, key, contact_owners)
+            if owner:
+                for ck in _CONTACT_KEYS:
+                    clean.pop(ck, None)
+                all_removed.append(
+                    f"{cname}: contact was already assigned to {owner!r}; a person is one company's "
+                    "contact, so it was cleared. Find the real contact for this company.")
+            elif _norm_person(clean.get("contact_name")):
+                contact_owners[_norm_person(clean["contact_name"])] = (key, cname)
             new_row = db.execute(
                 text("INSERT INTO bob_rows (table_id, position, cells) VALUES (:t, :p, CAST(:c AS jsonb)) RETURNING id"),
                 {"t": tid, "p": pos + added + 1, "c": json.dumps(clean, ensure_ascii=False)},
@@ -1023,10 +1102,14 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         # row_ids go stale (rows get deleted between runs) and mis-addressed
         # updates once put Digitomics' recruiter on the Honeywell row.
         current = db.execute(
-            text("SELECT id, cells->>'company' FROM bob_rows WHERE table_id = :t"), {"t": tid}
+            text("SELECT id, cells->>'company', cells->>'contact_name' FROM bob_rows WHERE table_id = :t"),
+            {"t": tid},
         ).fetchall()
-        by_company = {_norm_company(nm): rid for rid, nm in current if nm}
-        company_of = {rid: (nm or "?") for rid, nm in current}
+        by_company = {_norm_company(nm): rid for rid, nm, _ in current if nm}
+        company_of = {rid: (nm or "?") for rid, nm, _ in current}
+        # person -> (company_norm, company_display) for the collision rail
+        contact_owners = {_norm_person(cn): (_norm_company(nm), nm)
+                          for _, nm, cn in current if cn and nm}
         for u in updates:
             if not isinstance(u, dict):
                 continue
@@ -1056,6 +1139,17 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                 if status == "closed":
                     clean.pop("evidence_url", None)
                     all_removed.append(f"evidence_url (row {rid}): DEAD, {reason}")
+            # Contact-collision rail: same person cannot own two companies' rows.
+            row_company_norm = _norm_company(company_of.get(rid, ""))
+            owner = _contact_collision(clean, row_company_norm, contact_owners)
+            if owner:
+                for ck in _CONTACT_KEYS:
+                    clean.pop(ck, None)
+                all_removed.append(
+                    f"contact for {company_of.get(rid)!r} was already on {owner!r}; cleared "
+                    "(a person is one company's contact). Find this company's real contact.")
+            elif _norm_person(clean.get("contact_name")):
+                contact_owners[_norm_person(clean["contact_name"])] = (row_company_norm, company_of.get(rid, ""))
             res = db.execute(
                 text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at=now() WHERE id=:r AND table_id=:t"),
                 {"c": json.dumps(clean, ensure_ascii=False), "r": rid, "t": tid},
