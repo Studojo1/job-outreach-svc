@@ -216,6 +216,47 @@ async def update_row_status(row_id: int, req: RowStatusRequest, db: Session = De
     return {"ok": True}
 
 
+@router.delete("/rows/{row_id}", dependencies=[Depends(_guard)])
+async def delete_row(row_id: int, db: Session = Depends(get_db)):
+    res = db.execute(text("DELETE FROM bob_rows WHERE id = :r"), {"r": row_id})
+    db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return {"ok": True, "deleted": row_id}
+
+
+@router.delete("/tables/{table_id}", dependencies=[Depends(_guard)])
+async def delete_table(table_id: int, db: Session = Depends(get_db)):
+    db.execute(text("DELETE FROM bob_rows WHERE table_id = :t"), {"t": table_id})
+    res = db.execute(text("DELETE FROM bob_tables WHERE id = :t"), {"t": table_id})
+    db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Table not found")
+    return {"ok": True, "deleted": table_id}
+
+
+@router.post("/tables/{table_id}/scrub", dependencies=[Depends(_guard)])
+async def scrub_table(table_id: int, db: Session = Depends(get_db)):
+    """Re-run the cell sanitizer over every row (applies rails added after the
+    rows were written, e.g. X links in linkedin columns)."""
+    from services.bob.agent import _sanitize_cells
+
+    rows = db.execute(
+        text("SELECT id, cells FROM bob_rows WHERE table_id = :t"), {"t": table_id}
+    ).fetchall()
+    fixed = []
+    for rid, cells in rows:
+        clean, removed = _sanitize_cells(dict(cells or {}))
+        if removed:
+            db.execute(
+                text("UPDATE bob_rows SET cells = CAST(:c AS jsonb), updated_at = now() WHERE id = :r"),
+                {"c": json.dumps(clean, ensure_ascii=False), "r": rid},
+            )
+            fixed.append({"row_id": rid, "removed": removed})
+    db.commit()
+    return {"ok": True, "rows_fixed": len(fixed), "details": fixed}
+
+
 # ── Export ─────────────────────────────────────────────────────────────────────
 
 @router.get("/tables/{table_id}/export", dependencies=[Depends(_guard)])
