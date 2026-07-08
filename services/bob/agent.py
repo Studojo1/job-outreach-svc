@@ -26,7 +26,7 @@ from services.bob import contextdev_client as ctx
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 44  # free tools (jobs/contacts/board checks) need headroom
+MAX_TOOL_CALLS = 60  # free tools dominate runs now; credits are the real budget
 MAX_CREDITS_PER_RUN = 40  # Context.dev credits (~Rs 6)
 
 SYSTEM_PROMPT = """You are Bob, a senior placement-intelligence analyst built by Studojo for the placement and business-development (BD) teams of training & placement institutes in India.
@@ -54,6 +54,7 @@ Today's date: {today}.
 - For a frontend + ML mandate, an Operations intern, Data Entry intern, Content Moderation intern or Talent Outreach intern is NEVER a row, whatever the count pressure. If you cannot reach the requested count within constraints, deliver fewer and say exactly why and what you tried.
 - The system REJECTS rows with fit_score below 55. NEVER inflate a score to pass the gate; a row you would honestly score below 60 should not be attempted at all.
 - A search that returns broad results does not widen the mandate: filter to the mandate before adding rows.
+- SHORTFALL HONESTY: when the user asks for N and you deliver fewer, the summary MUST say the exact number delivered, why the gap exists (pool exhausted? gates rejected M rows?), and which sources you have NOT yet tried (Naukri, Indeed, Wellfound, hosted boards, X). Recycling the same search keywords does not count as trying.
 
 # CREDIT DISCIPLINE (Context.dev)
 - FREE TOOLS COST ZERO CREDITS: search_linkedin_jobs, check_job_board, find_contacts. Prefer them aggressively; spend credits only on what web search alone can do (posts, news, funding, non-LinkedIn boards).
@@ -118,7 +119,9 @@ POST AUTHOR AFFILIATION (critical): a post's author is a T1 contact ONLY if they
 13. COMPANY NAMES use the company's own spelling from its site/board/LinkedIn page ("Jumbotail", not "Jumbotai"). A misspelled company name is a defect.
 
 # TABLES — YOUR ONLY OUTPUT CHANNEL FOR FINDINGS
-- Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in.
+- Create a table EARLY (after your first useful search), then add rows INCREMENTALLY as evidence lands — the user watches rows stream in. ALWAYS pass target_functions on create_table for curation mandates; the system rejects off-function rows using them.
+- update_rows: address rows by COMPANY NAME, not remembered row_ids (rows get deleted between runs; stale ids have written contacts onto the wrong companies). Read the APPLIED list in the result and confirm each update landed where you intended; report any FAILED entries in your summary instead of claiming success.
+- COMPANIES THE USER REMOVED (listed in the tables snapshot) are gone for a reason. NEVER re-add them, and NEVER re-score a company higher to get past a gate: score changes require NEW evidence, which you must cite in why_now.
 - Column keys are snake_case. Typical company table: company, website, city, size_band, what_they_do, hiring_evidence, evidence_url, funding, why_now, fit_score, contact_name, contact_title, tier, linkedin_url.
 - Follow-up questions in the same chat MUTATE the existing table (add_columns / update_rows / add_rows). NEVER create a second table for the same mandate. If CURRENT TABLES already lists a table for this mandate, even with 0 rows (e.g. you created it before asking a clarifying question), you MUST reuse its id.
 - Every evidence-based cell should be traceable: put the source URL in evidence_url (or in the cell itself when a row has multiple sources).
@@ -236,6 +239,7 @@ TOOLS = [
                 "properties": {
                     "name": {"type": "string"},
                     "separate_mandate": {"type": "boolean", "description": "Set true ONLY when the user explicitly asked for a separate table for a genuinely different mandate. Otherwise the system refuses a second table in the chat."},
+                    "target_functions": {"type": "array", "items": {"type": "string"}, "description": "REQUIRED for curation tables: 4-10 short lowercase function keywords from the mandate (e.g. ['frontend','front-end','fullstack','react','ml','machine learning','ai','data science','software','sdet']). Rows whose role text matches none are auto-rejected."},
                     "columns": {
                         "type": "array",
                         "items": {
@@ -290,7 +294,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "update_rows",
-            "description": "Update cells of existing rows (by row_id). Use for filling new columns or correcting values.",
+            "description": "Update cells of existing rows. ALWAYS address rows by their 'company' name (the system resolves it to the right row); row_ids from memory go stale after deletions and have mis-addressed contacts before. The result lists exactly which company each update landed on, verify it.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -299,8 +303,12 @@ TOOLS = [
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "properties": {"row_id": {"type": "integer"}, "cells": {"type": "object"}},
-                            "required": ["row_id", "cells"],
+                            "properties": {
+                                "company": {"type": "string", "description": "Company name of the row to update (preferred addressing)."},
+                                "row_id": {"type": "integer", "description": "Fallback only; company wins when both are given."},
+                                "cells": {"type": "object"},
+                            },
+                            "required": ["cells"],
                         },
                     },
                 },
@@ -455,6 +463,16 @@ def _tables_snapshot(db, chat_id: int) -> str:
     if not tables:
         return "No tables exist in this chat yet."
     parts = []
+    try:
+        rejected = _rejected_companies(db, chat_id)
+    except Exception:
+        db.rollback()
+        rejected = {}
+    if rejected:
+        parts.append(
+            "COMPANIES THE USER REMOVED FROM THIS MANDATE (add_rows will reject them, NEVER re-add): "
+            + ", ".join(sorted(rejected.values()))
+        )
     for tid, name, columns in tables:
         rows = db.execute(
             text("SELECT id, cells FROM bob_rows WHERE table_id = :t ORDER BY position, id LIMIT 25"),
@@ -520,6 +538,22 @@ def _coerce_score(v) -> int | None:
         return int(round(float(str(v).strip().rstrip("%"))))
     except (ValueError, TypeError):
         return None
+
+
+def _norm_company(v) -> str:
+    """Normalized company key: parentheticals dropped so
+    'Composio (Ashby job board)' == 'Composio'."""
+    s = re.sub(r"\([^)]*\)", " ", str(v or "").lower())
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _rejected_companies(db, chat_id: int) -> dict:
+    """company_norm -> display name for companies the user removed from this mandate."""
+    rows = db.execute(
+        text("SELECT company_norm, company FROM bob_rejections WHERE chat_id = :c"),
+        {"c": chat_id},
+    ).fetchall()
+    return {n: c for n, c in rows}
 _URL_RE = re.compile(r"https?://[^\s;,\"'<>()\[\]]+")
 # Keys that must hold at most ONE link.
 _SINGLE_URL_KEYS = re.compile(r"(_url$|^website$)", re.IGNORECASE)
@@ -726,7 +760,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                     args.get("label") or f"Contacts at {(company or domain)[:45]}",
                     f"{company} {domain} {args.get('titles')}"[:200])
         try:
-            people = leadsforge.find_people(
+            people, mode = leadsforge.find_people(
                 company=company, domain=domain,
                 titles=args.get("titles") or [],
                 locations=args.get("locations") or [],
@@ -737,17 +771,21 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                     f"(site:linkedin.com/in) for this company, then move on.")
         state["free_lookups"] += 1
         _push_event(db, run_id, "search_done", f"{len(people)} people (free, 0 credits)")
-        if not people:
-            return ("No people matched. Retry ONCE with broader titles "
-                    "(['HR', 'Talent', 'Recruiter', 'Founder']) or the company domain instead of "
-                    "the name; if still empty, leave contact cells empty for this company.")
-        return ("PEOPLE (names/titles/city; LinkedIn URLs are not returned by search — leave "
-                "contact_linkedin_url empty unless it appears in evidence). Company NAME matching is "
-                "global: discard people whose city conflicts with the mandate (same-named foreign "
-                "companies pollute results; prefer domain or a locations filter):\n" + "\n".join(
+        if mode == "not_found":
+            return (f"COMPANY NOT IN THE PEOPLE DATABASE ({company or domain}): zero people at any title. "
+                    "Common for very small startups. Do not retry; use the evidence itself (post author, "
+                    "job poster) or ONE web_search people query, else leave contact cells empty.")
+        header = ("PEOPLE (names/titles/city; LinkedIn URLs are not returned by search — leave "
+                  "contact_linkedin_url empty unless it appears in evidence). Company NAME matching is "
+                  "global: discard people whose city conflicts with the mandate.")
+        if mode == "all_people":
+            header = ("NO HR/TA-TITLED PERSON at this company; here is EVERYONE found there instead. "
+                      "Pick the most hiring-adjacent person per the targeting table (founder/CEO/COO for "
+                      "startups, else a team lead) and tier honestly. " + header)
+        return header + "\n" + "\n".join(
             f"- {p['name']} | {p['title']} | {p['city'] or 'city n/a'}"
             for p in people
-        ))
+        )
 
     if name == "create_table":
         cols = args.get("columns") or []
@@ -759,6 +797,7 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             text("SELECT id, name, columns FROM bob_tables WHERE chat_id = :c ORDER BY id"),
             {"c": chat_id},
         ).fetchall()
+        tfuncs = [str(k).strip().lower() for k in (args.get("target_functions") or []) if str(k).strip()][:10]
         for tid, ename, ecols in existing:
             if re.sub(r"[^a-z0-9]+", "", (ename or "").lower()) == norm:
                 keys = {col.get("key") for col in (ecols or [])}
@@ -767,6 +806,9 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                     text("UPDATE bob_tables SET columns = CAST(:cols AS jsonb), updated_at = now() WHERE id = :t"),
                     {"cols": json.dumps(merged), "t": tid},
                 )
+                if tfuncs:
+                    db.execute(text("UPDATE bob_tables SET mandate = CAST(:m AS jsonb) WHERE id = :t"),
+                               {"m": json.dumps(tfuncs), "t": tid})
                 db.commit()
                 _push_event(db, run_id, "table", f"Reusing table: {ename}")
                 return (f"Table {ename!r} ALREADY EXISTS as id={tid}. Reusing it (new columns merged). "
@@ -783,12 +825,15 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                     f"companies and confuses the user. Retry with separate_mandate=true ONLY if the user "
                     f"explicitly asked for a separate table.")
         row = db.execute(
-            text("INSERT INTO bob_tables (chat_id, name, columns) VALUES (:c, :n, CAST(:cols AS jsonb)) RETURNING id"),
-            {"c": chat_id, "n": tname, "cols": json.dumps(cols)},
+            text("INSERT INTO bob_tables (chat_id, name, columns, mandate) "
+                 "VALUES (:c, :n, CAST(:cols AS jsonb), CAST(:m AS jsonb)) RETURNING id"),
+            {"c": chat_id, "n": tname, "cols": json.dumps(cols), "m": json.dumps(tfuncs)},
         ).fetchone()
         db.commit()
         _push_event(db, run_id, "table", f"Created table: {tname}")
-        return f"Table created with id={row[0]}. Add rows with add_rows."
+        gate = (f" Function gate active: rows whose role text matches none of {tfuncs} will be rejected."
+                if tfuncs else " WARNING: no target_functions passed, the function gate is OFF for this table.")
+        return f"Table created with id={row[0]}. Add rows with add_rows.{gate}"
 
     if name == "add_rows":
         tid = int(args.get("table_id") or 0)
@@ -796,11 +841,9 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
         all_removed: list[str] = []
         dup_notes: list[str] = []
         dead_notes: list[str] = []
-        # One row per company: dedupe against existing rows by normalized name.
-        # Parentheticals are dropped so "Composio (Ashby job board)" == "Composio".
-        def _norm_company(v) -> str:
-            s = re.sub(r"\([^)]*\)", " ", str(v or "").lower())
-            return re.sub(r"[^a-z0-9]+", "", s)
+        rejected = _rejected_companies(db, chat_id)
+        mandate = db.execute(text("SELECT mandate FROM bob_tables WHERE id=:t"), {"t": tid}).scalar() or []
+        mandate_kw = [str(k).lower() for k in mandate if str(k).strip()]
         existing = db.execute(
             text("SELECT id, cells->>'company', cells->>'evidence_url' FROM bob_rows WHERE table_id = :t"),
             {"t": tid},
@@ -823,6 +866,9 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                 unfit_notes.append(f"{cname or '(no company)'}: not a real company name; find the actual company or drop the row")
                 continue
             key = _norm_company(cname)
+            if key in rejected:
+                unfit_notes.append(f"{cname}: the USER REMOVED this company from this mandate; never re-add it")
+                continue
             if key and key in seen:
                 dup_notes.append(f"{cname} (already row_id={seen[key]})")
                 continue
@@ -830,9 +876,29 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             all_removed += removed
             # Fit floor: off-mandate padding never ships, whatever the count pressure.
             score = _coerce_score(clean.get("fit_score"))
+            fit_rejects = state.setdefault("_fit_rejects", {})
             if score is not None and score < 55:
                 unfit_notes.append(f"{cname}: fit_score {score} is below the bar")
+                fit_rejects[key] = score
                 continue
+            # Same-run score inflation: a company scored below the bar earlier in
+            # this run cannot return with a pumped score and no new evidence.
+            if score is not None and key in fit_rejects and score > fit_rejects[key]:
+                unfit_notes.append(
+                    f"{cname}: you scored this {fit_rejects[key]} earlier this run; raising it to {score} "
+                    "without new evidence is score inflation, drop the company")
+                continue
+            # Mandate function gate: role text must match a mandate keyword.
+            if mandate_kw:
+                role_text = " ".join(
+                    str(clean.get(k) or "") for k in
+                    ("hiring_evidence", "role", "role_title", "title", "position", "what_they_do")
+                ).lower()
+                if role_text.strip() and not any(kw in role_text for kw in mandate_kw):
+                    unfit_notes.append(
+                        f"{cname}: role text matches none of the mandate functions {mandate_kw}; "
+                        "off-function rows never ship")
+                    continue
             # Liveness gate: a row whose evidence is verifiably dead never ships.
             ev = str(clean.get("evidence_url") or "")
             if ev:
@@ -897,32 +963,63 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
     if name == "update_rows":
         tid = int(args.get("table_id") or 0)
         updates = args.get("updates") or []
-        n = 0
         all_removed: list[str] = []
+        applied: list[str] = []
+        failed: list[str] = []
+        # Row addressing: company name is the source of truth. Model-remembered
+        # row_ids go stale (rows get deleted between runs) and mis-addressed
+        # updates once put Digitomics' recruiter on the Honeywell row.
+        current = db.execute(
+            text("SELECT id, cells->>'company' FROM bob_rows WHERE table_id = :t"), {"t": tid}
+        ).fetchall()
+        by_company = {_norm_company(nm): rid for rid, nm in current if nm}
+        company_of = {rid: (nm or "?") for rid, nm in current}
         for u in updates:
-            rid = u.get("row_id")
+            if not isinstance(u, dict):
+                continue
             cells = u.get("cells") or {}
-            if rid and isinstance(cells, dict):
-                clean, removed = _sanitize_cells(cells)
-                all_removed += removed
-                ev = str(clean.get("evidence_url") or "")
-                if ev:
-                    status, reason = _evidence_liveness(ev, state.setdefault("_gate_cache", {}))
-                    if status == "closed":
-                        clean.pop("evidence_url", None)
-                        all_removed.append(f"evidence_url (row {rid}): DEAD, {reason}")
-                db.execute(
-                    text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at=now() WHERE id=:r AND table_id=:t"),
-                    {"c": json.dumps(clean, ensure_ascii=False), "r": rid, "t": tid},
-                )
-                n += 1
+            if not isinstance(cells, dict) or not cells:
+                continue
+            rid = u.get("row_id")
+            uc = str(u.get("company") or "").strip()
+            if uc:
+                resolved = by_company.get(_norm_company(uc))
+                if resolved is None:
+                    failed.append(f"{uc}: no row with this company in table {tid}")
+                    continue
+                if rid and rid != resolved:
+                    all_removed.append(
+                        f"row_id {rid} contradicted company {uc!r}; used the company (row {resolved})")
+                rid = resolved
+            if not rid or rid not in company_of:
+                failed.append(f"row_id={rid}: does not exist in table {tid} (deleted or wrong table); "
+                              "address updates by company name instead")
+                continue
+            clean, removed = _sanitize_cells(cells)
+            all_removed += removed
+            ev = str(clean.get("evidence_url") or "")
+            if ev:
+                status, reason = _evidence_liveness(ev, state.setdefault("_gate_cache", {}))
+                if status == "closed":
+                    clean.pop("evidence_url", None)
+                    all_removed.append(f"evidence_url (row {rid}): DEAD, {reason}")
+            res = db.execute(
+                text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at=now() WHERE id=:r AND table_id=:t"),
+                {"c": json.dumps(clean, ensure_ascii=False), "r": rid, "t": tid},
+            )
+            if res.rowcount:
+                applied.append(f"row {rid} ({company_of[rid]}): {', '.join(list(clean.keys())[:5])}")
+            else:
+                failed.append(f"row_id={rid}: update did not apply")
         db.commit()
-        _push_event(db, run_id, "rows", f"Updated {n} rows")
-        note = ""
+        _push_event(db, run_id, "rows", f"Updated {len(applied)} rows")
+        note = " APPLIED: " + "; ".join(applied[:8]) + "." if applied else " NOTHING APPLIED."
+        if failed:
+            note += " FAILED: " + "; ".join(failed[:6]) + "."
         if all_removed:
-            note = (" WARNING, invalid URLs were removed by validation: " + "; ".join(all_removed[:6])
-                    + ". Find correct links or leave those cells empty.")
-        return f"Updated {n} rows.{note}"
+            note += (" WARNING: " + "; ".join(all_removed[:6])
+                     + ". Find correct links or leave those cells empty.")
+        return f"Updated {len(applied)} of {len(updates)} requested rows.{note} Verify the APPLIED list matches your intent."
 
     return f"Unknown tool: {name}"
 

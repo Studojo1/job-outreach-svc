@@ -23,19 +23,11 @@ class LeadsForgeError(Exception):
     pass
 
 
-def find_people(company: str = "", domain: str = "", titles: list[str] | None = None,
-                locations: list[str] | None = None, seniorities: list[str] | None = None,
-                limit: int = 8) -> list[dict]:
-    """Search people at a company. Returns [{name, title, company, city, linkedin_url}]."""
-    key = settings.LEADSFORGE_API_KEY
-    if not key:
-        raise LeadsForgeError("LEADSFORGE_API_KEY is not configured")
-
-    n = max(1, min(int(limit or 8), 25))
+def _search(key: str, company: str, domain: str, titles: list | None,
+            locations: list | None, seniorities: list | None, n: int) -> list[dict]:
     body: dict = {"limit": n,  # required by the API (400 without it)
                   "maxContactsPerCompany": n,
                   "companyRequired": True}
-    domain = (domain or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/")[0]
     if domain:
         body["companyDomains"] = {"include": [domain]}
     elif company:
@@ -76,3 +68,37 @@ def find_people(company: str = "", domain: str = "", titles: list[str] | None = 
             "linkedin_url": l.get("linkedinUrl") or "",
         })
     return [p for p in out if p["name"]]
+
+
+def find_people(company: str = "", domain: str = "", titles: list[str] | None = None,
+                locations: list[str] | None = None, seniorities: list[str] | None = None,
+                limit: int = 8) -> tuple[list[dict], str]:
+    """Two-step people search at a company. Returns (people, mode):
+
+    mode 'titled'       — the title filter matched people
+    mode 'all_people'   — no titled match; returning EVERYONE found at the
+                          company (+location) so the caller picks the most
+                          hiring-adjacent person (small startups rarely have
+                          an HR-titled employee)
+    mode 'not_found'    — the company itself has no people in the database
+    """
+    key = settings.LEADSFORGE_API_KEY
+    if not key:
+        raise LeadsForgeError("LEADSFORGE_API_KEY is not configured")
+
+    n = max(1, min(int(limit or 8), 25))
+    domain = (domain or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/")[0]
+
+    if titles:
+        people = _search(key, company, domain, titles, locations, seniorities, n)
+        if people:
+            return people, "titled"
+    people = _search(key, company, domain, None, locations, None, max(n, 15))
+    if people:
+        return people, "all_people"
+    if locations:
+        # Location can be over-strict (profiles often lack a parsed city).
+        people = _search(key, company, domain, None, None, None, max(n, 15))
+        if people:
+            return people, "all_people"
+    return [], "not_found"

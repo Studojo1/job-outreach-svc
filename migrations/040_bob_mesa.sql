@@ -74,3 +74,17 @@ CREATE TABLE IF NOT EXISTS bob_evidence_cache (
     expires_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS ix_bob_evidence_expires ON bob_evidence_cache(expires_at);
+
+-- Rejection ledger: companies the user removed from a mandate must never be re-added
+CREATE TABLE IF NOT EXISTS bob_rejections (
+    id SERIAL PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    company TEXT NOT NULL,
+    company_norm TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_bob_rejections_chat ON bob_rejections(chat_id, company_norm);
+
+-- Mandate function keywords per table: rows whose role text matches none are rejected
+ALTER TABLE bob_tables ADD COLUMN IF NOT EXISTS mandate JSONB DEFAULT '[]'::jsonb;

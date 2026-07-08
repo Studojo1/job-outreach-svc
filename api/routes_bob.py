@@ -218,11 +218,85 @@ async def update_row_status(row_id: int, req: RowStatusRequest, db: Session = De
 
 @router.delete("/rows/{row_id}", dependencies=[Depends(_guard)])
 async def delete_row(row_id: int, db: Session = Depends(get_db)):
+    # Record the removal in the rejection ledger BEFORE deleting: a company the
+    # user removed must never be re-added by a later agent run.
+    from services.bob.agent import _norm_company
+
+    meta = db.execute(
+        text("SELECT r.cells->>'company', t.chat_id FROM bob_rows r "
+             "JOIN bob_tables t ON t.id = r.table_id WHERE r.id = :r"),
+        {"r": row_id},
+    ).fetchone()
+    if meta and meta[0]:
+        db.execute(
+            text("INSERT INTO bob_rejections (chat_id, company, company_norm, reason) "
+                 "VALUES (:c, :co, :n, 'removed by user')"),
+            {"c": meta[1], "co": meta[0], "n": _norm_company(meta[0])},
+        )
     res = db.execute(text("DELETE FROM bob_rows WHERE id = :r"), {"r": row_id})
     db.commit()
     if res.rowcount == 0:
         raise HTTPException(status_code=404, detail="Row not found")
-    return {"ok": True, "deleted": row_id}
+    return {"ok": True, "deleted": row_id, "banned": bool(meta and meta[0])}
+
+
+class GuardrailsRequest(BaseModel):
+    reject_companies: list[str] = []
+    target_functions: list[str] = []
+
+
+@router.post("/chats/{chat_id}/guardrails", dependencies=[Depends(_guard)])
+async def set_guardrails(chat_id: int, req: GuardrailsRequest, db: Session = Depends(get_db)):
+    """Seed the rejection ledger and/or the mandate function keywords for a chat."""
+    from services.bob.agent import _norm_company
+
+    added = 0
+    for c in req.reject_companies:
+        c = (c or "").strip()
+        if not c:
+            continue
+        n = _norm_company(c)
+        exists = db.execute(
+            text("SELECT 1 FROM bob_rejections WHERE chat_id = :c AND company_norm = :n LIMIT 1"),
+            {"c": chat_id, "n": n},
+        ).fetchone()
+        if not exists:
+            db.execute(
+                text("INSERT INTO bob_rejections (chat_id, company, company_norm, reason) "
+                     "VALUES (:c, :co, :n, 'removed by user')"),
+                {"c": chat_id, "co": c, "n": n},
+            )
+            added += 1
+    tf = [t.strip().lower() for t in req.target_functions if t.strip()][:12]
+    tables = 0
+    if tf:
+        res = db.execute(
+            text("UPDATE bob_tables SET mandate = CAST(:m AS jsonb) WHERE chat_id = :c"),
+            {"m": json.dumps(tf), "c": chat_id},
+        )
+        tables = res.rowcount
+    db.commit()
+    return {"ok": True, "rejections_added": added, "tables_mandated": tables}
+
+
+class RowCellsRequest(BaseModel):
+    cells: dict
+
+
+@router.patch("/rows/{row_id}/cells", dependencies=[Depends(_guard)])
+async def update_row_cells(row_id: int, req: RowCellsRequest, db: Session = Depends(get_db)):
+    """Direct cell repair (sanitized). Used for audit fixes; the agent has its own tool."""
+    from services.bob.agent import _sanitize_cells
+
+    clean, removed = _sanitize_cells(dict(req.cells or {}))
+    res = db.execute(
+        text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at = now() WHERE id = :r"),
+        {"c": json.dumps(clean, ensure_ascii=False), "r": row_id},
+    )
+    db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return {"ok": True, "row_id": row_id, "removed_by_validation": removed}
 
 
 @router.delete("/tables/{table_id}", dependencies=[Depends(_guard)])
