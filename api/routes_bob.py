@@ -240,6 +240,54 @@ async def delete_row(row_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "deleted": row_id, "banned": bool(meta and meta[0])}
 
 
+class AddColumnsRequest(BaseModel):
+    columns: list[dict]  # [{"key": "...", "label": "..."}]
+
+
+@router.post("/tables/{table_id}/columns", dependencies=[Depends(_guard)])
+async def add_table_columns(table_id: int, req: AddColumnsRequest, db: Session = Depends(get_db)):
+    """Append columns to a table (admin/import use). Merges by key, no dupes."""
+    existing = db.execute(text("SELECT columns FROM bob_tables WHERE id=:t"), {"t": table_id}).scalar()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Table not found")
+    keys = {c.get("key") for c in existing}
+    merged = list(existing) + [c for c in req.columns if c.get("key") and c.get("key") not in keys]
+    db.execute(text("UPDATE bob_tables SET columns=CAST(:c AS jsonb), updated_at=now() WHERE id=:t"),
+               {"c": json.dumps(merged), "t": table_id})
+    db.commit()
+    return {"ok": True, "columns": [c.get("key") for c in merged]}
+
+
+class AddRowsRequest(BaseModel):
+    rows: list[dict]  # each keyed by column key
+
+
+@router.post("/tables/{table_id}/rows", dependencies=[Depends(_guard)])
+async def add_table_rows(table_id: int, req: AddRowsRequest, db: Session = Depends(get_db)):
+    """Append rows directly (admin/import use — bypasses the agent). Cells are
+    sanitized (URL validation, em-dash scrub) like the agent path."""
+    from services.bob.agent import _sanitize_cells
+
+    if db.execute(text("SELECT 1 FROM bob_tables WHERE id=:t"), {"t": table_id}).scalar() is None:
+        raise HTTPException(status_code=404, detail="Table not found")
+    pos = db.execute(text("SELECT coalesce(max(position),0) FROM bob_rows WHERE table_id=:t"),
+                     {"t": table_id}).scalar()
+    added = []
+    for i, r in enumerate(req.rows):
+        if not isinstance(r, dict):
+            continue
+        clean, _ = _sanitize_cells(r)
+        row = db.execute(
+            text("INSERT INTO bob_rows (table_id, position, cells) "
+                 "VALUES (:t, :p, CAST(:c AS jsonb)) RETURNING id"),
+            {"t": table_id, "p": pos + i + 1, "c": json.dumps(clean, ensure_ascii=False)},
+        ).fetchone()
+        added.append(row[0])
+    db.execute(text("UPDATE bob_tables SET updated_at=now() WHERE id=:t"), {"t": table_id})
+    db.commit()
+    return {"ok": True, "added": added, "count": len(added)}
+
+
 class GuardrailsRequest(BaseModel):
     reject_companies: list[str] = []
     target_functions: list[str] = []
