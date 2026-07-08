@@ -397,7 +397,9 @@ async def export_table(table_id: int, db: Session = Depends(get_db)):
 
     wb = Workbook()
     ws = wb.active
-    ws.title = (tbl[0] or "Results")[:31]
+    # Excel forbids \ / ? * [ ] : in sheet titles — "AI/ML" table names 500'd here.
+    import re as _re
+    ws.title = (_re.sub(r"[\\/\?\*\[\]:]", "-", tbl[0] or "Results").strip() or "Results")[:31]
     columns = tbl[1] or []
     headers = [c.get("label") or c.get("key") for c in columns] + ["Status"]
     ws.append(headers)
