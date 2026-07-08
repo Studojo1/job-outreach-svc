@@ -888,13 +888,16 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
                     f"{cname}: you scored this {fit_rejects[key]} earlier this run; raising it to {score} "
                     "without new evidence is score inflation, drop the company")
                 continue
-            # Mandate function gate: role text must match a mandate keyword.
+            # Mandate function gate: role text must match a mandate keyword on a
+            # word boundary ("ai" must not match inside "email"/"maintenance").
             if mandate_kw:
                 role_text = " ".join(
                     str(clean.get(k) or "") for k in
                     ("hiring_evidence", "role", "role_title", "title", "position", "what_they_do")
                 ).lower()
-                if role_text.strip() and not any(kw in role_text for kw in mandate_kw):
+                if role_text.strip() and not any(
+                    re.search(rf"\b{re.escape(kw)}\b", role_text) for kw in mandate_kw
+                ):
                     unfit_notes.append(
                         f"{cname}: role text matches none of the mandate functions {mandate_kw}; "
                         "off-function rows never ship")
