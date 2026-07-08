@@ -164,16 +164,37 @@ async def outreach_overview(
     total_replied = email_map.get("replied", 0)
     total_bounced = email_map.get("bounced", 0)
 
-    # Opened is orthogonal to status: a sent/replied email may also be opened.
-    # Count rows with at least one pixel load. Approximate (mail-client image
-    # prefetch inflates); shown as "Open rate (approx)" in the dashboard.
+    # Open rate is measured ONLY over emails that actually carry a tracking
+    # pixel (tracking_token set). Emails sent before open-tracking existed have
+    # no pixel and can never register an open, so including them in the
+    # denominator drags the rate to a misleading near-zero. The honest rate is
+    # opened / trackable-sent. Approximate (mail-client image prefetch inflates).
+    total_trackable = (
+        db.query(func.count())
+        .select_from(EmailSent)
+        .filter(
+            EmailSent.tracking_token.isnot(None),
+            EmailSent.status.in_(["sent", "replied"]),
+        )
+        .scalar()
+    ) or 0
     total_opened = (
         db.query(func.count())
         .select_from(EmailSent)
         .filter(EmailSent.open_count > 0)
         .scalar()
     ) or 0
-    open_rate_pct = round((total_opened / total_sent * 100), 1) if total_sent > 0 else 0.0
+    open_rate_pct = round((total_opened / total_trackable * 100), 1) if total_trackable > 0 else 0.0
+
+    # Opened AND replied — the strongest engagement signal (they saw it and
+    # wrote back). Only tracked emails can be "opened", so this is naturally
+    # limited to tracked emails.
+    total_opened_and_replied = (
+        db.query(func.count())
+        .select_from(EmailSent)
+        .filter(EmailSent.open_count > 0, EmailSent.status == "replied")
+        .scalar()
+    ) or 0
 
     # Correct reply rate: unique leads replied / unique leads contacted (initial only,
     # paid non-internal campaigns, excl bounced from denominator)
@@ -394,6 +415,8 @@ async def outreach_overview(
         "total_emails_replied": total_replied,
         "total_emails_bounced": total_bounced,
         "total_emails_opened": total_opened,
+        "total_emails_trackable": total_trackable,
+        "total_emails_opened_and_replied": total_opened_and_replied,
         "reply_rate_pct": reply_rate_pct,
         "open_rate_pct": open_rate_pct,
         "leads_contacted": leads_contacted_total,
@@ -881,6 +904,61 @@ async def signups_by_date(
             for row in daily_rows
         ],
     }
+
+
+@router.get("/opened-emails")
+async def admin_opened_emails(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """List emails that have been opened, newest open first, with the STUDENT
+    (sender) who sent each one and the lead it went to.
+
+    Sender chain: emails_sent -> campaigns.candidate_id -> candidates.user_id
+    -> user. Only emails carrying a tracking pixel can be opened, so this is
+    implicitly limited to tracked emails.
+    """
+    total = (
+        db.query(func.count())
+        .select_from(EmailSent)
+        .filter(EmailSent.open_count > 0)
+        .scalar()
+    ) or 0
+
+    rows = (
+        db.query(EmailSent, Lead, User)
+        .outerjoin(Lead, Lead.id == EmailSent.lead_id)
+        .outerjoin(Campaign, Campaign.id == EmailSent.campaign_id)
+        .outerjoin(Candidate, Candidate.id == Campaign.candidate_id)
+        .outerjoin(User, User.id == Candidate.user_id)
+        .filter(EmailSent.open_count > 0)
+        .order_by(EmailSent.first_opened_at.desc().nullslast())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+
+    emails = []
+    for email, lead, user in rows:
+        emails.append({
+            "id": email.id,
+            "campaign_id": email.campaign_id,
+            "student_name": user.name if user else "Unknown",
+            "student_email": user.email if user else "",
+            "student_id": user.id if user else None,
+            "lead_name": lead.name if lead else "Unknown",
+            "lead_company": lead.company if lead else "",
+            "to_email": email.to_email,
+            "subject": email.subject,
+            "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+            "first_opened_at": email.first_opened_at.isoformat() if email.first_opened_at else None,
+            "open_count": email.open_count or 0,
+            "status": email.status,
+        })
+
+    return {"total": total, "emails": emails}
 
 
 @router.get("/campaign/{campaign_id}/emails")
