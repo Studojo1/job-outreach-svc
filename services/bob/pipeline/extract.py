@@ -121,7 +121,12 @@ def parse_batch_output(raw_out, items_by_id: dict) -> list[tuple[int, list[dict]
 
 
 def run(db, run_id: int, chat_id: int, params: dict) -> dict:
-    items = state.pending_raw(db, chat_id)
+    # Bound work to the ask: harvest casts a wide net, but extracting all of it
+    # for a "find 5" request is slow and wasteful. Take a slice ~6x the target
+    # per ring; the rest stays 'harvested' backlog that loop-until-N (or a later
+    # run) pulls only if the target is not met (chat-scoped, so it resumes).
+    cap = max(30, int(params.get("count") or 10) * 6)
+    items = state.pending_raw(db, chat_id, limit=cap)
     if not items:
         return {"items": 0, "opportunities": 0}
     system = build_system(params.get("keywords") or [])

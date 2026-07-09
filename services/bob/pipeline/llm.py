@@ -13,6 +13,13 @@ import re
 logger = logging.getLogger(__name__)
 
 
+# A hung LLM call must never wedge a stage: stages run their batches in thread
+# pools whose ThreadPoolExecutor join blocks until every worker returns, so a
+# request with no timeout stalls the whole pipeline at 'running' (smoke test:
+# extract wedged run 38 for 15+ min). Bound every call.
+_REQUEST_TIMEOUT_S = 75
+
+
 def _client():
     from openai import AzureOpenAI
     from core.config import settings
@@ -20,6 +27,8 @@ def _client():
         api_key=settings.AZURE_OPENAI_KEY,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
         api_version=settings.AZURE_OPENAI_API_VERSION,
+        timeout=_REQUEST_TIMEOUT_S,
+        max_retries=1,
     ), settings.AZURE_OPENAI_LLM_DEPLOYMENT
 
 
@@ -46,6 +55,7 @@ def chat_json(system: str, user: str, max_tokens: int = 6000):
     for attempt in (1, 2):
         resp = client.chat.completions.create(
             model=deployment, messages=messages, max_completion_tokens=max_tokens,
+            timeout=_REQUEST_TIMEOUT_S,
         )
         out = resp.choices[0].message.content or ""
         try:
