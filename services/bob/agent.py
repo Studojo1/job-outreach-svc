@@ -83,6 +83,7 @@ Today's date: {today}.
 - Job sweep, LinkedIn: search_linkedin_jobs TOOL is PRIMARY (free, live, higher quality than Context.dev for LinkedIn when it works: more jobs, all individual/live, better companies, no SEO spam). BUT it is an UNOFFICIAL endpoint that rate-limits and returns empty stubs unpredictably: if it errors, or returns 0 on keywords that clearly should have hits, it is CHOKING, not empty. When it chokes, FALL BACK to Context.dev `<role> intern <city> site:linkedin.com/jobs` at the user's freshness and drop dead ones from the markdown. Do not otherwise duplicate the guest tool with Context.dev (guest wins when healthy). The guest index is ~100% live but only ~55-77% on-function (LinkedIn fuzzy-matches HR/BD/PM interns), so filter hard. KEYWORD FAN-OUT IS MANDATORY: queries are free, so derive 8-15 SPECIFIC keyword variants from the mandate AND run these BROAD tech-intern keywords too: "software engineer intern", "software intern", "SDE intern", "summer intern", "tech intern", "engineering intern". Big companies title intern roles generically (Cisco's role is "Software Engineer- Summer Internship" with no ML/frontend token, so a function-only fan-out misses it — that is exactly how good Cisco/CAST-type roles were missed while a competing scraper caught them). The broad keywords surface generically-titled roles; read_linkedin_job's DESCRIPTION then confirms the function so off-fit ones are dropped. NEVER a single bare keyword alone ("intern", "engineer") without the fan-out around it. Then read_linkedin_job (FREE) on every job you ship: confirms function from the DESCRIPTION (mandatory for generic titles like "Intern") and often hands you the job poster as a T1 contact.
   When an aggregator or X post says "Company X is hiring interns" but links a search page/aggregator, DO NOT drop the company: run search_linkedin_jobs for "X intern" to find the real live posting, then ship that. Losing Cisco because its only signal was an aggregator post, when the real live job existed, is a miss.
 - UNSTOP: use the search_unstop TOOL (FREE, structured, individual live postings with stipend/deadline/eligibility). This is the primary cross-platform internship source and covers what the boards sweep does worse. Run several keyword variants; drop off-function roles (its search is fuzzy).
+- INTERNSHALA/UNSTOP SPAM: NGO "foundation" internships (fundraising gigs relabeled under every category) and pay-to-intern training mills flood these platforms and get auto-rejected by the system. A generic work-from-home listing with no stated stipend from an unknown org is almost never worth a row; prefer named product companies with stated stipends. The system also auto-rejects LinkedIn postings older than ~1 week (stale = forgotten listing), so never ship one.
 - Job sweep, OTHER boards (Context.dev reaches Naukri/Indeed/Internshala/Wellfound; the guest tool cannot): role titles + city + `site:naukri.com OR site:wellfound.com OR site:internshala.com OR site:indeed.com OR site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com`, freshness = the user's window (default last_week), then drop dead ones from the markdown. These OFTEN return LISTING/search pages ("ML internship jobs in Bengaluru") rather than individual postings and can drift off-city. When a result is a listing/search page not an individual job, scrape_page it (1 credit) to pull the individual roles, or rely on search_unstop instead. Verify city on every row.
 - LINKEDIN POST SWEEPS (highest-value source: full post text + author + often an inline EMAIL, all for 1 credit; measured fresh, most results under a week). `site:linkedin.com/posts` is MANDATORY, a city/India token IN THE QUERY is mandatory (country=IN does NOT localize posts), freshness=last_week. Run at least 2 of these 3 variants on every curation mandate:
   * `site:linkedin.com/posts "we're hiring" <role keywords> <city>` — company announcements; highest inline-email rate.
@@ -144,6 +145,8 @@ POST AUTHOR AFFILIATION (critical): a post's author is a T1 contact ONLY if they
 - Be direct and concrete. No filler. If evidence is thin, say so and suggest the next search rather than padding with weak rows.
 - NEVER use em dashes or en dashes anywhere: not in chat, not in table cells. Use commas, periods, or hyphens instead.
 - Every finish MUST include 2-4 `suggestions`: contextual next actions based on what THIS run found and what is still missing (e.g. contacts not yet found, list could expand, columns worth adding). Phrase each as a message the user could send.
+- SUMMARY HONESTY: every summary states the delta — how many rows added/updated to which table, which companies, what the gates rejected and why, and the source mix. If you added 0 rows after retrieving, say "0 rows added" and the exact reason. One-word summaries ("Done.") are rejected by the system. NEVER claim work you did not do: retrieval without add_rows is NOT done.
+- ASK_USER DISCIPLINE: at most ONE clarifying question per user message, and NEVER two turns in a row (the system blocks the second). NEVER ask to clarify a read-only/display request like "show me what you added" — answer it directly from the table snapshot with your best interpretation and say which interpretation you used. The question text must be self-contained and specific; options are tap-answers, never the substance of the question.
 - When ask_user is a choice between a few values, pass them as `options` so the user can tap instead of type.
 
 # KNOWN SCRAPED-PAGE GARBAGE (never copy these into cells)
@@ -562,6 +565,14 @@ _NON_COMPANY_SITE = re.compile(
 )
 # Placeholder "company" names that must never become rows.
 _PLACEHOLDER_COMPANY = re.compile(r"\b(startup|stealth|unknown|unnamed|various|n/?a)\b", re.IGNORECASE)
+# Known internship-spam orgs: NGO "fundraising internships" and pay-to-intern
+# mills that flood Internshala/Unstop under every category label (a run once
+# shipped these as "Machine Learning Intern"). Never rows, whatever the title.
+_SPAM_ORGS = re.compile(
+    r"nayepankh|basti\s*ki\s*pathshala|maxgen\s*techno|hamari\s*pahchan|muskurahat"
+    r"|kshitiksha|prabodhini\s*foundation|unschool|corizo|acmegrade|verzeo",
+    re.IGNORECASE,
+)
 
 
 def _post_author(url: str) -> str:
@@ -983,6 +994,9 @@ def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: d
             if not cname or _PLACEHOLDER_COMPANY.search(cname):
                 unfit_notes.append(f"{cname or '(no company)'}: not a real company name; find the actual company or drop the row")
                 continue
+            if _SPAM_ORGS.search(cname):
+                unfit_notes.append(f"{cname}: known internship-spam org (NGO fundraising / pay-to-intern mill); never a row")
+                continue
             key = _norm_company(cname)
             if key in rejected:
                 unfit_notes.append(f"{cname}: the USER REMOVED this company from this mandate; never re-add it")
@@ -1207,6 +1221,15 @@ def run_agent(run_id: int, chat_id: int) -> None:
                        + _tables_snapshot(db, chat_id),
         })
 
+        # If the previous run ended waiting for the user, this run is the user's
+        # ANSWER — asking another question is a clarification loop (observed:
+        # four consecutive question-runs doing zero work).
+        prev_status = db.execute(
+            text("SELECT status FROM bob_runs WHERE chat_id = :c AND id < :r ORDER BY id DESC LIMIT 1"),
+            {"c": chat_id, "r": run_id},
+        ).scalar()
+        state["_prev_waiting"] = prev_status == "waiting_user"
+
         _push_event(db, run_id, "start", "Bob is planning the research")
 
         for _ in range(MAX_TOOL_CALLS):
@@ -1219,9 +1242,23 @@ def run_agent(run_id: int, chat_id: int) -> None:
             msg = resp.choices[0].message
 
             if not msg.tool_calls:
-                # Model answered in plain text — treat as the final summary.
+                # Model answered in plain text — treat as the final summary,
+                # but a thin one gets bounced once (same gate as finish()).
+                text_ans = (msg.content or "").strip()
+                if len(text_ans) < 120 and not state.get("_summary_bounced"):
+                    state["_summary_bounced"] = True
+                    messages.append({"role": "assistant", "content": text_ans})
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"That reply says nothing. This run added {state['rows_added']} rows. If the user "
+                            "asked for results and you added 0, DO THE WORK (search, add_rows), then finish with "
+                            "a real summary: what changed, what was rejected and why, source mix."
+                        ),
+                    })
+                    continue
                 _set_counters(db, run_id, state)
-                _finish_run(db, run_id, chat_id, "done", answer=(msg.content or "Done."))
+                _finish_run(db, run_id, chat_id, "done", answer=(text_ans or "Done."))
                 return
 
             messages.append({
@@ -1242,11 +1279,37 @@ def run_agent(run_id: int, chat_id: int) -> None:
                     args = {}
 
                 if fname == "finish":
+                    summary = (args.get("summary") or "").strip()
+                    # "Done." after a run that wrote nothing is a lie, not a
+                    # summary (run 31: 5 credits of searches, 0 add_rows, "Done.").
+                    if len(summary) < 120 and not state.get("_summary_bounced"):
+                        state["_summary_bounced"] = True
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": (
+                                f"REJECTED: that summary is {len(summary)} chars and says nothing. This run added "
+                                f"{state['rows_added']} rows. If the user asked for results and you added 0 rows, "
+                                "DO THE WORK NOW (search, then add_rows), then finish with a real summary: what "
+                                "changed (companies, table), what was rejected by gates and why, source mix."
+                            ),
+                        })
+                        continue
                     _set_counters(db, run_id, state)
-                    _finish_run(db, run_id, chat_id, "done", answer=args.get("summary") or "Done.",
+                    _finish_run(db, run_id, chat_id, "done", answer=summary or "Done.",
                                 suggestions=args.get("suggestions"))
                     return
                 if fname == "ask_user":
+                    if state.get("_prev_waiting") and not state.get("_question_bounced"):
+                        state["_question_bounced"] = True
+                        messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": (
+                                "REJECTED: you asked a clarifying question last turn and the user just answered. "
+                                "Do NOT ask again. Proceed with the most reasonable interpretation of their answer, "
+                                "do the work, and state the interpretation you used in your summary."
+                            ),
+                        })
+                        continue
                     q = args.get("question") or "Could you clarify your request?"
                     _set_counters(db, run_id, state)
                     _finish_run(db, run_id, chat_id, "waiting_user", answer=q,

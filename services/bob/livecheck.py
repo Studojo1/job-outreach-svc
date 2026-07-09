@@ -101,6 +101,8 @@ def read_job(url: str) -> dict:
     }
     md = re.search(r'show-more-less-html__markup[^>]*>(.*?)</div>', body, re.S)
     out["description"] = _strip_tags(md.group(1))[:1500] if md else ""
+    if out["status"] == "open" and re.search(r"month|[2-9]\s*weeks", out["posted"], re.IGNORECASE):
+        out["status"], out["reason"] = "closed", f"stale posting ({out['posted']}); product standard is max ~1 week"
 
     # Job-poster module ("message the job poster") — present when the hirer
     # opted in; the poster is a T1 contact.
@@ -147,8 +149,17 @@ def linkedin_job_liveness(url: str) -> tuple[str, str]:
         return "unknown", err or "guest endpoint kept returning empty stubs"
     if re.search(r"no longer accepting applications|closed-job", body, re.IGNORECASE):
         return "closed", "no longer accepting applications"
+    # Age gate: a technically-open posting from a month+ ago is usually a
+    # forgotten listing, not active hiring (client feedback 2026-07-09: sheet
+    # shipped 2-month-old "open" jobs). Product standard is max ~1 week.
+    m_age = re.search(r"posted-time-ago__text[^>]*>\s*([^<]+)", body)
+    age = m_age.group(1).strip() if m_age else ""
+    if re.search(r"month|[2-9]\s*weeks", age, re.IGNORECASE):
+        return "closed", f"stale posting ({age}); product standard is max ~1 week"
     if "apply-button" in body:
-        return "open", "apply button live on guest page"
+        return "open", f"apply button live ({age or 'age n/a'})"
+    if "message-the-recruiter" in body:
+        return "open", f"job-poster module live, Easy Apply ({age or 'age n/a'})"
     return "closed", "no apply affordance on guest page (expired promoted posting)"
 
 
