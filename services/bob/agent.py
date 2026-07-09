@@ -161,6 +161,45 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "run_pipeline",
+            "description": "THE way to discover roles and fill a table. Runs the full staged pipeline (harvest across LinkedIn jobs+posts, X, Unstop, boards -> extraction with aggregator fan-out -> liveness/age/spam/dedupe gates -> fit scoring with floor -> contact waterfall -> rows written). The pipeline owns budgets, retries and stopping; you get back a funnel report to summarize honestly. Call it ONCE per discovery request after create_table; do NOT search or add rows manually for discovery.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_id": {"type": "integer", "description": "Target table (create_table first)."},
+                    "keywords": {"type": "array", "items": {"type": "string"},
+                                 "description": "3-8 mandate role keywords, e.g. ['ai intern','machine learning intern','data science intern']."},
+                    "location": {"type": "string", "description": "City/region, e.g. 'Bengaluru, India'."},
+                    "count": {"type": "integer", "description": "Target number of rows the user asked for."},
+                    "freshness_days": {"type": "integer", "description": "Posting-age window in days. Default 7. Only raise when the user explicitly asked for older."},
+                    "sources": {"type": "array", "items": {"type": "string", "enum": ["linkedin_jobs", "linkedin_posts", "x", "unstop", "boards"]},
+                                "description": "Restrict sources ONLY when the user did. Default: all."},
+                    "candidate": {"type": "string", "description": "Candidate label for the candidate column, e.g. 'Soham (AI/ML/DS)'."},
+                    "candidate_profile": {"type": "string", "description": "1-3 sentence candidate/cohort profile for fit scoring."},
+                    "label": {"type": "string", "description": "Short human label for the progress feed."},
+                },
+                "required": ["table_id", "keywords", "location", "count"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fill_contacts",
+            "description": "Run the contact waterfall (job-page poster -> insider author -> LeadsForge authority-ranked -> web) over EXISTING table rows that are missing contacts. Free except an optional web fallback. Use for 'fill the missing contacts' requests instead of manual find_contacts loops.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_id": {"type": "integer"},
+                    "label": {"type": "string", "description": "Short human label for the progress feed."},
+                },
+                "required": ["table_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": "Search the live web via Context.dev. 1 credit per 10 results; each result includes page markdown. Prefer several focused 10-result queries.",
             "parameters": {
@@ -614,6 +653,86 @@ def _digest_search_results(results: list[dict], cap: int = 12) -> str:
 
 def _execute_tool(db, run_id: int, chat_id: int, name: str, args: dict, state: dict) -> str:
     """Run one tool call; returns the string result fed back to the model."""
+    if name == "run_pipeline":
+        from services.bob.pipeline import orchestrator
+        params = {
+            "table_id": int(args.get("table_id") or 0),
+            "keywords": args.get("keywords") or [],
+            "location": args.get("location") or "India",
+            "count": int(args.get("count") or 10),
+            "freshness_days": int(args.get("freshness_days") or 7),
+            "candidate": args.get("candidate") or "",
+            "candidate_profile": args.get("candidate_profile") or "",
+            # the pipeline spends what remains of THIS run's credit budget
+            "credit_cap": max(0, MAX_CREDITS_PER_RUN - state["credits"] - 2),
+        }
+        if args.get("sources"):
+            params["sources"] = args["sources"]
+        _push_event(db, run_id, "search",
+                    args.get("label") or f"Pipeline: {params['count']} roles, {params['location']}")
+        out = orchestrator.run_pipeline(db, run_id, chat_id, params)
+        state["credits"] += out["credits_used"]
+        state["rows_added"] += out["written"]
+        state["searches"] += 1
+        return (out["report"]
+                + "\nThe rows are ALREADY in the table. Summarize this funnel honestly "
+                  "(delivered vs requested, what the gates rejected and why, contact sources); "
+                  "do NOT re-search or add rows manually.")
+
+    if name == "fill_contacts":
+        from services.bob.pipeline import contact as pcontact
+        tid = int(args.get("table_id") or 0)
+        rows = db.execute(
+            text("SELECT id, cells FROM bob_rows WHERE table_id = :t ORDER BY position, id"),
+            {"t": tid},
+        ).fetchall()
+        owners: dict = {}
+        for _rid, cells in rows:
+            cn, nm = (cells or {}).get("contact_name"), (cells or {}).get("company")
+            if cn and nm:
+                owners[_norm_person(cn)] = (_norm_company(nm), nm)
+        targets = [(rid, cells or {}) for rid, cells in rows if not (cells or {}).get("contact_name")]
+        _push_event(db, run_id, "search", args.get("label") or f"Filling {len(targets)} missing contacts")
+        fetchers = {"read_job": pcontact._fetch_read_job,
+                    "find_people": pcontact._fetch_find_people,
+                    "web_people": pcontact._fetch_web_people}
+        filled, blank = 0, []
+        for rid, cells in targets[:25]:
+            company = str(cells.get("company") or "").strip()
+            if not company:
+                continue
+            opp = {"company": company, "company_norm": _norm_company(company),
+                   "website": cells.get("website") or "", "evidence_url": cells.get("evidence_url") or "",
+                   "role": cells.get("role") or "", "apply_email": "", "apply_person": "",
+                   "author_name": "", "author_headline": "", "author_profile": "",
+                   "author_affiliation": "unknown"}
+            d = pcontact.waterfall(opp, owners, str(cells.get("city") or "").split(",")[0].strip(),
+                                   fetchers, credits_ok=state["credits"] < MAX_CREDITS_PER_RUN)
+            state["free_lookups"] += 1
+            if d.get("contact_name"):
+                owners[_norm_person(d["contact_name"])] = (opp["company_norm"], company)
+                patch = {"contact_name": d["contact_name"], "contact_title": d.get("contact_title", ""),
+                         "tier": d.get("contact_tier", ""),
+                         "contact_linkedin_url": d.get("contact_profile_url", "")}
+                if d.get("contact_email"):
+                    patch["contact_email"] = d["contact_email"]
+                db.execute(
+                    text("UPDATE bob_rows SET cells = cells || CAST(:c AS jsonb), updated_at = now() WHERE id = :r"),
+                    {"c": json.dumps(patch, ensure_ascii=False), "r": rid},
+                )
+                filled += 1
+                if d.get("contact_source") == "t4_web":
+                    state["credits"] += 1
+            else:
+                blank.append(company)
+        db.commit()
+        _push_event(db, run_id, "rows", f"Updated {filled} rows with contacts")
+        note = f"Filled {filled} of {len(targets)} missing contacts via the waterfall."
+        if blank:
+            note += (" No verifiable hiring-side contact found for: " + ", ".join(blank[:10])
+                     + ". Their cells stay EMPTY (empty beats wrong on a client sheet); say so in the summary.")
+        return note
+
     if name == "web_search":
         if state["credits"] >= MAX_CREDITS_PER_RUN:
             return "CREDIT BUDGET EXHAUSTED for this run. Work with the evidence you already have and finish."

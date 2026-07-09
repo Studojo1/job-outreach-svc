@@ -214,7 +214,7 @@ def _fetch_web_people(company: str, city: str) -> dict | None:
 
 
 def run(db, run_id: int, chat_id: int, params: dict, budget) -> dict:
-    opps = state.opportunities(db, run_id, status="scored")
+    opps = state.opportunities(db, chat_id=chat_id, status="scored")
     if not opps:
         return {"in": 0}
     city = (params.get("location") or "").split(",")[0].strip()

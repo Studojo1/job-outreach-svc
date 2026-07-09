@@ -100,7 +100,7 @@ def _encode(opps: list[dict]) -> str:
 
 
 def run(db, run_id: int, chat_id: int, params: dict) -> dict:
-    opps = state.opportunities(db, run_id, status="verified")
+    opps = state.opportunities(db, chat_id=chat_id, status="verified")
     if not opps:
         return {"in": 0}
     min_fit = int(params.get("min_fit") or DEFAULT_MIN_FIT)

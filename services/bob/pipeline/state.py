@@ -83,11 +83,13 @@ def insert_raw_items(db, chat_id: int, run_id: int, source: str, query: str,
     return inserted, len(items) - inserted
 
 
-def pending_raw(db, run_id: int, limit: int = 200) -> list[dict]:
+def pending_raw(db, chat_id: int, limit: int = 200) -> list[dict]:
+    """CHAT-scoped on purpose: a run that died mid-extract leaves items
+    'harvested'; the next run in the chat picks them up (resumability)."""
     rows = db.execute(
         text("SELECT id, source, query, url, title, description, markdown "
-             "FROM bob_raw_items WHERE run_id = :r AND status = 'harvested' ORDER BY id LIMIT :l"),
-        {"r": run_id, "l": limit},
+             "FROM bob_raw_items WHERE chat_id = :c AND status = 'harvested' ORDER BY id LIMIT :l"),
+        {"c": chat_id, "l": limit},
     ).fetchall()
     return [dict(zip(("id", "source", "query", "url", "title", "description", "markdown"), r)) for r in rows]
 
@@ -131,15 +133,25 @@ def insert_opportunity(db, chat_id: int, run_id: int, raw_item_id: int | None, o
     return row[0]
 
 
-def opportunities(db, run_id: int, status: str | None = None, limit: int = 500) -> list[dict]:
+def opportunities(db, *, chat_id: int | None = None, run_id: int | None = None,
+                  status: str | None = None, limit: int = 500) -> list[dict]:
+    """Chat-scoped queries drive the stages (pending work survives run
+    boundaries); run-scoped queries drive per-run reporting."""
+    assert chat_id or run_id, "need chat_id or run_id"
     q = ("SELECT id, chat_id, run_id, raw_item_id, company, company_norm, role, location, "
          "stipend, posted, website, evidence_url, source, evidence_quote, what_they_do, "
          "apply_email, apply_person, apply_url, author_name, author_headline, author_profile, "
          "author_affiliation, status, reject_stage, reject_reason, fit_score, fit_reason, "
          "contact_name, contact_title, contact_tier, contact_source, contact_profile_url, "
          "contact_email, needs_contact, row_id, extra "
-         "FROM bob_opportunities WHERE run_id = :r")
-    params: dict = {"r": run_id, "l": limit}
+         "FROM bob_opportunities WHERE 1=1")
+    params: dict = {"l": limit}
+    if chat_id:
+        q += " AND chat_id = :c"
+        params["c"] = chat_id
+    if run_id:
+        q += " AND run_id = :r"
+        params["r"] = run_id
     if status:
         q += " AND status = :s"
         params["s"] = status

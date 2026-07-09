@@ -113,7 +113,7 @@ def parse_batch_output(raw_out, items_by_id: dict) -> list[tuple[int, list[dict]
 
 
 def run(db, run_id: int, chat_id: int, params: dict) -> dict:
-    items = state.pending_raw(db, run_id)
+    items = state.pending_raw(db, chat_id)
     if not items:
         return {"items": 0, "opportunities": 0}
     system = _SYSTEM.format(keywords=", ".join(params.get("keywords") or []) or "internships")

@@ -59,7 +59,7 @@ def verdict(opp: dict, freshness_days: int, rejected: dict, table_norms: dict,
 
 
 def run(db, run_id: int, chat_id: int, params: dict) -> dict:
-    opps = state.opportunities(db, run_id, status="extracted")
+    opps = state.opportunities(db, chat_id=chat_id, status="extracted")
     if not opps:
         return {"in": 0}
     freshness_days = int(params.get("freshness_days") or 7)

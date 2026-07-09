@@ -100,7 +100,55 @@ def format_report(funnel: dict, params: dict, stopped_because: str) -> str:
     return "\n".join(lines)
 
 
-def run_pipeline(db, run_id: int, chat_id: int, params: dict) -> dict:
-    """End-to-end staged run. Wired incrementally; callable once the assembly
-    stage lands (until then it raises so nothing half-runs in production)."""
-    raise PipelineError("pipeline stages are not fully wired yet (assembly phase pending)")
+def _default_stages() -> dict:
+    from services.bob.pipeline import assemble, contact, extract, harvest, score, verify
+    return {"harvest": harvest.run, "extract": extract.run, "verify": verify.run,
+            "score": score.run, "contact": contact.run, "assemble": assemble.run}
+
+
+def run_pipeline(db, run_id: int, chat_id: int, params: dict, stages: dict | None = None) -> dict:
+    """End-to-end staged run. The orchestrator, never the model, decides when
+    to widen (ring 2 adds phrasings + boards) and when to stop:
+      target met | rings exhausted | budget exhausted.
+    Chat-scoped stage queries make this resumable: pending work left by an
+    interrupted run is picked up before any new harvest spends a credit."""
+    if not params.get("table_id"):
+        raise PipelineError("run_pipeline needs table_id (create the table first)")
+    if not params.get("keywords"):
+        raise PipelineError("run_pipeline needs mandate keywords")
+    count = max(1, int(params.get("count") or 10))
+    stages = stages or _default_stages()
+    budget = Budget(credit_cap=int(params.get("credit_cap") or DEFAULT_CREDIT_CAP))
+    state.save_params(db, run_id, {"pipeline": {k: v for k, v in params.items()}})
+
+    written_total = 0
+    stopped = ""
+    for ring in range(MAX_RINGS + 1):
+        reason = budget.exhausted()
+        if reason:
+            stopped = reason
+            break
+        run_stage(db, run_id, f"harvest(ring {ring})", stages["harvest"],
+                  db, run_id, chat_id, params, budget, ring)
+        run_stage(db, run_id, "extract", stages["extract"], db, run_id, chat_id, params)
+        run_stage(db, run_id, "verify", stages["verify"], db, run_id, chat_id, params)
+        run_stage(db, run_id, "score", stages["score"], db, run_id, chat_id, params)
+        run_stage(db, run_id, "contact", stages["contact"], db, run_id, chat_id, params, budget)
+        out = run_stage(db, run_id, "assemble", stages["assemble"],
+                        db, run_id, chat_id, params, count - written_total)
+        written_total += int(out.get("written") or 0)
+        if written_total >= count:
+            stopped = f"target met ({written_total}/{count})"
+            break
+    if not stopped:
+        stopped = (budget.exhausted() or
+                   f"sources exhausted after {MAX_RINGS + 1} harvest rings "
+                   f"({written_total}/{count} delivered)")
+
+    funnel = state.funnel_snapshot(db, run_id)
+    state.save_params(db, run_id, {"funnel": funnel, "stopped_because": stopped,
+                                   "credits_used": budget.credits_used})
+    report = format_report(funnel, params, stopped)
+    state.push_event(db, run_id, "stage", f"pipeline finished: {written_total} rows", stopped)
+    return {"written": written_total, "report": report, "funnel": funnel,
+            "credits_used": budget.credits_used, "stopped_because": stopped}
