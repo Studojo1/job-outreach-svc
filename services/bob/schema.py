@@ -1,7 +1,7 @@
 """Bob (Mesa) schema bootstrap.
 
 CI deploys never run migrations, so Bob provisions its own tables with
-idempotent DDL on first router import. The DDL mirrors migrations/040_bob_mesa.sql
+idempotent DDL on first router import. The DDL mirrors the bob migration files
 exactly — keep both in sync.
 """
 
@@ -12,7 +12,8 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-_MIGRATION_FILE = Path(__file__).resolve().parents[2] / "migrations" / "040_bob_mesa.sql"
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+_BOB_MIGRATIONS = ("040_bob_mesa.sql", "041_bob_pipeline.sql")
 _ensured = False
 
 
@@ -23,7 +24,7 @@ def ensure_schema() -> None:
         return
     from database.session import SessionLocal
 
-    raw = _MIGRATION_FILE.read_text()
+    raw = "\n".join((_MIGRATIONS_DIR / f).read_text() for f in _BOB_MIGRATIONS)
     # Strip full-line SQL comments so fragments never begin with "--"
     ddl = "\n".join(l for l in raw.splitlines() if not l.strip().startswith("--"))
     db = SessionLocal()
