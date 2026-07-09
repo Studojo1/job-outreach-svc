@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from database.mesa_models import MesaJob, MesaSearch
+from services.mesa import source_health
+from services.mesa.postparse import posted_age_days
 from services.mesa.sources import SOURCE_SCRAPERS
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,23 @@ def _relevant(job: dict, term: str) -> bool:
     return False
 
 
+# search date window -> max posting age (days) at ingest. Slack over the nominal
+# window because sources bucket coarsely ("1 week ago" can mean 6-9 days).
+_MAX_AGE = {"24h": 1.5, "week": 8.0, "month": 32.0, "any": None}
+
+_LEGAL_RE = re.compile(r"\b(pvt|private|ltd|limited|inc|llc|llp|technologies|technology|labs|solutions|india)\b")
+
+
+def _fingerprint(company: str, title: str) -> str:
+    """Company+role-family key for cross-source corroboration. The same opening
+    scraped from two sources (LinkedIn + Naukri, post + board) is one job — and
+    independent confirmation is the strongest realness signal we have."""
+    c = _LEGAL_RE.sub("", (company or "").lower())
+    c = re.sub(r"[^a-z0-9]", "", c)[:12]
+    t = re.sub(r"[^a-z0-9]", "", (title or "").lower())[:16]
+    return f"{c}|{t}" if c and t else ""
+
+
 def _terms(keywords: str) -> list[str]:
     parts = [p.strip() for p in re.split(r"[,/;|]| or | OR ", keywords or "") if p.strip()]
     seen: set = set()
@@ -55,11 +74,15 @@ def _terms(keywords: str) -> list[str]:
 
 def run_search(db: Session, search: MesaSearch) -> dict:
     """Scrape every enabled source for one search across each keyword term;
-    persist jobs not already stored."""
+    freshness-gate at ingest, corroborate duplicates across sources instead of
+    duplicating rows, record per-source yield telemetry, persist new jobs."""
     sources = list(search.sources or ["linkedin"])
     terms = _terms(search.keywords)
+    max_age = _MAX_AGE.get(search.date_posted or "24h", 8.0)
     scraped: list[dict] = []
     per_source: Counter = Counter()
+    src_raw: Counter = Counter()
+    src_errors: dict = {}
     for src in sources:
         fn = SOURCE_SCRAPERS.get(src)
         if not fn:
@@ -73,7 +96,9 @@ def run_search(db: Session, search: MesaSearch) -> dict:
                 )
             except Exception as e:  # noqa: BLE001 — one bad source/term must not sink the rest
                 logger.error("[MESA] %s/%r failed for search %s: %s", src, term, search.id, e)
+                src_errors[src] = str(e)[:300]
                 jobs = []
+            src_raw[src] += len(jobs)
             for j in jobs:
                 eid = j.get("external_id")
                 if not eid or eid in src_seen:
@@ -81,6 +106,12 @@ def run_search(db: Session, search: MesaSearch) -> dict:
                 src_seen.add(eid)
                 if src not in _TRUSTED_SEARCH and not _relevant(j, term):
                     continue  # feed board returned an off-keyword job — drop the noise
+                # freshness gate: feed boards ignore date filters, so stale rows
+                # (weeks/months old) land here looking fresh. Drop only when the
+                # age is KNOWN to exceed the window — unknown ages pass through.
+                age = posted_age_days(j.get("posted_date"))
+                if max_age is not None and age is not None and age > max_age:
+                    continue
                 j["source"] = src
                 scraped.append(j)
                 per_source[src] += 1
@@ -89,24 +120,63 @@ def run_search(db: Session, search: MesaSearch) -> dict:
         (r[0], r[1]) for r in
         db.query(MesaJob.source, MesaJob.linkedin_job_id).filter(MesaJob.search_id == search.id).all()
     }
+    # fingerprint -> stored row, for cross-source corroboration
+    fp_rows: dict = {}
+    for row in db.query(MesaJob).filter(MesaJob.search_id == search.id).all():
+        fp = _fingerprint(row.company or "", row.title or "")
+        if fp and fp not in fp_rows:
+            fp_rows[fp] = row
     new = 0
+    corroborated = 0
+    src_new: Counter = Counter()
     for j in scraped:
         eid = j.get("external_id")
         key = (j["source"], eid)
         if not eid or key in existing:
             continue
-        db.add(MesaJob(
+        fp = _fingerprint(j.get("company", ""), j.get("title", ""))
+        prior = fp_rows.get(fp) if fp else None
+        if prior is not None and prior.source != j["source"]:
+            # same company+role from a DIFFERENT source: don't duplicate the row —
+            # mark the confirmation and upgrade missing links on the stored copy
+            confirmed = [x for x in (prior.corroborating_sources or "").split(",") if x]
+            if j["source"] not in confirmed:
+                confirmed.append(j["source"])
+                prior.corroborating_sources = ",".join(confirmed)
+                corroborated += 1
+            if not prior.apply_link and j.get("apply_link"):
+                prior.apply_link = j["apply_link"]
+            if not prior.url and j.get("url"):
+                prior.url = j["url"]
+            existing.add(key)
+            continue
+        row = MesaJob(
             search_id=search.id, source=j["source"], linkedin_job_id=eid,
             title=j.get("title"), company=j.get("company"), location=j.get("location"),
             posted_date=j.get("posted_date"), url=j.get("url"),
             author=j.get("author"), apply_link=j.get("apply_link"), post_text=j.get("post_text"),
-        ))
+        )
+        db.add(row)
         existing.add(key)
+        if fp and fp not in fp_rows:
+            fp_rows[fp] = row
         new += 1
+        src_new[j["source"]] += 1
+    for src in sources:
+        if src in SOURCE_SCRAPERS:
+            source_health.record_run(db, search.id, src, scraped=src_raw[src],
+                                     kept=per_source[src], new_rows=src_new[src],
+                                     error=src_errors.get(src))
     search.last_run_at = datetime.utcnow()
     db.commit()
-    logger.info("[MESA] search %s: %d scraped %s, %d new", search.id, len(scraped), per_source, new)
-    return {"scraped": len(scraped), "new": new, "by_source": per_source}
+    health = source_health.health_flags(db, search.id, sources)
+    for flag in health:
+        logger.warning("[MESA] source health: search %s %s -> %s (%s)",
+                       search.id, flag["source"], flag["issue"], flag["detail"])
+    logger.info("[MESA] search %s: %d scraped %s, %d new, %d corroborated",
+                search.id, len(scraped), per_source, new, corroborated)
+    return {"scraped": len(scraped), "new": new, "corroborated": corroborated,
+            "by_source": per_source, "health": health}
 
 
 def run_due_searches(db: Session, min_hours: float = 20.0) -> dict:

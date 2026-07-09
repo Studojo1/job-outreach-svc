@@ -129,3 +129,39 @@ def resolve_short(url: str, timeout: float = 10.0) -> str:
         logger.debug("[MESA_POSTPARSE] resolve_short failed for %s: %s", url, e)
     _cache[url] = final
     return final
+
+
+# ── 4. posted-date normalization ──────────────────────────────────────────────
+# Every source states freshness differently: ISO dates (LinkedIn jobs), relative
+# post ages ("3d", "2 weeks ago", "30+ days ago"), or nothing. Feed boards also
+# ignore date filters entirely, so the runner gates on this at ingest.
+_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+_REL_RE = re.compile(r"(\d+)\s*\+?\s*(minute|min|hour|hr|day|week|w\b|month|mo\b|d\b|h\b|m\b)", re.I)
+
+
+def posted_age_days(posted, now=None) -> float | None:
+    """Days since posting from any source's `posted_date` string; None if unknowable."""
+    from datetime import datetime, timezone
+    if not posted:
+        return None
+    s = str(posted).strip().lower()
+    now = now or datetime.now(timezone.utc)
+    m = _ISO_RE.match(s)
+    if m:
+        try:
+            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+            return max(0.0, (now - dt).total_seconds() / 86400)
+        except ValueError:
+            return None
+    if any(k in s for k in ("just now", "today", "few hours")):
+        return 0.0
+    if "yesterday" in s:
+        return 1.0
+    m = _REL_RE.search(s)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2)[0]  # minute/min/m, hour/hr/h, day/d, week/w, month/mo
+    if m.group(2).startswith("mo"):
+        return float(n * 30)
+    return {"m": 0.0, "h": n / 24.0, "d": float(n), "w": float(n * 7)}.get(unit, None)
