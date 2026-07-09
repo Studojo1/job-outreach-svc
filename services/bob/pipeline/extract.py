@@ -37,7 +37,7 @@ For EACH input item return every distinct opportunity it evidences, as JSON:
 Rules:
 - One opportunity per company+role. An aggregator or referral post listing N companies yields N opportunities. FAN OUT ALL OF THEM, never just the first.
 - Only roles the text shows are being hired NOW. Skip celebration posts, news, courses, career advice, "I got hired" posts (why_skipped explains).
-- Prioritize internships / early-career roles relevant to: {keywords}. Include other clearly-hiring early-career tech roles; skip senior/staff roles.
+- Prioritize internships / early-career roles relevant to: %%KEYWORDS%%. Include other clearly-hiring early-career tech roles; skip senior/staff roles.
 - Copy stipend, location, posted age EXACTLY as stated ("" when not stated). NEVER invent or guess values.
 - apply_email: the email the text says to apply/write to. apply_person: the person the text names as the application contact (even first-name-only, e.g. "email Priya").
 - author_*: whoever authored/posted the item, when identifiable from the text.
@@ -45,6 +45,14 @@ Rules:
 - location: use "Remote" for remote-India roles. what_they_do: <=15 words from the text, "" if unclear.
 - evidence_quote: <=25 words verbatim from the text proving the hiring claim.
 Return ONLY the JSON array."""
+
+
+def build_system(keywords: list[str]) -> str:
+    """Interpolate the mandate keywords WITHOUT str.format: the template holds
+    literal JSON braces, which str.format would read as replacement fields
+    (KeyError '"item_id"')."""
+    kw = ", ".join(k for k in (keywords or []) if str(k).strip()) or "internships"
+    return _SYSTEM.replace("%%KEYWORDS%%", kw)
 
 
 def author_profile_from_url(url: str) -> str:
@@ -116,7 +124,7 @@ def run(db, run_id: int, chat_id: int, params: dict) -> dict:
     items = state.pending_raw(db, chat_id)
     if not items:
         return {"items": 0, "opportunities": 0}
-    system = _SYSTEM.format(keywords=", ".join(params.get("keywords") or []) or "internships")
+    system = build_system(params.get("keywords") or [])
     batches = [items[i:i + _BATCH] for i in range(0, len(items), _BATCH)]
 
     n_opps = n_skipped = n_fanout = n_emails = n_insiders = n_errors = 0

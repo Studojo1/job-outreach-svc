@@ -121,21 +121,31 @@ def run_pipeline(db, run_id: int, chat_id: int, params: dict, stages: dict | Non
     budget = Budget(credit_cap=int(params.get("credit_cap") or DEFAULT_CREDIT_CAP))
     state.save_params(db, run_id, {"pipeline": {k: v for k, v in params.items()}})
 
+    def _stage(name, fn, *a):
+        """A stage failure is logged and swallowed: downstream stages still
+        process whatever reached the DB, and failed work keeps its prior
+        status so the next run resumes it. One flaky stage never zeros a run."""
+        try:
+            return run_stage(db, run_id, name, fn, *a)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            stage_errors.append(f"{name}: {e.__class__.__name__}")
+            return {}
+
     written_total = 0
     stopped = ""
+    stage_errors: list[str] = []
     for ring in range(MAX_RINGS + 1):
         reason = budget.exhausted()
         if reason:
             stopped = reason
             break
-        run_stage(db, run_id, f"harvest(ring {ring})", stages["harvest"],
-                  db, run_id, chat_id, params, budget, ring)
-        run_stage(db, run_id, "extract", stages["extract"], db, run_id, chat_id, params)
-        run_stage(db, run_id, "verify", stages["verify"], db, run_id, chat_id, params)
-        run_stage(db, run_id, "score", stages["score"], db, run_id, chat_id, params)
-        run_stage(db, run_id, "contact", stages["contact"], db, run_id, chat_id, params, budget)
-        out = run_stage(db, run_id, "assemble", stages["assemble"],
-                        db, run_id, chat_id, params, count - written_total)
+        _stage(f"harvest(ring {ring})", stages["harvest"], db, run_id, chat_id, params, budget, ring)
+        _stage("extract", stages["extract"], db, run_id, chat_id, params)
+        _stage("verify", stages["verify"], db, run_id, chat_id, params)
+        _stage("score", stages["score"], db, run_id, chat_id, params)
+        _stage("contact", stages["contact"], db, run_id, chat_id, params, budget)
+        out = _stage("assemble", stages["assemble"], db, run_id, chat_id, params, count - written_total)
         written_total += int(out.get("written") or 0)
         if written_total >= count:
             stopped = f"target met ({written_total}/{count})"
@@ -144,6 +154,8 @@ def run_pipeline(db, run_id: int, chat_id: int, params: dict, stages: dict | Non
         stopped = (budget.exhausted() or
                    f"sources exhausted after {MAX_RINGS + 1} harvest rings "
                    f"({written_total}/{count} delivered)")
+    if stage_errors:
+        stopped += " | stage errors: " + "; ".join(dict.fromkeys(stage_errors))
 
     funnel = state.funnel_snapshot(db, run_id)
     state.save_params(db, run_id, {"funnel": funnel, "stopped_because": stopped,

@@ -85,6 +85,20 @@ def test_missing_table_or_keywords_refused():
         run_pipeline(FakeDB(), 1, 1, {"table_id": 9, "count": 5})
 
 
+def test_stage_failure_does_not_abort_the_run():
+    # A raising stage is logged and swallowed; downstream stages still run and
+    # the run reports the error instead of zeroing out (the extract .format bug
+    # took a whole run to waiting_user in the first smoke test).
+    stages, calls = _stages([5])
+
+    def boom(db, run_id, chat_id, params):
+        raise KeyError('"item_id"')
+    stages["extract"] = boom
+    out = run_pipeline(FakeDB(), 1, 1, dict(PARAMS), stages=stages)
+    assert out["written"] == 5
+    assert "stage errors" in out["stopped_because"] and "KeyError" in out["stopped_because"]
+
+
 def test_budget_arithmetic():
     b = Budget(credit_cap=10)
     b.spend(4)

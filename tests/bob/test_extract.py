@@ -1,7 +1,19 @@
 """Extraction plumbing (pure parts). The golden case is the SDE-Jobs
 aggregator: 8 companies in one post must yield 8 opportunities."""
 
-from services.bob.pipeline.extract import author_profile_from_url, parse_batch_output
+from services.bob.pipeline.extract import author_profile_from_url, build_system, parse_batch_output
+
+
+def test_build_system_does_not_choke_on_json_braces():
+    # The template holds literal JSON ({"item_id": ...}); str.format would raise
+    # KeyError '"item_id"'. build_system must interpolate safely.
+    s = build_system(["ai intern", "ml intern"])
+    assert "ai intern, ml intern" in s
+    assert '"item_id"' in s and "%%KEYWORDS%%" not in s
+
+
+def test_build_system_defaults_when_empty():
+    assert "internships" in build_system([])
 
 ITEM = {"id": 7, "url": "https://www.linkedin.com/posts/sde-jobs_referral-activity-123-x",
         "source": "ctx_li_posts", "title": "t", "description": "d", "markdown": "m"}
