@@ -536,90 +536,27 @@ def _tables_snapshot(db, chat_id: int) -> str:
     return "\n\n".join(parts)
 
 
-# ── URL validation rail ────────────────────────────────────────────────────────
-# The model transcribes URLs from scraped pages, and scraped pages lie:
-# LinkedIn's logged-out HTML anonymizes company links as /company/unavailable,
-# wraps links in signup redirects, and postings expire. Prompt rules reduce
-# these errors; this rail guarantees invalid URLs never enter a table cell.
+# ── Deterministic rails (shared with the staged pipeline) ────────────────────
+# Definitions moved verbatim to services/bob/textrails.py so the pipeline and
+# tests use the same single source of truth; original private names preserved.
 
-_GARBAGE_URL = re.compile(
-    r"linkedin\.com/(company|school)/unavailable"   # logged-out anonymized placeholder
-    r"|linkedin\.com/signup"                          # signup/cold-join redirect wrappers
-    r"|/cold-join"
-    r"|linkedin\.com/authwall"
-    r"|lnkd\.in/"                                     # shortener — target unknown
-    r"|(?:/|\.)t\.me/|telegram\.me/"                  # messenger apply links = scam-grade
-    r"|wa\.me/|chat\.whatsapp\.com/|api\.whatsapp\.com/"
-    r"|indeed\.[a-z.]+/(?:q-|jobs\?|m/jobs)"          # indeed SEARCH pages, not postings
-    r"|jobs\.ashbyhq\.com/?(?:[?#][^\s]*)?$"          # bare board roots carry no company
-    r"|boards\.greenhouse\.io/?(?:[?#][^\s]*)?$"
-    r"|jobs\.lever\.co/?(?:[?#][^\s]*)?$",
-    re.IGNORECASE,
+from services.bob.textrails import (  # noqa: E402
+    GARBAGE_URL as _GARBAGE_URL,
+    NON_COMPANY_SITE as _NON_COMPANY_SITE,
+    PLACEHOLDER_COMPANY as _PLACEHOLDER_COMPANY,
+    SPAM_ORGS as _SPAM_ORGS,
+    URL_RE as _URL_RE,
+    SINGLE_URL_KEYS as _SINGLE_URL_KEYS,
+    CONTACT_KEYS as _CONTACT_KEYS,
+    post_author as _post_author,
+    coerce_score as _coerce_score,
+    norm_company as _norm_company,
+    norm_person as _norm_person,
+    contact_collision as _contact_collision,
+    valid_url as _valid_url,
+    strip_em_dashes as _strip_em_dashes,
+    sanitize_cells as _sanitize_cells,
 )
-# Domains that are never a company's own website (job boards, socials, messengers).
-_NON_COMPANY_SITE = re.compile(
-    r"linkedin\.com|(?:^|//|\.)x\.com|twitter\.com|indeed\.|naukri\.com|ashbyhq\.com"
-    r"|greenhouse\.io|lever\.co|wellfound\.com|glassdoor|instagram\.com|facebook\.com"
-    r"|youtube\.com|(?:/|\.)t\.me/",
-    re.IGNORECASE,
-)
-# Placeholder "company" names that must never become rows.
-_PLACEHOLDER_COMPANY = re.compile(r"\b(startup|stealth|unknown|unnamed|various|n/?a)\b", re.IGNORECASE)
-# Known internship-spam orgs: NGO "fundraising internships" and pay-to-intern
-# mills that flood Internshala/Unstop under every category label (a run once
-# shipped these as "Machine Learning Intern"). Never rows, whatever the title.
-_SPAM_ORGS = re.compile(
-    r"nayepankh|basti\s*ki\s*pathshala|maxgen\s*techno|hamari\s*pahchan|muskurahat"
-    r"|kshitiksha|prabodhini\s*foundation|unschool|corizo|acmegrade|verzeo",
-    re.IGNORECASE,
-)
-
-
-def _post_author(url: str) -> str:
-    """Author handle/slug from a social evidence URL ('' when not a post)."""
-    m = re.search(r"(?:x|twitter)\.com/([^/]+)/status/", url, re.IGNORECASE)
-    if m:
-        return "x:" + m.group(1).lower()
-    m = re.search(r"linkedin\.com/posts/([^_/?#]+)", url, re.IGNORECASE)
-    if m:
-        return "li:" + m.group(1).lower()
-    return ""
-
-
-def _coerce_score(v) -> int | None:
-    try:
-        return int(round(float(str(v).strip().rstrip("%"))))
-    except (ValueError, TypeError):
-        return None
-
-
-def _norm_company(v) -> str:
-    """Normalized company key: parentheticals dropped so
-    'Composio (Ashby job board)' == 'Composio'."""
-    s = re.sub(r"\([^)]*\)", " ", str(v or "").lower())
-    return re.sub(r"[^a-z0-9]+", "", s)
-
-
-def _norm_person(v) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
-
-
-_CONTACT_KEYS = ("contact_name", "contact_title", "tier", "contact_linkedin_url",
-                 "contact_email", "linkedin_url")
-
-
-def _contact_collision(clean: dict, company_norm: str, owners: dict) -> str:
-    """A real hiring contact belongs to ONE company. If this row's contact_name
-    is already assigned to a DIFFERENT company in the table, it is a
-    misattribution (the Pranit-Mehta-on-two-companies bug). Returns the owning
-    company name if it collides, else ''. Mutates nothing."""
-    cn = _norm_person(clean.get("contact_name"))
-    if not cn:
-        return ""
-    owner = owners.get(cn)
-    if owner and owner[0] != company_norm:
-        return owner[1]
-    return ""
 
 
 def _rejected_companies(db, chat_id: int) -> dict:
@@ -629,76 +566,6 @@ def _rejected_companies(db, chat_id: int) -> dict:
         {"c": chat_id},
     ).fetchall()
     return {n: c for n, c in rows}
-_URL_RE = re.compile(r"https?://[^\s;,\"'<>()\[\]]+")
-# Keys that must hold at most ONE link.
-_SINGLE_URL_KEYS = re.compile(r"(_url$|^website$)", re.IGNORECASE)
-
-
-def _valid_url(u: str) -> bool:
-    if _GARBAGE_URL.search(u):
-        return False
-    # LinkedIn job URLs carry a long numeric id; a short one means truncation.
-    m = re.search(r"linkedin\.com/jobs/view/[^\s]*?(\d+)/?$", u)
-    if m and len(m.group(1)) < 9:
-        return False
-    return True
-
-
-def _strip_em_dashes(t: str) -> str:
-    """Product rule: no em/en dashes anywhere in Bob's output, ever."""
-    t = re.sub(r"(?<=\d)\s*[—–]\s*(?=\d)", "-", t)   # numeric ranges: 2–5 → 2-5
-    return re.sub(r"\s*[—–]+\s*", ", ", t)
-
-
-def _sanitize_cells(cells: dict) -> tuple[dict, list[str]]:
-    """Strip invalid URLs and em dashes from cell values. Returns (clean_cells, removals)."""
-    removed: list[str] = []
-    out: dict = {}
-    for k, v in cells.items():
-        if not isinstance(v, str):
-            out[k] = v
-            continue
-        v = _strip_em_dashes(v)
-        if "http" not in v:
-            out[k] = v
-            continue
-        urls = _URL_RE.findall(v)
-        keep = [u.rstrip(".,;") for u in urls if _valid_url(u.rstrip(".,;"))]
-        bad = [u for u in urls if not _valid_url(u.rstrip(".,;"))]
-        if "evidence" in k.lower():
-            # A LinkedIn company/school page is never evidence of anything, and
-            # an X profile URL (no /status/) is a useless stub, not a post.
-            pages = [u for u in keep if re.search(r"linkedin\.com/(company|school)/", u, re.IGNORECASE)
-                     or (re.search(r"(?:^|\.)((x|twitter)\.com)/", u, re.IGNORECASE)
-                         and "/status/" not in u.lower())]
-            keep = [u for u in keep if u not in pages]
-            bad += pages
-        for b in bad:
-            removed.append(f"{k}: {b[:120]}")
-        if re.fullmatch(r"(company_)?website", k, re.IGNORECASE):
-            # website = the company's OWN domain; boards/socials never qualify.
-            nonsite = [u for u in keep if _NON_COMPANY_SITE.search(u)]
-            keep = [u for u in keep if u not in nonsite]
-            for b in nonsite:
-                removed.append(f"{k}: {b[:80]} is a job board or social page, not the company website")
-        if "linkedin" in k.lower():
-            # A linkedin_* column holds LinkedIn URLs of the right kind, or nothing.
-            want = r"linkedin\.com/in/" if "contact" in k.lower() else r"linkedin\.com/(company|school|showcase)/"
-            wrong = [u for u in keep if not re.search(want, u, re.IGNORECASE)]
-            keep = [u for u in keep if u not in wrong]
-            for b in wrong:
-                removed.append(f"{k}: {b[:90]} does not belong in a LinkedIn column (X links and non-LinkedIn URLs are never valid here)")
-        if _SINGLE_URL_KEYS.search(k):
-            # URL-typed field: exactly the first valid URL, or empty.
-            if len(keep) > 1:
-                removed.append(f"{k}: kept first URL, dropped {len(keep) - 1} extra")
-            out[k] = keep[0] if keep else ""
-        else:
-            nv = v
-            for b in bad:
-                nv = nv.replace(b, "").strip(" ;,")
-            out[k] = nv
-    return out, removed
 
 
 def _evidence_liveness(url: str, cache: dict) -> tuple[str, str]:
