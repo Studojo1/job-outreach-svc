@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     CONTEXT_DEV_API_KEY: str = ""   # Context.dev API key (web search + scrape)
     BOB_ACCESS_CODE: str = ""       # shared workspace access code; Bob is disabled when empty
     LEADSFORGE_API_KEY: str = ""    # LeadsForge people SEARCH (free); paid enrichment not wired
+    # xAI (Grok) — live X hiring-post search for Mesa (services/mesa/grok_x.py).
+    # Agent Tools API (/v1/responses + x_search); the old Live Search is deprecated.
+    XAI_API_KEY: str = ""
+    XAI_MODEL: str = "grok-4.3"
 
     # LINKEDIN OUTREACH
     # Generate: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
