@@ -221,6 +221,16 @@ def table_contact_owners(db, table_id: int) -> dict:
     return {norm_person(cn): (norm_company(nm), nm) for nm, cn in rows if cn and nm}
 
 
+def rejected_companies(db, chat_id: int) -> dict:
+    """company_norm -> display name the user removed from this mandate
+    (bob_rejections ledger; deletions are bans, not suggestions)."""
+    rows = db.execute(
+        text("SELECT company_norm, company FROM bob_rejections WHERE chat_id = :c"),
+        {"c": chat_id},
+    ).fetchall()
+    return {n: c for n, c in rows}
+
+
 def table_companies(db, table_id: int) -> dict:
     """company_norm -> row_id for dedupe against already-shipped rows."""
     rows = db.execute(
