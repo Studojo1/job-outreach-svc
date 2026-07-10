@@ -257,6 +257,18 @@ check("BRIDGE: no company signal -> bridge_clause is None, email drops the claus
               "recipient_clause": "A taught you B", "bridge_clause": "",
               "bridge_used": False, "survives_swap": False, "layer": "quote",
               "reason": "r"}).get("bridge_clause") is None)
+check("BRIDGE: an OPEN ROLE matching the sender's target role qualifies. The company "
+      "has already acknowledged the problem the sender solves -- that is a collision "
+      "between this recipient's workload and this sender's tooling, not a generic "
+      "company fact. It must appear as WHY the workload is changing, never as "
+      "\"I saw you are hiring X\" (that is a job application, and the email already "
+      "ends with the ask).",
+      _guard({"synthesis_line": "A taught you B, and with legal ops staffed up that is "
+                                "more agreements. I built C",
+              "recipient_clause": "A taught you B",
+              "bridge_clause": "and with legal ops being staffed up that is more agreements",
+              "bridge_used": True, "survives_swap": False, "layer": "quote",
+              "reason": "r"}).get("bridge_used") is True)
 check("BRIDGE: a company signal ALONE can never carry a line -- no carrier layer "
       "means bare ask, without even calling the LLM",
       _guard({}, layers={k: None for k in ex.LAYER_PRIORITY},
