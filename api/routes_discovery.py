@@ -30,6 +30,13 @@ from core.analytics import capture
 # (acceptable for the lower-ranked tail), and the background pass fills more later.
 JUSTIFY_TOP_K = 100
 
+# How many top-ranked unique companies get expensive LLM+Bing web research per
+# discovery run (inline AND background). Each research call fans out into ~15-20
+# Bing searches, so this is the single biggest driver of the "MS Bing Services"
+# Azure line. Kept small deliberately: the top-N get rich company-specific facts,
+# everyone else uses the 90k-company cache + a free logo-domain fallback below.
+RESEARCH_TOP_N = 8
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
@@ -70,6 +77,56 @@ def _launch_web_research_bg(top_companies: list, location_hint: Optional[list] =
     t.start()
     logger.info("[WEB_RESEARCH_BG] launched for %d companies (location_hint=%s)",
                 len(top_companies), location_hint)
+
+
+def _fill_logo_domains_free(top_leads: list, lead_id_to_obj: dict) -> int:
+    """Best-effort domain resolution for company LOGOS only — free, no Bing, no Apollo.
+
+    Since we only deep-research RESEARCH_TOP_N companies, lower-ranked leads whose
+    company isn't in the cache would have no domain → no logo. Clearbit's public
+    autocomplete (name → domain, no auth, free) fills those so logos still render.
+    Companies Clearbit doesn't know fall back to the client-side letter tile.
+    """
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Unique company names among shown leads that still lack a domain.
+    by_name: dict = {}
+    for ld in top_leads:
+        lo = lead_id_to_obj.get(ld.get("id"))
+        if not lo or lo.company_domain or not (lo.company or "").strip():
+            continue
+        by_name.setdefault(lo.company.strip().lower(), (lo.company.strip(), []))[1].append(lo)
+    if not by_name:
+        return 0
+
+    def _lookup(name: str):
+        try:
+            r = requests.get(
+                "https://autocomplete.clearbit.com/v1/companies/suggest",
+                params={"query": name}, timeout=4,
+            )
+            if r.ok:
+                arr = r.json()
+                if isinstance(arr, list) and arr:
+                    return (arr[0] or {}).get("domain")
+        except Exception:
+            return None
+        return None
+
+    items = list(by_name.values())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        domains = list(pool.map(lambda it: _lookup(it[0]), items))
+
+    filled = 0
+    for (name, objs), dom in zip(items, domains):
+        if not dom:
+            continue
+        for lo in objs:
+            if not lo.company_domain:
+                lo.company_domain = dom
+                filled += 1
+    return filled
 
 
 class DiscoveryRequest(BaseModel):
@@ -226,21 +283,22 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             logger.info("[JUSTIFY] enriching %d unique companies for top %d leads (location_hint=%s)",
                         len(unique_companies), len(top_leads), location_hint)
 
-            # Warm cache for top-20 unique companies via inline LLM web research.
+            # Warm cache for the top-N unique companies via inline LLM web research.
             # First-time candidates have no cached company profiles → justifier
             # gets empty facts → writes generic bullets → banned phrases → null.
-            # Researching top-20 inline (~25s) ensures the justifier has real data.
-            # Companies after the top-20 fall back to cache-only (fine — they're
-            # lower ranked and cache will be populated by the bg daemon next run).
-            top_20 = unique_companies[:20]
-            if top_20:
-                logger.info("[JUSTIFY] inline LLM research for top-%d companies", len(top_20))
+            # Researching the top-N inline ensures the justifier has real data.
+            # Companies after the top-N fall back to cache-only (fine — they're
+            # lower ranked; they still get logos via the free domain fallback, and
+            # the cache fills over time). RESEARCH_TOP_N bounds the Bing spend.
+            top_research = unique_companies[:RESEARCH_TOP_N]
+            if top_research:
+                logger.info("[JUSTIFY] inline LLM research for top-%d companies", len(top_research))
                 bulk_enrich_top_companies(
-                    db, top_20, enable_scrape=False, enable_llm_research=True,
+                    db, top_research, enable_scrape=False, enable_llm_research=True,
                     location_hint=location_hint,
                 )
 
-            # Cache-only pass for all companies — top-20 are now cached.
+            # Cache-only pass for all companies — the top-N are now cached.
             profiles = bulk_enrich_top_companies(
                 db, top_companies, enable_scrape=False, enable_llm_research=False
             )
@@ -260,7 +318,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 if not (profile and profile.domain):
                     continue
                 if profile.domain == (lead_obj.company or "").lower():
-                    continue  # avoid setting domain = company-name fallback
+                    continue  # company-name fallback / negative-cache sentinel — not a real domain
                 if not lead_obj.company_domain:
                     lead_obj.company_domain = profile.domain
                     backfilled += 1
@@ -272,6 +330,15 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             if backfilled or corrected:
                 logger.info("[ENRICH] domain writeback: backfilled %d, corrected %d leads",
                             backfilled, corrected)
+
+            # Ensure logos render for the shown leads we did NOT deep-research:
+            # free Clearbit name→domain lookup (no Bing, no Apollo). Best-effort.
+            try:
+                logo_filled = _fill_logo_domains_free(top_leads, lead_id_to_obj)
+                if logo_filled:
+                    logger.info("[ENRICH] logo domains filled via free lookup for %d leads", logo_filled)
+            except Exception as e:
+                logger.warning("[ENRICH] free logo-domain fill skipped: %s", e)
 
             # ── Domain-affinity adjustment (round-2) ─────────────────────────
             # Now that fact extraction has run during enrichment, compare each
@@ -358,10 +425,11 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                 db_save.close()
 
             # Kick off LLM web research for uncached companies in a daemon thread.
-            # Cap at 40 unique companies (same ceiling as B2B). Top-20 are already
-            # researched inline above, so background effectively adds companies 21-40
-            # only — maximum 20 new Bing calls per run instead of 130-180.
-            _launch_web_research_bg(unique_companies[:40], location_hint=location_hint)
+            # Same RESEARCH_TOP_N ceiling as the inline pass — the top-N are already
+            # researched inline above and now cached, so this background pass adds
+            # ~0 new Bing calls. It exists only as a safety net if the inline pass
+            # was skipped/failed. This is the second cap that bounds Bing spend.
+            _launch_web_research_bg(unique_companies[:RESEARCH_TOP_N], location_hint=location_hint)
 
         except Exception as e:
             logger.error("[JUSTIFY] top-K justification pipeline failed (non-fatal): %s", e, exc_info=True)

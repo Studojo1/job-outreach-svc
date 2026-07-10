@@ -288,8 +288,31 @@ def bulk_enrich_top_companies(
     if to_research and enable_llm_research:
         research_results = research_companies_bulk(to_research)
         llm_ok = 0
+        neg_cached = 0
         for input_key, facts in research_results.items():
             if not facts:
+                # Negative cache: the web search found nothing for this company.
+                # Without this, that same unfindable company gets re-researched
+                # (15-20 Bing searches) on EVERY discovery run, forever. Mark it
+                # "researched, empty" so _apollo_stale treats it as a fresh cache
+                # hit and skips it until CACHE_TTL (90d) elapses.
+                #
+                # Key by the real domain if we had one; else by the company name
+                # lowercased. domain is NOT NULL + unique so we can't store null,
+                # and name-lower is the ONE sentinel the domain-writeback path
+                # already refuses to copy onto leads (`domain == company.lower()`)
+                # — important because staging + prod SHARE this table, so a sentinel
+                # must never leak a fake domain onto a lead read by the other env.
+                passed_domain = to_research.get(input_key)
+                neg_key = (passed_domain or input_key or "").strip().lower()
+                if not neg_key:
+                    continue
+                neg = get_or_create_profile(db, neg_key)
+                neg.name = neg.name or input_key
+                neg.last_apollo_enriched_at = datetime.utcnow()
+                if input_key and input_key.lower() != neg_key:
+                    name_alias[input_key] = neg
+                neg_cached += 1
                 continue
             llm_ok += 1
             resolved_domain = facts.get("discovered_domain") or input_key.lower()
@@ -300,7 +323,8 @@ def bulk_enrich_top_companies(
             name = facts.get("name") or input_key
             if name and name.lower() != resolved_domain:
                 name_alias[name] = p
-        logger.info("[ENRICH] llm_research: %d/%d succeeded", llm_ok, len(to_research))
+        logger.info("[ENRICH] llm_research: %d/%d succeeded, %d negative-cached",
+                    llm_ok, len(to_research), neg_cached)
 
     unique_domains = sorted(profiles.keys())
 
