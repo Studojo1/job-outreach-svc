@@ -22,7 +22,7 @@ _MAX_TERMS = 8
 # The rest are aggregated FEEDS (jobicy/remotive/...) that return loosely- or
 # un-filtered jobs (e.g. jobicy only tags on the first keyword token), so we
 # relevance-filter their output against the searched term.
-_TRUSTED_SEARCH = {"linkedin", "linkedin_posts", "getro", "indeed", "naukri", "ats"}
+_TRUSTED_SEARCH = {"linkedin", "linkedin_posts", "getro", "indeed", "naukri", "ats", "hirist"}
 
 
 def _relevant(job: dict, term: str) -> bool:

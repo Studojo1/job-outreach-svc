@@ -29,6 +29,15 @@ _H = {
 _T = 20.0
 
 
+def _ms_to_date(ms) -> str | None:
+    """Epoch-milliseconds (Lever createdAt, Hirist createdTimeMs) -> 'YYYY-MM-DD'."""
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(int(str(ms)[:10]), tz=timezone.utc).date().isoformat()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _kw_match(text: str, keywords: str) -> bool:
     toks = [t for t in (keywords or "").lower().split() if len(t) > 2]
     if not toks:
@@ -342,6 +351,10 @@ _ATS_DEFAULT: list[tuple[str, str]] = [
     ("greenhouse", "brex"), ("greenhouse", "plaid"), ("greenhouse", "affirm"),
     ("ashby", "ramp"), ("ashby", "linear"), ("ashby", "vanta"), ("ashby", "mercury"),
     ("ashby", "posthog"), ("ashby", "hex"), ("ashby", "watershed"),
+    # India-based product companies (verified live on each ATS)
+    ("greenhouse", "postman"), ("greenhouse", "phonepe"), ("greenhouse", "groww"),
+    ("greenhouse", "druva"), ("ashby", "sarvam"), ("ashby", "atlan"),
+    ("lever", "meesho"), ("lever", "cred"),
 ]
 # Lever handles vary per company (often 404); the provider path stays supported
 # for boards added explicitly via MESA_ATS_BOARDS (e.g. "lever:yourcompany").
@@ -378,12 +391,15 @@ def _src_ats(keywords, location, date_posted, workplace_types, experience_levels
                           str(r.get("id")), r.get("absolute_url", ""), (r.get("updated_at") or "")[:10]) for r in rows]
             elif provider == "lever":
                 rows = _get(f"https://api.lever.co/v0/postings/{token}?mode=json").json()
+                # Lever createdAt is epoch-milliseconds; carry real freshness through
                 items = [(r.get("text", ""), (r.get("categories") or {}).get("location", ""),
-                          str(r.get("id")), r.get("hostedUrl", ""), "") for r in rows]
+                          str(r.get("id")), r.get("hostedUrl", ""), _ms_to_date(r.get("createdAt"))) for r in rows]
             elif provider == "ashby":
                 rows = _get(f"https://api.ashbyhq.com/posting-api/job-board/{token}").json().get("jobs", [])
+                # skip unlisted/internal postings that Ashby still returns
                 items = [(r.get("title", ""), r.get("location", ""), str(r.get("id")),
-                          r.get("jobUrl", ""), (r.get("publishedAt") or "")[:10]) for r in rows]
+                          r.get("jobUrl", ""), (r.get("publishedAt") or "")[:10])
+                         for r in rows if r.get("isListed", True)]
             else:
                 continue
         except Exception as e:  # noqa: BLE001
@@ -404,6 +420,46 @@ def _src_ats(keywords, location, date_posted, workplace_types, experience_levels
             })
             got += 1
     logger.info("[MESA] ats -> %d jobs across %d boards", len(out), len(boards))
+    return out
+
+
+def _src_hirist(keywords, location, date_posted, workplace_types, experience_levels, max_results):
+    """Hirist — India's tech-only board — via its public JSON API (gladiator.hirist.tech).
+    No login/cookies; routed through the residential proxy so the cluster IP is not rate-limited.
+    Real engineering roles only, with recruiter + company domain + salary + epoch freshness.
+    """
+    out: list[dict] = []
+    q = urllib.parse.quote((keywords or "software developer").strip())
+    size = max(20, min(100, max_results or 40))
+    loc_kw = (location or "").split(",")[0].strip().lower()
+    headers = dict(_H, Referer="https://www.hirist.tech/")
+    try:
+        url = f"https://gladiator.hirist.tech/job/search?query={q}&page=0&posting=0&industry=&size={size}"
+        rows = _get(url, headers=headers, proxy=True).json().get("data", []) or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] hirist failed: %s", e)
+        return out
+    for r in rows:
+        title = r.get("jobdesignation") or r.get("title", "")
+        if not title:
+            continue
+        cd = r.get("companyData") or {}
+        company = (cd.get("companyName") or cd.get("name") or "").strip()
+        if not company:
+            dom = (r.get("creatorDomainName") or "").split(".")[0]
+            company = dom.replace("-", " ").title() if dom else (r.get("createdByAlias") or "")
+        # location / locations are lists of {id, name}
+        locs = r.get("locations") or r.get("location") or []
+        loc = ", ".join(x.get("name", "") for x in locs if isinstance(x, dict)) if isinstance(locs, list) else str(locs)
+        if loc_kw and loc and loc_kw not in loc.lower() and "remote" not in loc.lower() and not r.get("workFromHome"):
+            continue
+        job_url = r.get("jobDetailUrl") or r.get("applyUrl") or ""
+        out.append({
+            "external_id": f"hirist:{r.get('id')}", "title": title, "company": company or "—",
+            "location": loc or "India", "posted_date": _ms_to_date(r.get("createdTimeMs")),
+            "url": job_url,
+        })
+    logger.info("[MESA] hirist -> %d jobs", len(out))
     return out
 
 
@@ -470,12 +526,13 @@ SOURCE_SCRAPERS = {
     "indeed": _src_indeed,    # best-effort — often Cloudflare-blocked
     "naukri": _src_naukri,    # best-effort — often reCAPTCHA-gated
     "ats": _src_ats,          # direct Greenhouse/Lever/Ashby boards (source of truth)
+    "hirist": _src_hirist,    # India tech-only board via public JSON API (proxied)
     "himalayas": _src_himalayas,
     "adzuna": _src_adzuna,    # key-gated (ADZUNA_APP_ID/KEY)
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
 # Sources that reliably return keyword-relevant data with no auth / captcha / paid API.
-RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "getro", "ats", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "himalayas", "weworkremotely"]
+RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "getro", "ats", "hirist", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "himalayas", "weworkremotely"]
 # Beta: auth-/bot-walled or no real keyword search — kept for when an aggregator
 # key (e.g. Adzuna / SerpApi) is wired. instahyre's public API ignores the query;
 # indeed is Cloudflare-blocked; naukri requires reCAPTCHA; adzuna needs a key.

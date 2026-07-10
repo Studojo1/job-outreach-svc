@@ -24,6 +24,7 @@ from services.mesa.intelligence import attach_enrichment, enrichment_status, sta
 from services.mesa.runner import run_due_searches, run_search
 from services.mesa.signals import score_jobs
 from services.mesa.sources import ALL_SOURCES, DEFAULT_SOURCES
+from services.mesa.velocity import compute_company_velocity
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mesa", tags=["Mesa"])
@@ -228,6 +229,28 @@ async def search_signals(
         "confluence_count": sum(1 for r in ranked if r["confluence"]),
         "enrichment": enrichment_status(search_id),
         "companies": ranked[:limit],
+    }
+
+
+@router.get("/velocity")
+async def company_velocity(
+    window_days: int = Query(7, ge=1, le=30),
+    limit: int = Query(50, le=200),
+    surging_only: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Job-posting-velocity across this client's searches: companies that opened many new roles
+    recently vs the prior window. `surge=true` = scaling hard = a hot, reachable lead. Derived from
+    stored jobs; signal strengthens as scrape history accumulates."""
+    rows = compute_company_velocity(db, current_user.id, window_days=window_days)
+    if surging_only:
+        rows = [r for r in rows if r["surge"]]
+    return {
+        "window_days": window_days,
+        "total_companies": len(rows),
+        "surging_count": sum(1 for r in rows if r["surge"]),
+        "companies": rows[:limit],
     }
 
 
