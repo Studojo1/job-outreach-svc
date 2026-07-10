@@ -262,8 +262,14 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
             db.commit()
             raise ValueError("Cannot launch campaign: no emails in queue.")
 
-        # Pre-compute schedule timestamps for all emails (queued + pending_enrichment)
+        # NOTE: top-lead research is deliberately NOT run here. It makes ~40-60s of
+        # blocking HTTP + LLM calls, and this function is reached from two `async def`
+        # routes — it would run on the event loop and starve /health (see the
+        # 2026-05-18 CrashLoopBackOff documented on routes_campaign.worker_send_ready).
+        # The routes schedule it via BackgroundTasks instead.
         from services.email_campaign.campaign_worker import compute_campaign_schedule
+
+        # Pre-compute schedule timestamps for all emails (queued + pending_enrichment)
         compute_campaign_schedule(db, campaign_id)
         logger.info("[CAMPAIGN] Computed schedule for campaign #%d (emails=%d)",
                     campaign_id, email_count)

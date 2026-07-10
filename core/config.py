@@ -69,7 +69,19 @@ class Settings(BaseSettings):
     POSTHOG_HOST: str = "https://eu.i.posthog.com"
 
     # BOB (Mesa) — placement intelligence workspace
+    # CONTEXT_DEV_API_KEY is shared with per-lead deep research (services/lead_research).
+    # When unset, campaign_worker Phase 0 is a no-op and every outreach email takes the
+    # bare-ask path: no research, no synthesis line. That makes the feature dark-launchable.
     CONTEXT_DEV_API_KEY: str = ""   # Context.dev API key (web search + scrape)
+    # The /v1 prefix is required. Without it the API returns 403 "The API you have tried
+    # to access does not exist" — which the client would otherwise swallow as transient,
+    # silently degrading every email to a bare ask.
+    CONTEXT_DEV_BASE_URL: str = "https://api.context.dev/v1"
+    # Ceiling on credits per lead: 3 = LinkedIn snippets + talks/essays + open web.
+    # Set to 2 to skip Call 3 entirely.
+    CONTEXT_DEV_MAX_CREDITS_PER_LEAD: int = 3
+    # Stop researching once a campaign has burned this many credits. 0 = no cap.
+    CONTEXT_DEV_CAMPAIGN_CREDIT_CAP: int = 0
     BOB_ACCESS_CODE: str = ""       # shared workspace access code; Bob is disabled when empty
     LEADSFORGE_API_KEY: str = ""    # LeadsForge people SEARCH (free); paid enrichment not wired
 
