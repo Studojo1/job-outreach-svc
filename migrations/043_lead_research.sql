@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS lead_research (
     quote_source_url    TEXT,
     derived_operational TEXT,   -- what the title required, from a career table. Available for nearly every lead.
     behavioural         TEXT,   -- the unguarded signal. Often why a stranger replies.
+    -- What the work would have taught them. The LAST RESORT before a bare ask, and in
+    -- practice the layer that carries most leads: most people have no public writing,
+    -- but everyone has a job whose demands can be inferred. Anchored to function +
+    -- company type, never the abstract role.
+    reflected_skills    TEXT,
     live_move           TEXT,   -- texture only. Never load-bearing.
 
     -- Depth guard

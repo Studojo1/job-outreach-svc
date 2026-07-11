@@ -387,6 +387,7 @@ def research_one_lead(db, lead, campaign_id: int) -> bool:
     record.quote_source_url = layers.get("quote_source_url")
     record.derived_operational = layers.get("derived_operational")
     record.behavioural = layers.get("behavioural")
+    record.reflected_skills = layers.get("reflected_skills")
     record.live_move = layers.get("live_move")
 
     campaign = db.query(Campaign).filter_by(id=campaign_id).first()

@@ -158,6 +158,7 @@ class LeadResearch(Base):
     quote_source_url = Column(Text)
     derived_operational = Column(Text)  # what the title required
     behavioural = Column(Text)          # the unguarded signal
+    reflected_skills = Column(Text)     # what the work would have taught them (last resort)
     live_move = Column(Text)            # texture only
 
     synthesis_line = Column(Text)       # full line, both halves (audit)
