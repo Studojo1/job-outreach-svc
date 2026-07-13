@@ -224,6 +224,16 @@ def enrich_single_lead_classified(lead: Lead) -> EnrichmentResult:
         return EnrichmentResult(success=False, error_type="no_match",
                                 error_detail="Apollo returned no email")
 
+    # Only trust emails Apollo has actually VERIFIED. Apollo also returns
+    # "guessed"/"extrapolated"/"unavailable" pattern-based addresses that bounce
+    # hard on protected domains (Proofpoint, academic, defence), which wrecks the
+    # sender's reputation. Treat anything not verified as a no-match so the lead
+    # is skipped (and can be replaced) rather than emailed into a bounce.
+    email_status = (person.get("email_status") or "").lower()
+    if email_status and email_status != "verified":
+        return EnrichmentResult(success=False, error_type="no_match",
+                                error_detail=f"Apollo email not verified (status={email_status})")
+
     result_dict: Dict[str, str] = {"email": email}
     first = person.get("first_name") or ""
     last = person.get("last_name") or ""
