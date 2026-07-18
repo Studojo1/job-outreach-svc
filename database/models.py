@@ -97,9 +97,6 @@ class Lead(Base):
     candidate = relationship("Candidate", back_populates="leads")
     scores = relationship("LeadScore", back_populates="lead", cascade="all, delete-orphan")
     emails_sent = relationship("EmailSent", back_populates="lead", cascade="all, delete-orphan")
-    # No `research` relationship: LeadResearch is keyed on person_key, shared across
-    # candidates, and deliberately outlives any single Lead row. Look it up via
-    # lead_person_key(lead).
 
 
 class LeadScore(Base):
@@ -117,68 +114,6 @@ class LeadScore(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     lead = relationship("Lead", back_populates="scores")
-
-
-class LeadResearch(Base):
-    """Per-PERSON deep research (context.dev) plus the depth-guard verdict.
-
-    Keyed on person_key = COALESCE(Lead.apollo_id, Lead.linkedin_url), not on
-    lead_id. Migration 009 dropped the UNIQUE constraint on leads.apollo_id because
-    the same human legitimately appears once per candidate; keying research on
-    lead_id would bill that person once per student. Same reasoning as
-    CompanyProfile, which is cached globally on `domain`.
-
-    Fetched just-in-time by campaign_worker Phase 0, in the same lookahead window
-    as Apollo enrichment — so a lead that bounces, no-matches, or never sends is
-    never researched and never billed.
-
-    The four layers are stored in priority order. `quote` holds their own words
-    from a POST or an X reply; LinkedIn *comments* are unreachable to an anonymous
-    fetcher at any price, so nothing here will ever hold one.
-
-    `survives_swap = True` means the synthesis line would read true for a different
-    person in the same role. That is the depth guard firing: the line is rejected
-    and the email drops to the bare ask. The rejected line is kept so the kill rate
-    stays auditable.
-    """
-    __tablename__ = "lead_research"
-    id = Column(Integer, primary_key=True, index=True)
-
-    # UNIQUE is load-bearing, not decorative: the app inserts this row BEFORE
-    # spending any credits, so the constraint is the mutex that stops 2-6
-    # concurrent replicas double-spending on the same person. Never drop it.
-    person_key = Column(Text, unique=True, nullable=False, index=True)
-
-    status = Column(String(20), nullable=False, default="pending")  # pending|fetched|no_signal|failed
-    credits_spent = Column(Integer, nullable=False, default=0)      # 0..3
-    fetched_urls = Column(JSONB)   # dedupe set — Call 3 must never refetch Call 2
-    error_message = Column(Text)
-
-    quote = Column(Text)                # their own words (post / X reply)
-    quote_source_url = Column(Text)
-    derived_operational = Column(Text)  # what the title required
-    behavioural = Column(Text)          # the unguarded signal
-    live_move = Column(Text)            # texture only
-
-    synthesis_line = Column(Text)       # full line, both halves (audit)
-    recipient_clause = Column(Text)     # the recipient's half ONLY — what the email may attribute
-    survives_swap = Column(Boolean)     # True = too shallow = bare ask
-    guard_layer = Column(String(32))
-    guard_reason = Column(Text)
-
-    fetched_at = Column(DateTime)       # staleness: re-research after RESEARCH_TTL_DAYS
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-def lead_person_key(lead) -> str | None:
-    """Stable identity for a human across candidates.
-
-    Mirrors the dedupe key lead_pool_collector.py already uses (apollo_person_id,
-    falling back to linkedin_url). Returns None only for a lead with neither,
-    which the discovery paths do not produce.
-    """
-    return (lead.apollo_id or None) or (lead.linkedin_url or None)
 
 
 class CompanyProfile(Base):
@@ -257,7 +192,7 @@ class EmailSent(Base):
     subject = Column(Text)
     body = Column(Text)
     to_email = Column(String(255))
-    assigned_style = Column(String(50))  # Team-size band: solo | small | structured. Legacy rows hold retired style names.
+    assigned_style = Column(String(50))  # Email style: warm_intro, value_prop, company_curiosity, peer_to_peer, direct_ask
     enrichment_status = Column(String(20), default="pending")  # pending, enriched, failed, skipped
     scheduled_at = Column(DateTime)  # When this email should be sent (timezone-aware scheduling)
     sent_at = Column(DateTime)

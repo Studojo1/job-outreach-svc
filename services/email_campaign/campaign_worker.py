@@ -2,26 +2,15 @@
 
 Architecture (Just-In-Time):
   - On campaign launch, pre-compute scheduled_at for ALL placeholder emails
-  - The Go worker (repo: job-outreach-worker) POSTs /campaign/worker/send-ready
-    every 30s, which runs _process_cycle():
-      Phase 3': Drain any already-due sends first (time-critical)
-      Phase 0 : Research ONE upcoming lead (3-hour lookahead, slow: 3 HTTP + 2 LLM)
-      Phase 1 : Enrich upcoming leads (3-hour lookahead, max 3 per cycle)
-      Phase 2 : Generate email content for researched+enriched leads (max 2)
-      Phase 3 : Send ready emails (max 5 per cycle)
-      Phase 3b: Send due follow-ups as thread replies
-      Phase 4 : Check replies/bounces (throttled to every 5 min)
+  - A single background thread polls every 30s and runs a 3-phase cycle:
+    Phase 1: Enrich upcoming leads (3-hour lookahead, max 3 per cycle)
+    Phase 2: Generate email content for enriched leads (max 2 per cycle)
+    Phase 3: Send ready emails (max 5 per cycle)
   - Completely stateless — survives pod restarts without losing progress
-  - `start_sender_loop()` below is DEAD CODE: nothing calls it. The in-process
-    thread was replaced by the Go worker driving the HTTP endpoint.
-  - The endpoint is deliberately `def`, not `async def` — blocking work there runs
-    on the anyio threadpool. Making it async starved the event loop and caused a
-    CrashLoopBackOff on 2026-05-18.
+  - Total cycle budget: ~3.6s worst case (under 5s k8s health check limit)
 
 Scheduling rules:
-  - First email: 280-360 seconds after launch (ignores business hours — trust
-    signal). Long enough for the launch route's BackgroundTasks top-lead research
-    to resolve before the email is generated.
+  - First email: 30-180 seconds after launch (ignores business hours — trust signal)
   - All subsequent emails: business hours only (9am-6pm user timezone)
   - Daily limit: 5-7 emails per day (randomized)
   - Within each day, send times are randomly distributed between 9am-6pm
@@ -60,8 +49,7 @@ _sender_stop = threading.Event()
 POLL_INTERVAL = 30  # seconds between poll cycles
 DAILY_LIMIT_MIN = 5
 DAILY_LIMIT_MAX = 7
-JIT_LOOKAHEAD_HOURS = 3  # research/enrich/generate leads this far ahead of send time
-MAX_RESEARCH_PER_CYCLE = 1  # up to 3 sequential context.dev calls; cannot share the cycle
+JIT_LOOKAHEAD_HOURS = 3  # enrich/generate leads this far ahead of send time
 MAX_ENRICH_PER_CYCLE = 3  # ~0.6s at 0.2s Apollo rate limit
 MAX_GENERATE_PER_CYCLE = 2  # ~2s for LLM calls
 MAX_SEND_PER_CYCLE = 5  # ~1s for Gmail API calls
@@ -130,14 +118,8 @@ def compute_campaign_schedule(db, campaign_id: int):
 
     now_utc = datetime.utcnow()
 
-    # ── First email: 280-360 seconds from now (ignores business hours) ──
-    # Still a near-immediate trust signal, but far enough out that the top-lead
-    # research queued by the launch route (BackgroundTasks) resolves first, even at
-    # its ~80s worst case (3x20s HTTP timeouts + extract + guard LLM calls).
-    # This clock starts DURING the request while research starts after it, so the
-    # race is real: _generate_pending's "wait for research to resolve" gate is the
-    # backstop. Worst case the first email is a bare ask, never a broken one.
-    first_delay = random.uniform(280, 360)
+    # ── First email: 30-180 seconds from now (ignores business hours) ──
+    first_delay = random.uniform(30, 180)
     emails[0].scheduled_at = now_utc + timedelta(seconds=first_delay)
 
     # ── Remaining emails: sequential with random 40-90 min gaps ──
@@ -222,260 +204,6 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
     db.commit()
     logger.info("[SCHEDULER] Shifted %d emails forward by %.0f seconds for campaign %d",
                 len(emails), shift_seconds, campaign_id)
-
-
-# ── JIT Phase 0: Research Upcoming Leads ────────────────────────────────────
-
-def research_one_lead(db, lead, campaign_id: int) -> bool:
-    """Research a single lead and run the depth guard. Shared by Phase 0 and by
-    the synchronous top-lead research at campaign launch.
-
-    Claims the person by inserting their LeadResearch row BEFORE any HTTP call — the
-    UNIQUE constraint on person_key makes that insert the mutex, so two of the 2-6
-    concurrent replicas can never double-spend credits on the same human.
-
-    Returns True if research reached a terminal state. Never raises.
-    """
-    from core.config import settings as _s
-    from database.models import LeadResearch, lead_person_key
-    from services.lead_research.context_client import (
-        research_lead, ContextDevConfigError, ContextDevCreditError, ContextDevError,
-    )
-    from services.lead_research.extractor import extract_layers, run_depth_guard
-
-    if not _s.CONTEXT_DEV_API_KEY or not lead or not lead.name:
-        return False
-
-    person_key = lead_person_key(lead)
-    if not person_key:
-        return False  # no stable identity; cannot cache or dedupe. Bare ask.
-
-    record = LeadResearch(person_key=person_key, status="pending")
-    db.add(record)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()  # another replica claimed this person first
-        return False
-
-    # Campaign-level credit cap (0 = unlimited).
-    #
-    # Sum over DISTINCT researched persons in this campaign. A naive
-    # LeadResearch->Lead->EmailSent join fans out (one lead has T1/T2/T3 plus
-    # replacement rows), inflating the total ~2.1x and tripping the cap early.
-    cap = _s.CONTEXT_DEV_CAMPAIGN_CREDIT_CAP
-    if cap > 0:
-        campaign_person_keys = (
-            db.query(func.coalesce(Lead.apollo_id, Lead.linkedin_url))
-            .join(EmailSent, EmailSent.lead_id == Lead.id)
-            .filter(EmailSent.campaign_id == campaign_id)
-            .distinct()
-            .subquery()
-        )
-        spent = (
-            db.query(func.coalesce(func.sum(LeadResearch.credits_spent), 0))
-            .filter(LeadResearch.person_key.in_(db.query(campaign_person_keys)))
-            .scalar() or 0
-        )
-        if spent >= cap:
-            record.status = "no_signal"
-            record.survives_swap = True
-            record.error_message = f"campaign credit cap reached ({spent}/{cap})"
-            db.commit()
-            logger.warning("[RESEARCH] Campaign %d hit credit cap %d — bare ask from here",
-                           campaign_id, cap)
-            return True
-
-    try:
-        bundle = research_lead(lead.name, lead.company or "", lead.title or "")
-    except ContextDevCreditError as e:
-        # Out of credits. Genuinely retryable once topped up, so release the claim.
-        # Safe to loop: the API rejects us for free until someone pays.
-        db.delete(record)
-        db.commit()
-        logger.error("[RESEARCH] context.dev out of credits, releasing claim: %s", e)
-        return False
-    except ContextDevConfigError as e:
-        # Bad key / bad base URL. KEEP the claim: releasing it would let Phase 0
-        # re-pick this lead every 30s cycle and re-call a paid API 120x/hour. The
-        # client has also tripped its breaker, so nothing else calls out either.
-        record.status = "failed"
-        record.error_message = f"config: {str(e)[:400]}"
-        record.survives_swap = True  # bare ask
-        db.commit()
-        logger.error("[RESEARCH] context.dev misconfigured, not retrying lead %d: %s",
-                     lead.id, e)
-        return True
-    except ContextDevError as e:
-        record.status = "failed"
-        record.error_message = str(e)[:500]
-        record.survives_swap = True
-        db.commit()
-        logger.warning("[RESEARCH] Lead %d failed: %s", lead.id, e)
-        return True
-
-    record.credits_spent = bundle.credits_spent
-    record.fetched_urls = bundle.fetched_urls
-    record.fetched_at = datetime.utcnow()
-
-    if not bundle.has_signal():
-        record.status = "no_signal"
-        record.survives_swap = True  # nothing to build on -> bare ask
-        db.commit()
-        logger.info("[RESEARCH] Lead %d (%s): no signal, %d credits",
-                    lead.id, lead.name, bundle.credits_spent)
-        return True
-
-    try:
-        layers = extract_layers(bundle, lead.name, lead.company or "")
-    except Exception as e:
-        record.status = "failed"
-        record.error_message = f"extract: {str(e)[:400]}"
-        record.survives_swap = True
-        db.commit()
-        logger.error("[RESEARCH] Extraction failed for lead %d: %s", lead.id, e)
-        return True
-
-    record.quote = layers.get("quote")
-    record.quote_source_url = layers.get("quote_source_url")
-    record.derived_operational = layers.get("derived_operational")
-    record.behavioural = layers.get("behavioural")
-    record.live_move = layers.get("live_move")
-
-    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
-    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first() if campaign else None
-    flex = (candidate.flex_notes or {}) if candidate else {}
-
-    try:
-        verdict = run_depth_guard(
-            layers,
-            name=lead.name,
-            title=lead.title or "",
-            company=lead.company or "",
-            work_principle=flex.get("work_principle", ""),
-            sender_project=flex.get("best_project", ""),
-        )
-    except Exception as e:
-        # Guard failure must fail closed: no line ships.
-        record.status = "fetched"
-        record.survives_swap = True
-        record.guard_reason = f"guard error: {str(e)[:300]}"
-        db.commit()
-        logger.error("[RESEARCH] Depth guard failed for lead %d: %s", lead.id, e)
-        return True
-
-    record.status = "fetched"
-    record.synthesis_line = verdict["synthesis_line"]
-    record.recipient_clause = verdict.get("recipient_clause")
-    record.survives_swap = verdict["survives_swap"]
-    record.guard_layer = verdict["layer"]
-    record.guard_reason = verdict["reason"]
-    db.commit()
-
-    logger.info("[RESEARCH] Lead %d (%s): %d credits, layer=%s, ships=%s",
-                lead.id, lead.name, bundle.credits_spent,
-                verdict["layer"], not verdict["survives_swap"])
-    return True
-
-
-def research_top_lead(db, campaign_id: int) -> bool:
-    """Synchronously research the highest-scored lead at campaign launch.
-
-    The first email fires 30-180s after launch as a deliberate trust signal —
-    far too soon for the JIT researcher (1 lead per 30s cycle, cold start) to
-    reach it. That email is the one most likely to be read, so it earns its
-    3 credits up front. Every other lead stays just-in-time.
-
-    Never raises: a research failure must not block a paid campaign from starting.
-    """
-    from core.config import settings as _s
-    if not _s.CONTEXT_DEV_API_KEY:
-        return False
-    try:
-        top = (
-            db.query(Lead)
-            .join(EmailSent, EmailSent.lead_id == Lead.id)
-            .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
-            .filter(EmailSent.campaign_id == campaign_id,
-                    EmailSent.followup_number == 0)
-            .order_by(LeadScore.overall_score.desc().nullslast(), EmailSent.id.asc())
-            .first()
-        )
-        if not top:
-            return False
-        logger.info("[RESEARCH] Launch: researching top lead %d (%s) for campaign %d",
-                    top.id, top.name, campaign_id)
-        return research_one_lead(db, top, campaign_id)
-    except Exception as e:
-        logger.error("[RESEARCH] Launch research failed for campaign %d: %s",
-                     campaign_id, e, exc_info=True)
-        return False
-
-
-def research_top_lead_bg(campaign_id: int) -> None:
-    """BackgroundTasks entrypoint for top-lead research.
-
-    Opens its OWN session: the request-scoped `db` from Depends(get_db) is closed
-    as soon as the response is returned, so a background task that reuses it raises.
-    Same pattern as _score_candidate_leads_bg in api/routes_discovery.py.
-
-    Never raises — a research failure must not surface anywhere near a paid launch.
-    """
-    db = SessionLocal()
-    try:
-        research_top_lead(db, campaign_id)
-    except Exception as e:
-        logger.error("[RESEARCH] Background top-lead research failed for campaign %d: %s",
-                     campaign_id, e, exc_info=True)
-    finally:
-        db.close()
-
-
-def _research_upcoming(db) -> int:
-    """Deep-research the next lead scheduled within the lookahead window.
-
-    Binding research to the lookahead is what keeps it affordable: a lead that
-    bounces, that Apollo cannot match, or that falls past the campaign's expires_at
-    is never researched and never billed.
-
-    One lead per cycle. Three sequential HTTP calls at up to 20s each cannot share
-    a 30s cycle with Apollo enrichment and two LLM generations.
-
-    Returns 1 if a lead reached a terminal research state, else 0.
-    """
-    from core.config import settings as _s
-    if not _s.CONTEXT_DEV_API_KEY:
-        return 0  # research disabled — every email takes the bare-ask path
-
-    from database.models import LeadResearch
-
-    lookahead = datetime.utcnow() + timedelta(hours=JIT_LOOKAHEAD_HOURS)
-
-    # Join research on the PERSON key, not the lead: a person already researched
-    # for another candidate is already cached and must not be re-billed.
-    _person_key = func.coalesce(Lead.apollo_id, Lead.linkedin_url)
-    email = (
-        db.query(EmailSent)
-        .join(Campaign, EmailSent.campaign_id == Campaign.id)
-        .join(Lead, EmailSent.lead_id == Lead.id)
-        .outerjoin(LeadResearch, LeadResearch.person_key == _person_key)
-        .filter(
-            Campaign.status == "running",
-            EmailSent.status == "pending_enrichment",
-            EmailSent.followup_number == 0,
-            EmailSent.is_test == False,
-            EmailSent.scheduled_at.isnot(None),
-            EmailSent.scheduled_at <= lookahead,
-            LeadResearch.id.is_(None),  # not yet attempted for this person
-        )
-        .order_by(EmailSent.scheduled_at.asc())
-        .first()
-    )
-    if not email:
-        return 0
-
-    lead = db.query(Lead).filter_by(id=email.lead_id).first()
-    return 1 if research_one_lead(db, lead, email.campaign_id) else 0
 
 
 # ── JIT Phase 1: Enrich Upcoming Leads ──────────────────────────────────────
@@ -619,26 +347,15 @@ def _enrich_upcoming(db) -> int:
 def _generate_pending(db) -> int:
     """Generate email content for enriched leads that don't have content yet.
 
-    Generation is the point of no return: once a body is written, later research
-    is wasted. So an email waits until its lead's research has RESOLVED — reached
-    a terminal state, whether or not it found anything. `no_signal` and `failed`
-    are resolved; they correctly produce a bare ask.
-
-    Two escapes from that wait, or the campaign would stall:
-      * research disabled (no API key) — nothing will ever write a row
-      * the email is already due — a bare ask now beats a good email late
-
     Returns number of emails successfully generated.
     """
-    from core.config import settings as _s
-    from database.models import LeadResearch
     from services.email_campaign.email_generator_service import generate_email_for_lead
 
     now = datetime.utcnow()
     lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
 
     # Find enriched emails without content
-    q = (
+    enriched_no_content = (
         db.query(EmailSent)
         .join(Campaign, EmailSent.campaign_id == Campaign.id)
         .filter(
@@ -649,25 +366,7 @@ def _generate_pending(db) -> int:
             EmailSent.scheduled_at.isnot(None),
             EmailSent.scheduled_at <= lookahead,
         )
-    )
-
-    if _s.CONTEXT_DEV_API_KEY:
-        # Wait for research to resolve, unless the email is already due.
-        from sqlalchemy import or_, exists
-        research_resolved = exists().where(
-            Lead.id == EmailSent.lead_id,
-            LeadResearch.person_key == func.coalesce(Lead.apollo_id, Lead.linkedin_url),
-            LeadResearch.status.in_(["fetched", "no_signal", "failed"]),
-        )
-        q = q.filter(
-            or_(
-                research_resolved,
-                EmailSent.scheduled_at <= now,  # out of time: ship the bare ask
-            )
-        )
-
-    enriched_no_content = (
-        q.order_by(EmailSent.scheduled_at.asc())
+        .order_by(EmailSent.scheduled_at.asc())
         .limit(MAX_GENERATE_PER_CYCLE)
         .all()
     )
@@ -713,41 +412,17 @@ def _generate_pending(db) -> int:
             )
             continue
 
-        # assigned_style now stores the team-size band. Rows written before the
-        # style system was retired hold a legacy style name; generate_email_for_lead
-        # re-infers the band when it doesn't recognise the value.
-        band = email.assigned_style or ""
-
-        # Load research only if the depth guard cleared it. survives_swap=True means
-        # the line would read true for anyone in this chair, so it was rejected and
-        # this email drops to the bare ask.
-        research = None
-        from database.models import LeadResearch, lead_person_key
-        _pk = lead_person_key(lead)
-        lr = db.query(LeadResearch).filter_by(person_key=_pk).first() if _pk else None
-        if lr and lr.survives_swap is False and lr.recipient_clause:
-            research = {
-                "quote": lr.quote,
-                # The RECIPIENT-ONLY clause, never the fused synthesis_line. The email
-                # prompt renders this as a fact about the recipient, so handing it the
-                # fused line makes the sender's own method read as the recipient's —
-                # the email then compliments them on the sender's idea.
-                "belief": lr.recipient_clause,
-                "move": lr.live_move,
-                "source_url": lr.quote_source_url,
-            }
+        style = email.assigned_style or "warm_intro"
 
         try:
-            subject, body = generate_email_for_lead(
-                lead, candidate, band, user_name=user_name, research=research,
-            )
+            subject, body = generate_email_for_lead(lead, candidate, style, user_name=user_name)
             email.subject = subject
             email.body = body
             email.status = "queued"  # Ready for Phase 3 (send)
             db.commit()
             generated_count += 1
-            logger.info("[JIT-GENERATE] Generated email %d for lead %d (%s), band=%s",
-                        email.id, lead.id, lead.name, band)
+            logger.info("[JIT-GENERATE] Generated email %d for lead %d (%s), style=%s",
+                        email.id, lead.id, lead.name, style)
 
         except ContentFilterError as e:
             # Permanent block — retrying the same prompt will never succeed.
@@ -763,27 +438,6 @@ def _generate_pending(db) -> int:
             # Don't mark as failed — retry next cycle (within the 3-hour window)
 
     return generated_count
-
-
-def _has_due_email(db) -> bool:
-    """True if any email is already due to send.
-
-    Research (Phase 0) makes up to three sequential HTTP calls and can block for
-    close to a minute. Sending is time-critical and must never queue behind it, so
-    a cycle with work due skips research entirely and picks it up next time.
-    """
-    now = datetime.utcnow()
-    return db.query(
-        db.query(EmailSent)
-        .join(Campaign, EmailSent.campaign_id == Campaign.id)
-        .filter(
-            Campaign.status == "running",
-            EmailSent.status.in_(["queued", "followup_pending"]),
-            EmailSent.scheduled_at.isnot(None),
-            EmailSent.scheduled_at <= now,
-        )
-        .exists()
-    ).scalar()
 
 
 # ── JIT Phase 3: Send Ready Emails (unchanged logic) ────────────────────────
@@ -986,29 +640,13 @@ def _process_followups(db) -> tuple:
             failed_count += 1
             continue
 
-        # If a reply came in anywhere on the thread, cancel this follow-up.
-        # Checking only the parent (Touch 1) let a lead who ignored T1 but replied
-        # to T2 still receive T3, since T3 is parented to T1 for threading.
-        thread_touches = (
-            db.query(EmailSent)
-            .filter(
-                EmailSent.campaign_id == fu.campaign_id,
-                EmailSent.lead_id == fu.lead_id,
-                EmailSent.id != fu.id,
-            )
-            .all()
-        )
-        replied_touch = next(
-            (t for t in thread_touches
-             if t.reply_received_at is not None or t.status == "replied"),
-            None,
-        )
-        if replied_touch is not None:
+        # If a reply came in on the thread, cancel this follow-up
+        if parent.reply_received_at is not None or parent.status == "replied":
             fu.status = "cancelled_reply"
             db.commit()
             cancelled_count += 1
-            logger.info("[FOLLOWUP] Follow-up %d cancelled — touch %d received reply",
-                        fu.id, replied_touch.id)
+            logger.info("[FOLLOWUP] Follow-up %d cancelled — parent %d received reply",
+                        fu.id, parent.id)
             continue
 
         # Skip if parent bounced or failed
@@ -1364,52 +1002,31 @@ def _check_replies(db):
 def _process_cycle():
     """Run all JIT phases in sequence.
 
-    Phase 3 (send) runs FIRST when anything is due, because it is time-critical and
-    research can block for up to a minute on three sequential HTTP calls. Research
-    then fills the remainder of the cycle.
-
-    Phase 3: Send ready emails (~1s)          [time-critical, runs first if due]
-    Phase 0: Research one upcoming lead (slow, network-bound)
     Phase 1: Enrich upcoming leads (~0.6s)
     Phase 2: Generate email content (~2s)
+    Phase 3: Send ready emails (~1s)
     Phase 4: Check replies/bounces (throttled to every 5 min)
+    Total: ~3.6s worst case, under 5s k8s health check limit.
 
     Returns dict with counts from each phase.
     """
     db = SessionLocal()
     result = {
-        "researched": 0, "enriched": 0, "generated": 0, "sent": 0, "failed": 0,
+        "enriched": 0, "generated": 0, "sent": 0, "failed": 0,
         "replies": 0, "bounces": 0,
         "followups_sent": 0, "followups_cancelled": 0, "followups_failed": 0,
     }
     try:
-        # Phase 3 first when work is due: sending is time-critical and must never
-        # queue behind research's three sequential HTTP calls.
-        due = _has_due_email(db)
-        if due:
-            sent, failed = _send_ready(db)
-            result["sent"] += sent
-            result["failed"] += failed
-
-        # Phase 0: Research one upcoming lead. Slow and network-bound. Skipped on
-        # cycles with due work — but only after that work has been sent above, so
-        # a busy campaign cannot starve research indefinitely.
-        try:
-            result["researched"] = _research_upcoming(db)
-        except Exception as e:
-            logger.error("[RESEARCH] Phase 0 error: %s", e, exc_info=True)
-
         # Phase 1: Enrich upcoming leads
         result["enriched"] = _enrich_upcoming(db)
 
         # Phase 2: Generate email content for enriched leads
         result["generated"] = _generate_pending(db)
 
-        # Phase 3: Send ready emails (Touch 1). May be a no-op when the early
-        # send above already drained the queue; accumulate rather than overwrite.
+        # Phase 3: Send ready emails (Touch 1)
         sent, failed = _send_ready(db)
-        result["sent"] += sent
-        result["failed"] += failed
+        result["sent"] = sent
+        result["failed"] = failed
 
         # Phase 3b: Send due follow-ups as Gmail thread replies
         fu_sent, fu_cancelled, fu_failed = _process_followups(db)
@@ -1434,9 +1051,9 @@ def _process_cycle():
         db.close()
 
     if any(v > 0 for v in result.values()):
-        logger.info("[CYCLE] researched=%d enriched=%d generated=%d sent=%d failed=%d replies=%d bounces=%d",
-                    result["researched"], result["enriched"], result["generated"],
-                    result["sent"], result["failed"], result["replies"], result["bounces"])
+        logger.info("[CYCLE] enriched=%d generated=%d sent=%d failed=%d replies=%d bounces=%d",
+                    result["enriched"], result["generated"], result["sent"], result["failed"],
+                    result["replies"], result["bounces"])
 
     return result
 

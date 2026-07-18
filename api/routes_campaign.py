@@ -255,11 +255,9 @@ async def api_create_campaign(
             credits.used_credits += required
             db.flush()  # write to DB within transaction before slow AI generation
 
-        # The style system is retired: there is one email shape, and voice is set by
-        # the lead's inferred team-size band. `selected_styles` is now only a legacy
-        # flag distinguishing AI generation from template mode; its contents are ignored.
+        # Default to AI styles if none provided — never silently fall back to blank template
         if not request.selected_styles:
-            request.selected_styles = ["ai"]
+            request.selected_styles = ["warm_intro", "value_prop"]
 
         # Use AI generation if styles are selected
         if request.selected_styles:
@@ -420,31 +418,16 @@ async def preview_email(
         raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
 
-def _schedule_top_lead_research(background_tasks: BackgroundTasks, result: dict) -> None:
-    """Queue top-lead research after a campaign first enters 'running'.
-
-    Runs as a BackgroundTask because it makes ~40-60s of blocking HTTP + LLM calls;
-    invoked inline it would block the event loop of these `async def` handlers and
-    starve /health. Skipped on resume (paused -> running) since the top lead was
-    already researched at the original launch.
-    """
-    if result.get("new_status") == "running" and result.get("old_status") == "draft":
-        from services.email_campaign.campaign_worker import research_top_lead_bg
-        background_tasks.add_task(research_top_lead_bg, result["campaign_id"])
-
-
 @router.post("/{campaign_id}/transition")
 async def api_transition_campaign(
     campaign_id: int,
     request: CampaignTransitionRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Transition a campaign to a new state."""
     try:
         result = transition_campaign(db, campaign_id, request.target_status)
-        _schedule_top_lead_research(background_tasks, result)
         return {"status": "success", **result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -453,14 +436,12 @@ async def api_transition_campaign(
 @router.post("/{campaign_id}/send")
 async def api_start_campaign(
     campaign_id: int,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Start sending emails for a campaign."""
     try:
         result = transition_campaign(db, campaign_id, "running")
-        _schedule_top_lead_research(background_tasks, result)
         campaign = db.query(Campaign).filter_by(id=campaign_id).first()
         capture("campaign_started", str(current_user.id), {
             "campaign_id": campaign_id,
@@ -981,8 +962,7 @@ async def send_test_emails(
 
     created_emails = []
     for recipient in payload.recipients:
-        # Test rows have no lead to infer a band from; 'small' is the neutral default.
-        style = "small"
+        style = (campaign.selected_styles[0] if campaign.selected_styles else "warm_intro")
         email_row = EmailSent(
             campaign_id=campaign_id,
             lead_id=None,

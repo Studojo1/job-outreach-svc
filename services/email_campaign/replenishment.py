@@ -170,26 +170,10 @@ def add_replacement_lead(
 
     scheduled_at = _next_schedule_slot(db, campaign_id)
 
-    # status is ALWAYS 'pending_enrichment', even when the lead already has a
-    # verified email.
-    #
-    # This previously read `"pending_enrichment" if not new_lead.email else "queued"`.
-    # Only _generate_pending() writes subject/body, and it selects solely on
-    # status == 'pending_enrichment'. So a row born 'queued' can never be generated:
-    # it reaches _send_ready() with body=None and dies in MIMEText(None, "plain")
-    # -> AttributeError: 'NoneType' object has no attribute 'encode' -> marked failed.
-    #
-    # It has never fired in practice (staging: 0 such rows), because _pick_next_lead
-    # usually returns a lead that JIT enrichment fills in AFTER the row is created.
-    # But it is reachable: 2394 leads are enriched and not yet in any campaign, and
-    # any one of them promoted as a replacement would take the dead branch.
-    # create_campaign() has always used 'pending_enrichment' unconditionally; match it.
-    # enrichment_status still carries the enrichment state, so Phase 1 skips Apollo
-    # for an already-enriched lead and no credit is re-spent.
     new_email = EmailSent(
         campaign_id=campaign_id,
         lead_id=new_lead.id,
-        status="pending_enrichment",
+        status="pending_enrichment" if not new_lead.email else "queued",
         enrichment_status="pending" if not new_lead.email else "enriched",
         scheduled_at=scheduled_at,
         followup_number=0,

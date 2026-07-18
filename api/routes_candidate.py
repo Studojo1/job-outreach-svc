@@ -599,11 +599,7 @@ async def get_candidate_leads(
 class FlexNotesRequest(BaseModel):
     best_project: str = ""
     outcome: str = ""
-    # Q3: the work-principle — the one choice or trick that made it work.
-    # Replaces the retired `why_now`. Consumed as synthesis match-material, never
-    # surfaced to the email prompt as a leading SENDER field.
-    work_principle: str = ""
-    why_now: str = ""  # deprecated; accepted so in-flight clients don't 422
+    why_now: str = ""
     # The LinkedIn onboarding form (linkedin.onboarding.profile) sends the
     # user's typed target role + location. It wraps them in a nested
     # `flex_notes` object, so accept that shape too. These drive lead discovery
@@ -622,7 +618,7 @@ async def save_flex_notes(
     db: Session = Depends(get_db),
 ):
     """Save flex notes. Two callers share this:
-      - the quiz/debrief sends best_project/outcome/work_principle (email personalisation)
+      - the quiz/debrief sends best_project/outcome/why_now (email personalisation)
       - the LinkedIn onboarding sends target_role_user_input/location_user_input
     so we MERGE into flex_notes rather than clobber the other caller's fields."""
     candidate = db.query(Candidate).filter(
@@ -633,14 +629,11 @@ async def save_flex_notes(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     flex = dict(candidate.flex_notes or {})
-    # Debrief fields — only write the ones the debrief actually supplied, so a
-    # partial save cannot blank a sibling answer.
-    if request.best_project:
+    # Debrief fields — only write when the debrief actually supplied content.
+    if request.best_project or request.outcome or request.why_now:
         flex["best_project"] = request.best_project.strip()
-    if request.outcome:
         flex["outcome"] = request.outcome.strip()
-    if request.work_principle:
-        flex["work_principle"] = request.work_principle.strip()
+        flex["why_now"] = request.why_now.strip()
 
     # LinkedIn onboarding targeting — accept either flat fields or the nested
     # `flex_notes` object the onboarding form actually sends.

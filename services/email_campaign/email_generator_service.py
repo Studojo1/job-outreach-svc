@@ -1,13 +1,10 @@
 """Email Generator Service — Structured pipeline for human-sounding outreach.
 
 Generates emails through a multi-stage pipeline:
-  candidate_profile_extraction -> lead_profile_extraction -> band_inference
+  candidate_profile_extraction -> lead_profile_extraction -> template_selection
   -> structured_email_generation -> tone_cleaner -> final_email
 
-There is ONE email shape. The lead's team-size band (solo/small/structured) sets
-voice and altitude only — it never changes the structure. The band is inferred
-from company size; the student never sees or picks it.
-
+Each style has a distinct email skeleton — not just a tone change.
 Hard rules: no em dashes, no AI phrasing, no copy-pasted resume language.
 """
 
@@ -22,57 +19,90 @@ from services.shared.ai.azure_openai_client import generate_json, ContentFilterE
 
 logger = get_logger(__name__)
 
-# ── Team-size bands ────────────────────────────────────────────────────────────
-# The ONLY per-lead variable. Sets voice and altitude; never structure.
-# Inferred from company size — the student never sees or picks this.
+# ── Style definitions ──────────────────────────────────────────────────────────
 
-BAND_SOLO = "solo"
-BAND_SMALL = "small"
-BAND_STRUCTURED = "structured"
-
-BAND_VOICE = {
-    BAND_SOLO: (
-        "VOICE: They are the whole company, or close to it. Write to a person who "
-        "makes every call themselves and reads their own inbox. Direct, unceremonious, "
-        "zero process language. No 'your team' — it's them."
-    ),
-    BAND_SMALL: (
-        "VOICE: A small team where the recipient still touches the work. "
-        "Collegial and concrete. They care about what got built, not credentials."
-    ),
-    BAND_STRUCTURED: (
-        "VOICE: An established org with process. The recipient is one node in a larger "
-        "system and is likely to route you rather than decide. Be brief and easy to forward. "
-        "Respect their time; do not assume they own hiring."
-    ),
+STYLE_DESCRIPTIONS = {
+    "warm_intro": {
+        "tone": "Warm, genuine, humble",
+        "hook_style": "mention something you noticed about their team or role",
+        "soft_ask": "ask if they'd be open to pointing you in the right direction",
+    },
+    "value_prop": {
+        "tone": "Professional, specific, grounded",
+        "hook_style": "reference a specific area their team works on that relates to your skills",
+        "soft_ask": "ask if there's someone on their team you should talk to",
+    },
+    "company_curiosity": {
+        "tone": "Genuinely curious, low-key",
+        "hook_style": "mention something the company is building or working on that caught your eye",
+        "soft_ask": "ask if they have a few minutes to chat about what their team is working on",
+    },
+    "peer_to_peer": {
+        "tone": "Casual, collegial",
+        "hook_style": "connect on a shared technical interest or tool",
+        "soft_ask": "suggest a quick chat about shared interests",
+    },
+    "direct_ask": {
+        "tone": "Concise, respectful, no fluff",
+        "hook_style": "state directly why you're reaching out to them specifically",
+        "soft_ask": "ask clearly if they know of any open roles or who to contact",
+    },
 }
 
-
-def infer_band(lead: Lead) -> str:
-    """Infer the team-size band from company size. System-only, never user-facing."""
-    size = (lead.company_size or "").strip()
-    if size in ("1-10",):
-        return BAND_SOLO
-    if size in ("11-50", "51-200"):
-        return BAND_SMALL
-    if size:
-        return BAND_STRUCTURED
-    # Unknown size: 'small' is the safest middle — reads fine to both a founder
-    # and a manager, whereas 'solo' misfires badly at a 5000-person company.
-    return BAND_SMALL
-
-
-# The single email shape. One structure for every lead, in every band.
-# Slot 2 (the synthesis line) is filled by deep lead research when it clears the
-# depth guard; otherwise it is omitted entirely and the email drops to the bare ask.
-EMAIL_SHAPE = (
-    "STRUCTURE:\n"
-    "1. GREETING: Use exactly \"{greeting}\"\n"
-    "{body_instruction}\n"
-    "{final_slot}. Close with this exact question: \"{why_this_person}\" "
-    "Then sign off with \"{signoff}\".\n\n"
-    "{word_target}"
-)
+# Per-style email skeletons — each style has a genuinely different structure, not just a tone change.
+# Variables filled via .format() in _build_generation_prompt().
+STYLE_STRUCTURES = {
+    "warm_intro": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. One casual observational sentence about {company} or {lead_name}'s team. "
+        "Genuine personal discovery — not flattery, not a company summary. {hook_instruction}\n"
+        "3. One understated sentence about your background. Mention your work briefly. "
+        "Don't open with it. {signal_instruction}\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\". "
+        "No separate closing pleasantry needed.\n\n"
+        "Word target: 75-95 words. Humble, warm, conversational. Company hook comes before credentials."
+    ),
+    "value_prop": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Lead with YOUR work — this is the FIRST sentence after the greeting. "
+        "State the concrete thing you built and its outcome metric. {signal_instruction}\n"
+        "3. Connect your work to what {company} does in one sentence. "
+        "Why does your background matter to them specifically? {hook_instruction}\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
+        "Word target: 85-110 words. Specific, confident. Your work leads — company hook is the bridge."
+    ),
+    "company_curiosity": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Spend 2 sentences on what {company} is doing or building. "
+        "This is 60-70% of the email. Genuine curiosity about their work — "
+        "not a compliment about the company. {hook_instruction}\n"
+        "3. One brief sentence about yourself: what you've built or your field. Keep it minimal.\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
+        "Word target: 80-100 words. The candidate barely features — this email is mostly about their work."
+    ),
+    "peer_to_peer": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Open with a collegial observation about their role, their team's work, "
+        "or a tool/problem in the space. Write like a Slack DM, not a job application. {hook_instruction}\n"
+        "3. Introduce yourself briefly as a peer — what you work on. One sentence. "
+        "Do NOT say you're looking for a job or opportunities.\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
+        "Word target: 65-85 words. Zero job-seeker language. Peer-to-peer only."
+    ),
+    "direct_ask": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. One sentence only: what you built + key impact metric. "
+        "Start with 'I built' or 'I worked on'. {signal_instruction}\n"
+        "3. One sentence: why you're reaching out to {lead_name} at {company} specifically.\n"
+        "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
+        "Word target: 50-70 words ONLY. Deliberately short. Busy people appreciate brevity."
+    ),
+}
 
 # ── Variation pools ────────────────────────────────────────────────────────────
 
@@ -270,10 +300,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     else:
         signal = _build_candidate_signal(name, primary_field, key_skills, recent_project, education)
 
-    # Q3 answer: the one choice or trick that made the project work. Carried as
-    # synthesis match-material for the research join — never emitted as a leading
-    # SENDER field in the prompt.
-    work_principle = flex.get("work_principle", "").strip()
+    why_now = flex.get("why_now", "").strip()
     # Optional credibility marker the user wants in every email (e.g. school /
     # recent-grad status). Only set when flex_notes.credential exists, so this is
     # opt-in per candidate and does not change behaviour for everyone else.
@@ -290,7 +317,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         "short_candidate_signal": signal,
         "has_flex_notes": bool(flex.get("best_project")),
         "candidate_city": candidate_city,
-        "work_principle": work_principle,
+        "why_now": why_now,
         "credential": credential,
     }
 
@@ -525,20 +552,44 @@ def _build_contextual_hook(company: str, role: str, industry: str, department: s
     return random.choice(hooks)
 
 
-# ── Stage 3: Band Assignment ───────────────────────────────────────────────────
+# ── Stage 3: Style Assignment ──────────────────────────────────────────────────
 
-def assign_style(lead: Lead, selected_styles: list | None = None) -> str:
-    """Deprecated name, kept so existing call sites keep working.
+def assign_style(lead: Lead, selected_styles: list) -> str:
+    """Assign the best email style to a lead based on their title and company size."""
+    if not selected_styles:
+        return "warm_intro"
+    if len(selected_styles) == 1:
+        return selected_styles[0]
 
-    The style system is retired: there is one email shape. This now returns the
-    inferred team-size band, which is what gets persisted to
-    EmailSent.assigned_style and read back at generation time.
-    `selected_styles` is ignored.
-    """
-    band = infer_band(lead)
-    logger.info("[EmailGen] Band '%s' for %s at %s (size=%s)",
-                band, lead.name, lead.company, lead.company_size or "unknown")
-    return band
+    scores: Dict[str, int] = {}
+    title_lower = (lead.title or "").lower()
+
+    for style in selected_styles:
+        score = 0
+        if style == "warm_intro":
+            if lead.company_size in ["1-10", "11-50"]:
+                score += 3
+            if any(t in title_lower for t in ["founder", "ceo", "head of", "owner"]):
+                score += 2
+        elif style == "value_prop":
+            if lead.company_size in ["51-200", "201-1000", "1001-5000"]:
+                score += 3
+            if any(t in title_lower for t in ["manager", "director", "head", "lead"]):
+                score += 2
+        elif style == "company_curiosity":
+            if lead.company_size in ["11-50", "51-200"]:
+                score += 3
+        elif style == "peer_to_peer":
+            if any(t in title_lower for t in ["engineer", "analyst", "developer", "designer"]):
+                score += 3
+        elif style == "direct_ask":
+            if any(t in title_lower for t in ["vp", "director", "cto", "chief"]):
+                score += 3
+        scores[style] = score
+
+    best_style = max(scores, key=scores.get)
+    logger.info("[EmailGen] Style '%s' for %s at %s (scores: %s)", best_style, lead.name, lead.company, scores)
+    return best_style
 
 
 # ── Stage 4: Structured Email Generation ───────────────────────────────────────
@@ -546,99 +597,91 @@ def assign_style(lead: Lead, selected_styles: list | None = None) -> str:
 def _build_generation_prompt(
     candidate_profile: dict,
     lead_profile: dict,
-    band: str,
-    research: dict | None = None,
+    style: str,
 ) -> str:
-    """Build the prompt for the single email shape.
+    """Build the structured prompt for email generation.
 
-    `band` sets voice and altitude only. `research` carries the deep per-lead
-    findings that a synthesis line is built from; when it is None (no research,
-    or the depth guard rejected it) the email drops to the bare ask.
+    Each style gets its own structural skeleton — not just a tone change.
     """
     greeting = random.choice(GREETINGS).replace("{name}", ((lead_profile["lead_name"] or "").split() or ["there"])[0])
+    closing = random.choice(CLOSINGS)
     signoff = random.choice(SIGNOFFS).replace(
         "{name}", ((candidate_profile["candidate_name"] or "").split() or ["Me"])[0]
     )
 
     has_flex = candidate_profile.get("has_flex_notes", False)
+    has_company_desc = lead_profile.get("has_company_description", False)
+    why_now = candidate_profile.get("why_now") or ""
 
     signal_instruction = (
         "SENDER SIGNAL describes something the sender BUILT or DID — it is NOT their job title. "
         "Frame it as 'I built...' or 'I worked on...' — never as identity ('I am a...'). "
         "Use it as the basis for one concrete sentence about their work and impact."
+        + (
+            " SENDER MOTIVATION explains why they are specifically targeting this type of role — "
+            "weave it naturally into the closing or the ask so the email feels intentional, not opportunistic."
+            if why_now else ""
+        )
         if has_flex else
         "Reference a specific skill or project from SENDER SIGNAL — not generic phrases like 'background in X'."
     )
-
-    if research:
-        # Synthesis line: names the lead's specific thing, joined to one true,
-        # smaller claim from the sender. Research already cleared the depth guard.
-        body_instruction = (
-            "2. SYNTHESIS LINE. Open with the recipient: restate ABOUT THE RECIPIENT "
-            "in your own words. Everything in that field is about THEM, never about the "
-            "sender. Then join it to one true, SMALLER claim about the sender's own work. "
-            "Never attribute the sender's method, project, or metric to the recipient, and "
-            "never compliment them on something the sender did.\n"
-            f"3. One understated sentence grounding the sender's work. {signal_instruction}"
-        )
-        final_slot = "4"
-        word_target = "Word target: 70-95 words."
-        guard = (
-            "\n\nFORBIDDEN IN THE SYNTHESIS LINE:\n"
-            "- Any claim of equivalence ('same bet', 'exactly what I did', 'we both')\n"
-            "- Any hedge ('feels relevant', 'seems similar', 'might align', 'resonates')\n"
-            "- Praising the person or the company\n"
-            "- Restating their point back to them without adding the sender's own claim"
-        )
-    else:
-        # No research cleared the guard. A shallow observation is worse than none:
-        # send the bare ask rather than a line that would fit anyone in this role.
-        body_instruction = (
-            f"2. One understated sentence about the sender's work. {signal_instruction} "
-            "Do NOT open with an observation about the company or the recipient. "
-            "You have no specific, verified fact about this person, and a generic "
-            "observation is worse than none."
-        )
-        final_slot = "3"
-        word_target = "Word target: 45-65 words ONLY. Deliberately short."
-        guard = (
-            "\n\nYou have NO researched fact about this recipient. Therefore:\n"
-            "- Do NOT open with 'I came across...', 'I noticed...', 'saw that...'\n"
-            "- Do NOT characterise their work, their team, or their company\n"
-            "- Do NOT use the COMPANY CONTEXT as an opener; it is background only\n"
-            "Go straight from the greeting to the sender's own work, then the ask."
-        )
-
-    structure = EMAIL_SHAPE.format(
-        greeting=greeting,
-        body_instruction=body_instruction,
-        final_slot=final_slot,
-        why_this_person=lead_profile["why_this_person"],
-        signoff=signoff,
-        word_target=word_target,
+    hook_instruction = (
+        "Use the COMPANY CONTEXT as the basis — it's what the company actually does. "
+        "Show you know what they're about, don't just name-drop the company."
+        if has_company_desc else
+        "Rephrase the COMPANY CONTEXT naturally — make it sound like something you personally noticed, "
+        "not a templated observation. Be specific to the company, not just the industry."
     )
 
-    synthesis = BAND_VOICE.get(band, BAND_VOICE[BAND_SMALL]) + guard
+    # Build the per-style structural template
+    structure_tmpl = STYLE_STRUCTURES.get(style, STYLE_STRUCTURES["warm_intro"])
+    structure = structure_tmpl.format(
+        greeting=greeting,
+        closing=closing,
+        signoff=signoff,
+        hook_instruction=hook_instruction,
+        signal_instruction=signal_instruction,
+        why_this_person=lead_profile["why_this_person"],
+        company=lead_profile["company_name"],
+        lead_role=lead_profile["lead_role"],
+        lead_name=((lead_profile["lead_name"] or "").split() or ["there"])[0],
+        job_interest=candidate_profile["job_interest"],
+    )
 
-    research_section = ""
-    if research:
-        rlines = []
-        if research.get("quote"):
-            rlines.append(f"THEIR WORDS (verbatim): \"{research['quote']}\"")
-        if research.get("belief"):
-            # This is the RECIPIENT-ONLY clause from the depth guard. It must never
-            # contain anything the sender did: the writer treats it as a fact about
-            # the recipient, so a fused line would credit them with the sender's work.
-            rlines.append(f"ABOUT THE RECIPIENT (verified; use as the opener): {research['belief']}")
-        if research.get("move"):
-            rlines.append(f"A LIVE MOVE (light texture only): {research['move']}")
-        if research.get("source_url"):
-            rlines.append(f"SOURCE: {research['source_url']}")
-        if rlines:
-            research_section = "\n\nRESEARCH ON THIS SPECIFIC PERSON:\n" + "\n".join(rlines)
+    # Synthesis note — make the connection between signal and company explicit
+    synthesis = (
+        "SYNTHESIS: Don't just list your background and then ask. "
+        "Make the connection: why would someone who built what you built be valuable to a company that does what "
+        f"{lead_profile['company_name']} does? One sentence that links your work to their context is worth more "
+        "than two sentences that don't connect. The email must feel written specifically for this company."
+    )
+    if has_company_desc:
+        synthesis += (
+            f" You have real context about what {lead_profile['company_name']} does — use it to show you did "
+            "your homework, not just to prove you know what they do."
+        )
+
+    # Round-2 specificity push — when we have rich extracted facts, the
+    # email MUST cite at least one of them by name. This is what kills the
+    # "I came across X while researching companies at the intersection of AI"
+    # generic opener.
+    if lead_profile.get("what_they_build") or lead_profile.get("hiring_signal") or lead_profile.get("core_tech"):
+        synthesis += (
+            "\n\nSPECIFICITY (mandatory): you have STRUCTURED FACTS about this company "
+            "(WHAT THEY BUILD, CORE TECH STACK, HIRING NOW, RECENT NEWS / MOMENTUM, ACTIVE JOB POSTINGS). "
+            "The email MUST reference at least ONE of these facts by name in the opening sentence — "
+            "NOT 'I came across {company} while researching AI companies' or 'looks like your team is "
+            "doing fascinating work in AI' or any other generic intersection phrase. "
+            "Example good openings: "
+            "'Saw {company} is building [WHAT THEY BUILD] — same problem space as the [your project] I built.' "
+            "'{company} is hiring [HIRING NOW] which lines up with what I've been doing.' "
+            "'Noticed [RECENT MOMENTUM] — congrats. Reaching out because [link to your work].' "
+            "Pick the fact that genuinely connects to the sender's background; don't use facts as decoration."
+        ).replace("{company}", lead_profile["company_name"])
 
     candidate_city = candidate_profile.get("candidate_city") or ""
     city_line = f"\nSENDER CITY: {candidate_city}" if candidate_city else ""
+    why_now_line = f"\nSENDER MOTIVATION: {why_now}" if why_now else ""
     credential = candidate_profile.get("credential") or ""
     credential_line = (
         f"\nSENDER CREDENTIAL (MANDATORY, must appear in this email): {credential}. "
@@ -649,22 +692,25 @@ def _build_generation_prompt(
         if credential else ""
     )
 
-    # Company facts are BACKGROUND ONLY. They are identical for every lead at this
-    # company, so they can never carry the synthesis line — a line built from them
-    # would survive being sent to a different person in the same role, which is
-    # exactly what the depth guard rejects. Industry is omitted entirely: it earns
-    # near-zero weight and only tints what kind of proof fits.
+    # ── Round-2 facts: include the structured per-company facts when we have
+    # them. These come from the company_fact_extractor LLM and contain the
+    # company's actual product, tech stack, recent news, and active hiring.
     facts_block = []
     if lead_profile.get("what_they_build"):
         facts_block.append(f"WHAT THEY BUILD: {lead_profile['what_they_build']}")
+    if lead_profile.get("primary_market"):
+        facts_block.append(f"PRIMARY MARKET: {lead_profile['primary_market']}")
     if lead_profile.get("core_tech"):
         facts_block.append(f"CORE TECH STACK: {', '.join(lead_profile['core_tech'])}")
     if lead_profile.get("recent_momentum"):
         facts_block.append(f"RECENT NEWS / MOMENTUM: {lead_profile['recent_momentum']}")
-    facts_section = (
-        "\n\nCOMPANY BACKGROUND (context for you; NOT a hook, do not open with it):\n"
-        + "\n".join(facts_block)
-    ) if facts_block else ""
+    if lead_profile.get("hiring_signal"):
+        facts_block.append(f"HIRING NOW: {lead_profile['hiring_signal']}")
+    if lead_profile.get("recent_job_postings"):
+        titles = [jp.get("title") for jp in lead_profile["recent_job_postings"][:3] if jp.get("title")]
+        if titles:
+            facts_block.append(f"ACTIVE JOB POSTINGS: {', '.join(titles)}")
+    facts_section = ("\n\n" + "\n".join(facts_block)) if facts_block else ""
 
     prompt = f"""Write a short cold outreach email. Follow the STRUCTURE exactly.
 
@@ -672,11 +718,13 @@ SENDER: {candidate_profile['candidate_name']}
 SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
 SENDER FIELD: {candidate_profile['primary_field']}
 SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{credential_line}{city_line}
+SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{credential_line}{city_line}{why_now_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
-WHY THIS PERSON: {lead_profile['why_this_person']}{research_section}{facts_section}
+COMPANY CONTEXT: {lead_profile['contextual_hook']}
+DEPARTMENT: {lead_profile['department_hint']}
+WHY THIS PERSON: {lead_profile['why_this_person']}{facts_section}
 
 {structure}
 
@@ -746,30 +794,21 @@ def clean_tone(text: str) -> str:
 
 # ── Main Pipeline ──────────────────────────────────────────────────────────────
 
-def generate_email_for_lead(
-    lead: Lead,
-    candidate: Candidate,
-    band: str = "",
-    user_name: str = "",
-    research: dict | None = None,
-) -> Tuple[str, str]:
-    """Generate a human-sounding outreach email in the single email shape.
+def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_name: str = "") -> Tuple[str, str]:
+    """Generate a human-sounding outreach email through the structured pipeline.
 
     Pipeline stages:
       1. Extract candidate profile
       2. Extract lead profile
-      3. Resolve team-size band (voice/altitude only)
-      4. Build prompt and generate via LLM
+      3. Build structured prompt
+      4. Generate via LLM
       5. Clean tone
       6. Validate
 
     Args:
-        band: Team-size band. Falls back to inference when not supplied.
         user_name: The sender's display name (e.g. from User.name). Used as
                    fallback when the resume parser doesn't extract a name,
                    preventing the sign-off from defaulting to "Me".
-        research: Deep per-lead findings that cleared the depth guard. When None,
-                  the email drops to the bare ask.
 
     Returns:
         Tuple of (subject, body) strings.
@@ -780,12 +819,8 @@ def generate_email_for_lead(
     # Stage 2: Lead profile extraction
     lead_profile = extract_lead_profile(lead)
 
-    # Stage 3: Band. Older rows persisted a style name here; re-infer in that case.
-    if band not in (BAND_SOLO, BAND_SMALL, BAND_STRUCTURED):
-        band = infer_band(lead)
-
-    # Stage 4: Build prompt and generate
-    prompt = _build_generation_prompt(candidate_profile, lead_profile, band, research=research)
+    # Stage 3-4: Build prompt and generate
+    prompt = _build_generation_prompt(candidate_profile, lead_profile, style)
 
     schema = {
         "type": "object",
@@ -797,8 +832,8 @@ def generate_email_for_lead(
     }
 
     try:
-        logger.info("[EmailGen] Generating for %s (%s) at %s, band=%s, research=%s",
-                    lead.name, lead.title, lead.company, band, bool(research))
+        logger.info("[EmailGen] Generating for %s (%s) at %s, style=%s",
+                    lead.name, lead.title, lead.company, style)
 
         cred = candidate_profile.get("credential") or ""
         # Acronym tokens (e.g. 'HEC') let us verify the credential actually landed
@@ -847,13 +882,8 @@ def generate_email_for_lead(
 
 # ── Follow-up Email Generation ────────────────────────────────────────────────
 
-def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str, str] | None:
-    """Pick one project from the candidate's resume that wasn't mentioned in the original email.
-
-    Returns None when the candidate has no real project to draw on. Callers must
-    fall back to a bare nudge rather than inventing one: a fabricated project is a
-    false claim made in the student's name.
-    """
+def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str, str]:
+    """Pick one project from the candidate's resume that wasn't mentioned in the original email."""
     body_lower = (parent_body or "").lower()
 
     projects = []
@@ -877,7 +907,9 @@ def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str,
     if projects:
         return projects[0]
 
-    # Fall back to flex_notes.best_project before giving up.
+    # Fall back to flex_notes.best_project before using a generic placeholder.
+    # This prevents the LLM from hallucinating a fabricated project when the
+    # candidate has real experience stored in flex_notes but no structured resume projects.
     flex = candidate.flex_notes or {}
     if flex.get("best_project"):
         desc = flex["best_project"].strip()
@@ -885,7 +917,10 @@ def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str,
             desc += ". " + flex["outcome"].strip()
         return {"name": "project", "description": desc}
 
-    return None
+    return {
+        "name": "recent coursework",
+        "description": "hands-on student projects focused on user research and interface design",
+    }
 
 
 def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, followup_number: int) -> str:
@@ -922,38 +957,9 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
         project = _extract_unused_project(candidate, parent_body)
 
         linkedin_line = (
-            f'\nAfter the final sentence, add one line on its own: "Here\'s my LinkedIn if you\'d like to connect: {linkedin_url}" — output this exactly.'
+            f'\nAfter Sentence 3, add one final line on its own: "Here\'s my LinkedIn if you\'d like to connect: {linkedin_url}" — output this exactly.'
             if linkedin_url else ""
         )
-
-        if project is None:
-            # No real project left to cite. Send a bare nudge rather than invent one.
-            prompt = f"""Ghostwrite a 2-sentence follow-up email for {candidate_name}, a student.
-
-Recipient: {lead_first}, {lead_title} at {lead_company}. This bumps an earlier email that got no reply.
-
-Write the email body ONLY (greeting + 2 sentences + sign-off). Exactly 2 sentences:
-
-Sentence 1: Bump the thread in one casual line. Use something like "just bumping this up" or "wanted to resurface this". Do NOT say "following up on my previous note" or "just checking in".
-
-Sentence 2: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"{linkedin_line}
-
-Do NOT mention any project, skill, coursework, or achievement. You have no facts about this person's work. Inventing one is forbidden.
-
-Format:
-- Start with "Hi {lead_first},"
-- Sign off: "{first_name_candidate}" on its own line, nothing else
-- Body total under 35 words"""
-
-            result = generate_json(
-                prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
-                deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
-            )
-            body = clean_tone((result.get("body") or "").strip())
-            if not body or len(body) < 20:
-                raise ValueError(f"Follow-up body too short for {lead.name}")
-            logger.info("[Followup] Generated bare-nudge touch 2 for %s (no project available)", lead.name)
-            return body
 
         prompt = f"""Ghostwriting a short follow-up email for {candidate_name}, a student looking for internship roles.
 
