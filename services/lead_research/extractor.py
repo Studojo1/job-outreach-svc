@@ -95,31 +95,26 @@ behavioural: something true about how this person thinks or what they have been 
 which has little to do with their job. A stated opinion, a setback, an unguarded take.
 Not a skill. Not an achievement award unless the award reveals something about them.
 
-reflected_skills: ALWAYS produce this when you know their function and their company.
-It is the fallback that makes almost every lead writable, and it must be null only when
-you genuinely do not know what they do.
-
+reflected_skills: THE LAST RESORT, used only when the three fields above are all null.
 Not what they are called. What someone doing this FUNCTION at this KIND of company would
-have actually learned to handle. You have the title and the company; that is enough. Name
-the recurring problem that combination creates.
+have actually learned to handle. Reason from the specific combination, never the abstract
+role.
 
-  Anchor it to the concrete: the function, and what that company actually sells or does.
-  Then state the problem that pairing produces day to day.
+  Anchor it to the concrete: the function, the company and what that company sells, and
+  any tenure the research explicitly states. Then name the recurring problem that
+  combination creates.
 
   Good: "vendor contracts at a footwear brand, where every new supplier is another
   agreement to paper before a launch can ship"
   Good: "logistics for a company moving physical goods to customers, where a delayed
   shipment is a refund"
-  Good: "strategy at a workforce-management company, where every product bet has to
-  survive contact with how real shift schedules actually behave"
   Bad: "as a compliance specialist you value accurate contracts"  (the role in the
-  abstract, with no company in it)
+  abstract; true of every compliance specialist anywhere)
   Bad: "four years of experience"  (unless a snippet states the tenure)
 
-  INFER SKILLS, NEVER INVENT FACTS. Do not state tenure, headcount, funding, metrics, or
-  events the material does not contain. But the title and the company ARE stated facts:
-  reason from them freely. Returning null here because you are being cautious is the
-  wrong call. Return null ONLY if you do not know their function or their company.
+  INFER SKILLS, NEVER INVENT FACTS. Every noun must trace to something stated in the
+  MATERIAL. Do not state tenure, headcount, funding, metrics, growth, or events that
+  the material does not contain. If you cannot anchor it to a stated fact, return null.
 
 live_move: a recent company event (fundraise, launch, store opening) in one clause.
 Texture only.
@@ -300,28 +295,16 @@ work-anniversary post SURVIVES the swap when it is the BASIS of the line. Answer
 for all of them. (A company fact used as a bridge in part 2 is fine, because part 1
 already carries the line on its own.)
 
-IF YOU ARE USING LAYER 4 (what their work would have taught them), read the swap test
-carefully, because layer 4 is BY DEFINITION derived from their function and their
-company. Judged naively, it would always die, and that is wrong.
-
-The swap is: a DIFFERENT PERSON, same title, SAME COMPANY. It is NOT: the same title at
-a different company. So a line naming what this company actually does is doing real
-work. It would be false of someone with that title anywhere else, and that is what makes
-it worth sending.
+IF YOU ARE USING LAYER 4 (what their work would have taught them), the swap test is
+harsher, not softer. A sentence about the ROLE dies. A sentence about the specific
+COMBINATION of function + what this company actually sells can live, because that
+combination is not shared by everyone with the same title elsewhere.
 
   "As a compliance specialist you value accurate contracts"
-      -> survives. No company in it. True of every compliance specialist alive. Dies.
+      -> true. Every compliance specialist anywhere. It dies.
   "Papering a vendor agreement for every new supplier before a footwear drop can ship"
-      -> does not survive. That is compliance AT A SHOE COMPANY, not compliance in
-         general. SHIPS.
-  "Strategy at a workforce-management company, where every product bet has to survive
-   contact with how real shift schedules behave"
-      -> does not survive. Strategy at a bank looks nothing like this. SHIPS.
-
-Do NOT reject a layer-4 line merely because a colleague in the same seat would recognise
-it. Of course they would; they do the same job at the same company. The question is
-whether the sentence would still be true if you moved that person to a DIFFERENT company
-with the same title. If it would not, the line is doing its job.
+      -> false. That is compliance AT A SHOE COMPANY, not compliance in general.
+         Ships.
 
 Never state a fact the research did not give you: no tenure, no headcount, no funding,
 no metrics, no growth. Infer what the work teaches; never invent what happened.
