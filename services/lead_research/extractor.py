@@ -300,48 +300,6 @@ work-anniversary post SURVIVES the swap when it is the BASIS of the line. Answer
 for all of them. (A company fact used as a bridge in part 2 is fine, because part 1
 already carries the line on its own.)
 
-LAYER 4 USES A DIFFERENT SWAP. Read this carefully.
-
-Layer 4 (what their work would have taught them) is BY CONSTRUCTION derived from their
-function and their company. If you swap in a different person with the same title at the
-same company, a layer-4 line is ALWAYS still true of them. Judged that way it can never
-survive, and the layer would be useless. That is not the failure we are guarding against.
-
-For layer 4, swap the COMPANY, not the person:
-
-    Keep the person and their title. Move them to a DIFFERENT company.
-    Does the sentence still read as true?
-
-  survives_swap = true   -> the line is about the JOB TITLE in the abstract. It would
-                            work on anyone with that title anywhere. That is the generic
-                            opener we exist to kill. It dies.
-  survives_swap = false  -> the line only makes sense at THIS company, doing what THIS
-                            company does. It ships.
-
-  "As a compliance specialist you value accurate contracts"
-      -> move them to a bank: still true. Survives. DIES.
-  "Papering a vendor agreement for every new supplier before a footwear drop can ship"
-      -> move them to a bank: false, banks do not ship footwear drops. SHIPS.
-  "Leading technical development at Chexy taught you to scale systems for high payment
-   volumes"
-      -> move them to a design agency: false, no payment volume to scale. SHIPS.
-  "Marketing cybersecurity products taught you to distil complex technical concepts"
-      -> move them to a shoe brand: false, nothing complex or technical to distil.
-         SHIPS.
-
-Do NOT reject a layer-4 line because a colleague in the same seat would recognise it.
-They share the job AND the company; of course they would. Ask only whether the sentence
-would still be true if the person kept their title and changed employer.
-
-Layers 1-3 (their own words, their career trajectory, how they think) keep the ORIGINAL
-swap: different person, same title, same company. Those layers claim to be about the
-individual, so they must survive that harsher test.
-
-Anything drawn from a careers page, a testimonial, a company perk, a fundraise, or a
-work-anniversary post SURVIVES the swap when it is the BASIS of the line. Answer true
-for all of them. (A company fact used as a bridge in part 2 is fine, because part 1
-already carries the line on its own.)
-
 IF YOU ARE USING LAYER 4 (what their work would have taught them), read the swap test
 carefully, because layer 4 is BY DEFINITION derived from their function and their
 company. Judged naively, it would always die, and that is wrong.
