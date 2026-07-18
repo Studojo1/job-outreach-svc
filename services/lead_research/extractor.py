@@ -316,19 +316,8 @@ DECIDING ON THE BRIDGE (part 2).
 In `bridge_reasoning`, go through the company signals ONE AT A TIME. For each one,
 write a single line in exactly this form:
 
-    <signal> -> raises the recipient's workload, OR shows the company already
-                acknowledges the problem the sender solves? yes/no, because ...
-    <signal> -> does the sender's work address it? yes/no
-
-A signal qualifies on EITHER count:
-  (a) it makes the recipient's problem bigger  (twelve new stores -> more suppliers ->
-      more agreements to paper), OR
-  (b) it is an OPEN ROLE that matches THE SENDER IS LOOKING FOR. A matching open role
-      means the company has already admitted it needs exactly what the sender has
-      built. That is the strongest bridge available: it is not a generic company fact,
-      it is the collision between this recipient's workload and this sender's tooling.
-      Compare the open role to the sender's target role by MEANING, not exact wording
-      ("Legal Ops Associate" matches "legal ops analyst").
+    <signal> -> makes the recipient's problem bigger? yes/no, because ...
+    <signal> -> does the sender's work address that? yes/no
 
 Do this for every signal listed under WHAT THE COMPANY IS DOING. Do not summarise, do
 not skip any, and do not decide before you have written them all out.
@@ -346,20 +335,8 @@ A worked example of the reasoning:
         not fewer. I built a review tracker that cut turnaround from five days to one."
 
     "raised a Series B" -> bigger? no, funding does not add contracts to paper.
-    "hiring a Legal Ops Associate" (sender wants: legal ops analyst) -> qualifies on
-      (b): the role matches, so the company has already acknowledged the problem the
-      sender solves. -> sender addresses it? yes.
-      -> bridge_used = true
-      -> "...taught you to spot risk early, and with legal ops being staffed up that is
-          more agreements through one pipeline. I built a review tracker that cut
-          turnaround from five days to one."
-      NOTE the phrasing. NEVER write "I saw you are hiring a Legal Ops Associate" or
-      "I am applying for the Legal Ops Associate role". Reciting the job posting is a
-      job application, not a bridge, and the email already ends with the ask. The role
-      may only appear as the REASON the recipient's workload is changing.
-
-    "hiring a Warehouse Supervisor" (sender wants: legal ops analyst) -> qualifies on
-      (b)? no, the role does not match. On (a)? no. -> omit.
+    "hiring a Legal Ops Associate" -> bigger? no. Naming an open role is a job
+      application, not a bridge. The email already ends with the ask.
 
 The bridge is a subordinate clause. It never opens the sentence, never stands alone, and
 the recipient's clause must still read true with the bridge deleted.
