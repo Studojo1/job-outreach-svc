@@ -216,12 +216,6 @@ def _ships(verdict, layers=LAYERS):
     return r["survives_swap"] is False and bool(r.get("recipient_clause"))
 
 
-def _guard(verdict, layers=LAYERS, **kw):
-    VERDICT.clear(); VERDICT.update(verdict)
-    return ex.run_depth_guard(layers, "S", "Head of Logistics", "Neeman's",
-                              "batched writes", "bot", **kw)
-
-
 check("role-generic line is REJECTED (survives the swap)",
       not _ships({"synthesis_line": "As Head of Logistics you care about cost",
                   "survives_swap": True, "layer": "derived_operational", "reason": "r"}))
@@ -245,23 +239,6 @@ check("ATTRIBUTION: a verdict WITH a clean recipient_clause ships",
       _ships({"synthesis_line": "X taught you Y, and Z taught me W",
               "recipient_clause": "X taught you Y",
               "survives_swap": False, "layer": "quote", "reason": "r"}))
-check("BRIDGE: a company signal is separated into bridge_clause, never merged into "
-      "recipient_clause. CompanyProfile is keyed on `domain`, so every fact in it is "
-      "identical for every lead there; merged in, it would be attributed to the person.",
-      _guard({"synthesis_line": "A taught you B, and 12 stores means more C. I did D",
-              "recipient_clause": "A taught you B", "bridge_clause": "12 stores means more C",
-              "bridge_used": True, "survives_swap": False, "layer": "quote",
-              "reason": "r"}).get("bridge_clause") == "12 stores means more C")
-check("BRIDGE: no company signal -> bridge_clause is None, email drops the clause",
-      _guard({"synthesis_line": "A taught you B, and I did D",
-              "recipient_clause": "A taught you B", "bridge_clause": "",
-              "bridge_used": False, "survives_swap": False, "layer": "quote",
-              "reason": "r"}).get("bridge_clause") is None)
-check("BRIDGE: a company signal ALONE can never carry a line -- no carrier layer "
-      "means bare ask, without even calling the LLM",
-      _guard({}, layers={k: None for k in ex.LAYER_PRIORITY},
-             company_signals={"recent_momentum": "raised a Series B",
-                              "hiring_signal": "hiring"}).get("survives_swap") is True)
 check("only a live_move available -> reject without an LLM call "
       "(texture can never carry the line)",
       not _ships({}, {"quote": None, "derived_operational": None,

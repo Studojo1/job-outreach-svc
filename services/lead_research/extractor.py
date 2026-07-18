@@ -206,55 +206,29 @@ THE SENDER'S WORK-PRINCIPLE (the one choice or trick that made their own project
 THE SENDER'S PROJECT:
 {sender_project}
 
-THE SENDER IS LOOKING FOR:
-{sender_target_role}
+Write a sentence that names the recipient's specific thing, then joins it to ONE true,
+SMALLER claim about the sender. The sender's claim must be the smaller of the two. Saying
+so plainly is what makes it land.
 
-WHAT THE COMPANY IS DOING (bridge material only, NEVER the basis of the line):
-{signals_block}
+Return TWO fields:
+  synthesis_line   the full sentence, both halves.
+  recipient_clause ONLY the half about the recipient, with the sender's half stripped
+                   out entirely. It must contain nothing the sender did. This is the
+                   only part the email writer will see attributed to the recipient.
 
-Write the line in up to THREE parts, in this order:
-
-  1. RECIPIENT (always)  the specific thing they do or said. This opens the sentence.
-  2. BRIDGE (only if it earns its place)  what the company is doing, stated as the
-     reason the recipient's problem is growing right now. One subordinate clause.
-     Include it ONLY when it makes the recipient's work and the sender's work collide.
-     Omit it entirely otherwise. It never opens the sentence and never stands alone.
-  3. SENDER (always)  ONE true, SMALLER claim about the sender. Smaller than the
-     recipient's. Saying so plainly is what makes it land.
-
-Return FOUR fields:
-  synthesis_line   the full sentence, all parts you used.
-  recipient_clause ONLY part 1, with the bridge AND the sender's half stripped out. It
-                   must contain nothing the sender did and no company fact. This is the
-                   only text the email writer will attribute to the recipient.
-  bridge_clause    ONLY part 2, the company-signal clause, or "" if you omitted it. It
-                   is a fact about the COMPANY, never about the recipient personally.
-  bridge_used      true if you included part 2, false if you omitted it.
-  survives_swap    see the swap test below.
-
-Example WITH a bridge (the company signal earns its place):
-  synthesis_line   = "Papering a vendor agreement for every new supplier taught you to
-                      spot risk early, and twelve new stores means more contracts, not
-                      fewer. I built a review tracker that cut turnaround from five days
-                      to one."
-  recipient_clause = "Papering a vendor agreement for every new supplier taught you to
-                      spot risk early."
-  bridge_used      = true
-
-Example WITHOUT a bridge (no signal, or the signal connects to nothing):
+Example:
   synthesis_line   = "Papering a vendor agreement for every supplier before a footwear
                       drop can ship taught you to spot risk early, and batching reviews
                       by clause type taught me to spot patterns."
   recipient_clause = "Papering a vendor agreement for every supplier before a footwear
                       drop can ship taught you to spot risk early."
-  bridge_used      = false
 
 FORBIDDEN:
 - Equivalence: "same bet", "exactly what I did", "we both", "just like you"
 - Hedges: "feels relevant", "seems similar", "might align", "resonates with"
 - Praise of the person or the company
 - Restating their point back to them without adding the sender's own claim
-- Building the line on the LIVE MOVE or on any COMPANY SIGNAL
+- Building the line on the LIVE MOVE
 
 THEN APPLY THE SWAP TEST, mechanically:
 Replace {name} with a DIFFERENT person holding the same title at the same company.
@@ -264,10 +238,6 @@ Does it still read as true?
 Swap only the RECIPIENT. The sender's half of the sentence never changes, and can never
 make a line pass: "and I batched contract reviews by clause type" is true regardless of
 who receives it. Judge ONLY the clause about the recipient.
-
-Strip the company signal before you judge. A hiring notice, a fundraise, a store opening
-or a product launch is true of every employee, so it can never make a line survive. If
-removing the company clause leaves nothing person-specific, answer true and let it die.
 
   survives_swap = true   -> the sentence is about the ROLE or the COMPANY, not the
                             person. Too shallow. This is the correct answer for most
@@ -291,9 +261,7 @@ Examples:
       -> true. Anyone can post that. It dies.
 
 Anything drawn from a careers page, a testimonial, a company perk, a fundraise, or a
-work-anniversary post SURVIVES the swap when it is the BASIS of the line. Answer true
-for all of them. (A company fact used as a bridge in part 2 is fine, because part 1
-already carries the line on its own.)
+work-anniversary post SURVIVES the swap. Answer true for all of them.
 
 IF YOU ARE USING LAYER 4 (what their work would have taught them), the swap test is
 harsher, not softer. A sentence about the ROLE dies. A sentence about the specific
@@ -309,38 +277,7 @@ combination is not shared by everyone with the same title elsewhere.
 Never state a fact the research did not give you: no tenure, no headcount, no funding,
 no metrics, no growth. Infer what the work teaches; never invent what happened.
 
-Be strict. If you are unsure, answer true and let the line die.
-
-DECIDING ON THE BRIDGE (part 2).
-
-In `bridge_reasoning`, go through the company signals ONE AT A TIME. For each one,
-write a single line in exactly this form:
-
-    <signal> -> makes the recipient's problem bigger? yes/no, because ...
-    <signal> -> does the sender's work address that? yes/no
-
-Do this for every signal listed under WHAT THE COMPANY IS DOING. Do not summarise, do
-not skip any, and do not decide before you have written them all out.
-
-Then: if ANY signal got yes to both questions, set bridge_used = true and weave that one
-signal into part 2 as a subordinate clause. Otherwise set bridge_used = false.
-
-A worked example of the reasoning:
-    "opened 12 new retail stores" -> bigger? yes, more stores means more suppliers,
-      which means more agreements to paper.
-    "opened 12 new retail stores" -> sender addresses it? yes, a review tracker that
-      cuts turnaround from five days to one.
-    -> bridge_used = true
-    -> "...taught you to spot risk early, and twelve new stores means more contracts,
-        not fewer. I built a review tracker that cut turnaround from five days to one."
-
-    "raised a Series B" -> bigger? no, funding does not add contracts to paper.
-    "hiring a Legal Ops Associate" -> bigger? no. Naming an open role is a job
-      application, not a bridge. The email already ends with the ask.
-
-The bridge is a subordinate clause. It never opens the sentence, never stands alone, and
-the recipient's clause must still read true with the bridge deleted.
-"""
+Be strict. If you are unsure, answer true and let the line die."""
 
 _GUARD_SCHEMA = {
     "type": "object",
@@ -351,39 +288,20 @@ _GUARD_SCHEMA = {
         # fused line makes the sender's own technique read as the recipient's, and
         # the email compliments them on the sender's idea.
         "recipient_clause": {"type": "string"},
-        # Forcing the model to WRITE this reasoning is what makes it use the bridge at
-        # all. Without the field it defaults to omitting the signal every time, even
-        # when it later agrees the signal was relevant. Measured on Divakar Sharma.
-        "bridge_reasoning": {"type": "string"},
-        # Auditable: did the company signal actually earn a place, or was it ignored?
-        "bridge_used": {"type": "boolean"},
-        "bridge_clause": {"type": "string"},
         "survives_swap": {"type": "boolean"},
         "layer": {"type": "string", "enum": list(CARRIER_LAYERS)},
         "reason": {"type": "string"},
     },
-    "required": ["synthesis_line", "recipient_clause", "bridge_reasoning",
-                 "bridge_used", "bridge_clause", "survives_swap", "layer", "reason"],
+    "required": ["synthesis_line", "recipient_clause", "survives_swap", "layer", "reason"],
 }
 
 
 def run_depth_guard(layers: dict, name: str, title: str, company: str,
-                    work_principle: str, sender_project: str,
-                    company_signals: dict | None = None,
-                    sender_target_role: str = "") -> dict:
+                    work_principle: str, sender_project: str) -> dict:
     """Propose a synthesis line and judge it.
 
-    `company_signals` (hiring, momentum, what they build, open roles) come from the
-    globally-cached CompanyProfile. They are BRIDGE material, never the basis of the
-    line: CompanyProfile is keyed on `domain`, so every fact in it is identical for
-    every lead at that company and therefore survives the swap test by construction.
-    A line built on one is the old system's "I noticed Neeman's has been expanding".
-
-    They earn a place only when they explain WHY NOW — why the recipient's specific
-    thing and the sender's specific thing collide at this moment.
-
-    Returns {synthesis_line, recipient_clause, survives_swap, layer, reason}.
-    `survives_swap=True` means REJECTED — the caller drops to the bare ask.
+    Returns {synthesis_line, survives_swap, layer, reason}. `survives_swap=True`
+    means REJECTED — the caller must drop to the bare ask.
     """
     usable = [k for k in CARRIER_LAYERS if layers.get(k)]
     if not usable:
@@ -391,28 +309,12 @@ def run_depth_guard(layers: dict, name: str, title: str, company: str,
         return {
             "synthesis_line": None,
             "recipient_clause": None,
-            "bridge_used": False,
-            "bridge_clause": None,
             "survives_swap": True,
             "layer": "live_move" if layers.get("live_move") else "none",
             "reason": "No carrier layer; only a live move or nothing. Bare ask.",
         }
 
-    sig = company_signals or {}
-    sig_lines = []
-    if sig.get("hiring_signal"):
-        sig_lines.append(f"HIRING NOW: {sig['hiring_signal']}")
-    if sig.get("open_roles"):
-        sig_lines.append(f"OPEN ROLES: {', '.join(sig['open_roles'][:3])}")
-    if sig.get("recent_momentum"):
-        sig_lines.append(f"RECENT MOVE: {sig['recent_momentum']}")
-    if sig.get("what_they_build"):
-        sig_lines.append(f"WHAT THE COMPANY BUILDS: {sig['what_they_build']}")
-    signals_block = ("\n".join(sig_lines)) if sig_lines else "(none known)"
-
     prompt = _GUARD_PROMPT.format(
-        signals_block=signals_block,
-        sender_target_role=sender_target_role or "(not stated)",
         name=name, title=title or "", company=company or "",
         quote=layers.get("quote") or "(none)",
         derived_operational=layers.get("derived_operational") or "(none)",
@@ -431,8 +333,6 @@ def run_depth_guard(layers: dict, name: str, title: str, company: str,
     verdict = {
         "synthesis_line": (result.get("synthesis_line") or "").strip() or None,
         "recipient_clause": (result.get("recipient_clause") or "").strip() or None,
-        "bridge_used": bool(result.get("bridge_used", False)),
-        "bridge_clause": (result.get("bridge_clause") or "").strip() or None,
         # Absent/garbled verdict must fail closed: reject, don't ship.
         "survives_swap": bool(result.get("survives_swap", True)),
         "layer": result.get("layer") or "none",
@@ -444,7 +344,7 @@ def run_depth_guard(layers: dict, name: str, title: str, company: str,
     if not verdict["synthesis_line"] or not verdict["recipient_clause"]:
         verdict["survives_swap"] = True
 
-    logger.info("[DepthGuard] %s: layer=%s bridge=%s survives_swap=%s (%s)",
-                name, verdict["layer"], verdict["bridge_used"],
-                verdict["survives_swap"], verdict["reason"][:70])
+    logger.info("[DepthGuard] %s: layer=%s survives_swap=%s (%s)",
+                name, verdict["layer"], verdict["survives_swap"],
+                verdict["reason"][:80])
     return verdict

@@ -576,9 +576,7 @@ def _build_generation_prompt(
         body_instruction = (
             "2. SYNTHESIS LINE. Open with the recipient: restate ABOUT THE RECIPIENT "
             "in your own words. Everything in that field is about THEM, never about the "
-            "sender. If WHY NOW is given, add it next as a short clause: it is a fact "
-            "about the company that makes their problem bigger right now. Never open "
-            "with it. Then join to one true, SMALLER claim about the sender's own work. "
+            "sender. Then join it to one true, SMALLER claim about the sender's own work. "
             "Never attribute the sender's method, project, or metric to the recipient, and "
             "never compliment them on something the sender did.\n"
             f"3. One understated sentence grounding the sender's work. {signal_instruction}"
@@ -632,10 +630,6 @@ def _build_generation_prompt(
             # contain anything the sender did: the writer treats it as a fact about
             # the recipient, so a fused line would credit them with the sender's work.
             rlines.append(f"ABOUT THE RECIPIENT (verified; use as the opener): {research['belief']}")
-        if research.get("bridge"):
-            # A fact about the COMPANY, not the recipient. It explains why the
-            # recipient's problem is growing now, and why the sender's work is timely.
-            rlines.append(f"WHY NOW (about the company, not the person): {research['bridge']}")
         if research.get("move"):
             rlines.append(f"A LIVE MOVE (light texture only): {research['move']}")
         if research.get("source_url"):

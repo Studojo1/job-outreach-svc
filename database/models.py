@@ -162,7 +162,6 @@ class LeadResearch(Base):
 
     synthesis_line = Column(Text)       # full line, both halves (audit)
     recipient_clause = Column(Text)     # the recipient's half ONLY — what the email may attribute
-    bridge_clause = Column(Text)        # the company-signal clause ("why now"), or NULL
     survives_swap = Column(Boolean)     # True = too shallow = bare ask
     guard_layer = Column(String(32))
     guard_reason = Column(Text)

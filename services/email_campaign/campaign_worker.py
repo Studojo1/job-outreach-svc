@@ -226,53 +226,6 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
 
 # ── JIT Phase 0: Research Upcoming Leads ────────────────────────────────────
 
-def _target_role(candidate) -> str:
-    """What the student is actually looking for. The company signal needs this: a
-    hiring notice is only a bridge if it connects the recipient's work to the role
-    the sender wants. Without it the signal has nothing to join to."""
-    if not candidate:
-        return ""
-    roles = candidate.target_roles or []
-    if isinstance(roles, list) and roles:
-        return str(roles[0])
-    parsed = candidate.parsed_json or {}
-    rec = (parsed.get("career_analysis") or {}).get("recommended_roles") or []
-    if rec and isinstance(rec[0], dict):
-        return rec[0].get("title", "") or ""
-    return ""
-
-
-def _company_signals(db, lead) -> dict:
-    """Company facts from the globally-cached CompanyProfile: hiring, momentum, open
-    roles, what they build.
-
-    These cost nothing (no context.dev call) — extracted_facts is already populated on
-    ~99% of company_profiles rows. They are BRIDGE material for the synthesis line, not
-    its basis: CompanyProfile is keyed on `domain`, so every fact here is identical for
-    every lead at that company and survives the swap test by construction. The guard is
-    told to strip them before judging.
-
-    Never raises: a missing profile just means no bridge.
-    """
-    if not lead or not lead.company_domain:
-        return {}
-    try:
-        from database.models import CompanyProfile
-        cp = db.query(CompanyProfile).filter_by(domain=lead.company_domain.lower()).first()
-    except Exception:
-        return {}
-    if not cp:
-        return {}
-    facts = cp.extracted_facts or {}
-    roles = [jp.get("title") for jp in (cp.recent_job_postings or [])[:3] if jp.get("title")]
-    return {
-        "hiring_signal": facts.get("hiring_signal"),
-        "recent_momentum": facts.get("recent_momentum"),
-        "what_they_build": facts.get("what_they_build"),
-        "open_roles": roles,
-    }
-
-
 def research_one_lead(db, lead, campaign_id: int) -> bool:
     """Research a single lead and run the depth guard. Shared by Phase 0 and by
     the synchronous top-lead research at campaign launch.
@@ -401,8 +354,6 @@ def research_one_lead(db, lead, campaign_id: int) -> bool:
             company=lead.company or "",
             work_principle=flex.get("work_principle", ""),
             sender_project=flex.get("best_project", ""),
-            company_signals=_company_signals(db, lead),
-            sender_target_role=_target_role(candidate),
         )
     except Exception as e:
         # Guard failure must fail closed: no line ships.
@@ -416,7 +367,6 @@ def research_one_lead(db, lead, campaign_id: int) -> bool:
     record.status = "fetched"
     record.synthesis_line = verdict["synthesis_line"]
     record.recipient_clause = verdict.get("recipient_clause")
-    record.bridge_clause = verdict.get("bridge_clause")
     record.survives_swap = verdict["survives_swap"]
     record.guard_layer = verdict["layer"]
     record.guard_reason = verdict["reason"]
@@ -783,7 +733,6 @@ def _generate_pending(db) -> int:
                 # fused line makes the sender's own method read as the recipient's —
                 # the email then compliments them on the sender's idea.
                 "belief": lr.recipient_clause,
-                "bridge": lr.bridge_clause,
                 "move": lr.live_move,
                 "source_url": lr.quote_source_url,
             }

@@ -51,10 +51,6 @@ CREATE TABLE IF NOT EXISTS lead_research (
     -- writer renders this as a fact ABOUT the recipient, so it must never contain
     -- anything the sender did, or the email credits them with the sender's work.
     recipient_clause TEXT,
-    -- The "why now" clause: a company fact (a store rollout, a launch) that makes the
-    -- recipient's problem bigger. Rendered separately so it is never attributed to the
-    -- person. NULL when no signal earned its place.
-    bridge_clause   TEXT,
     survives_swap   BOOLEAN,        -- TRUE = too shallow = rejected = bare ask
     guard_layer     VARCHAR(32),    -- which layer fed the line
     guard_reason    TEXT,
