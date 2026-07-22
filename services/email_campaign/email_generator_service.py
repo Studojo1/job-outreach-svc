@@ -47,6 +47,11 @@ STYLE_DESCRIPTIONS = {
         "hook_style": "state directly why you're reaching out to them specifically",
         "soft_ask": "ask clearly if they know of any open roles or who to contact",
     },
+    "coffee_chat": {
+        "tone": "Warm, admiring, humble; a peer who genuinely wants to learn",
+        "hook_style": "reflect on their specific journey and role, or their company's mission if they're a founder",
+        "soft_ask": "ask for a short coffee chat to learn from their journey",
+    },
 }
 
 # Per-style email skeletons — each style has a genuinely different structure, not just a tone change.
@@ -101,6 +106,26 @@ STYLE_STRUCTURES = {
         "3. One sentence: why you're reaching out to {lead_name} at {company} specifically.\n"
         "4. Close with this exact question: \"{why_this_person}\" Then sign off with \"{signoff}\".\n\n"
         "Word target: 50-70 words ONLY. Deliberately short. Busy people appreciate brevity."
+    ),
+    # Bespoke coffee-chat style: admiring, learning-oriented outreach. It's about
+    # THEM first (their journey / their company's mission), a genuine point of
+    # values-alignment, a light one-line 'about me' (credential blends in HEC +
+    # startup + a number), and a warm ask for a short coffee chat.
+    "coffee_chat": (
+        "STRUCTURE:\n"
+        "1. GREETING: Use exactly \"{greeting}\"\n"
+        "2. Say you came across {lead_name}'s profile and found their journey genuinely interesting. "
+        "Then 1-2 SPECIFIC sentences about THEM: if they're an employee, their role and work at {company}; "
+        "if they're a founder, what {company} is building and stands for. Real depth and a concrete detail, "
+        "not flattery, not a company summary. {hook_instruction}\n"
+        "3. One sentence on what specifically RESONATED — a value or part of their journey (or their "
+        "company's mission/mottos) that genuinely aligns with your own path. Be specific, not generic.\n"
+        "4. One short 'about me' sentence, blended naturally: your HEC background, that you're building a "
+        "startup, and ONE concrete number. Keep it light and secondary to them. {signal_instruction}\n"
+        "5. Close by asking for a short 15-minute coffee chat because their journey is genuinely inspiring "
+        "and you'd love to learn from them. Warm, low-pressure. Then sign off with \"{signoff}\".\n\n"
+        "Word target: 95-125 words. Admiring but not fawning. About THEM first, you second. The ask is to "
+        "LEARN from them — never a pitch, never job-seeking language, never 'opportunities' or 'open roles'."
     ),
 }
 
@@ -952,6 +977,39 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
         "properties": {"body": {"type": "string"}},
         "required": ["body"],
     }
+
+    # Bespoke apologetic/grateful follow-up — only for candidates explicitly opted
+    # in via flex_notes.followup_style == "coffee_chat". All other campaigns keep
+    # the default follow-up behaviour below.
+    if (candidate.flex_notes or {}).get("followup_style") == "coffee_chat":
+        prompt = f"""Ghostwrite a very short, warm follow-up email for {candidate_name} to {lead_first} at {lead_company}.
+This is a gentle nudge after an earlier note asking for a short coffee chat to learn from their journey. It must feel human, humble and grateful — NOT a sales bump.
+
+ORIGINAL EMAIL (already sent — do NOT repeat or quote it):
+---
+{parent_body}
+---
+
+Write the email body ONLY (greeting + 3 short sentences + sign-off):
+Sentence 1: Lightly apologise for reaching out again / poking them a second time.
+Sentence 2: Acknowledge, warmly and sincerely, that they are clearly very busy and that it's completely fair if they can't reply.
+Sentence 3: Say that if they did find a few minutes to connect, the learning would be genuinely valuable to you — then thank them again for their time.
+
+Format:
+- Start with "Hi {lead_first},"
+- Sign off: "{first_name_candidate}" on its own line
+- Under 60 words. Grateful, humble, zero pressure. No "just bumping", no "any openings", no job-seeking language."""
+
+        result = generate_json(
+            prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
+            deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
+        )
+        body = clean_tone((result.get("body") or "").strip())
+        if not body or len(body) < 20:
+            raise ValueError(f"Coffee-chat follow-up body too short for {lead.name}")
+        logger.info("[Followup] Generated coffee_chat touch %d for %s (%d words)",
+                    followup_number + 1, lead.name, len(body.split()))
+        return body
 
     if followup_number == 1:
         project = _extract_unused_project(candidate, parent_body)
