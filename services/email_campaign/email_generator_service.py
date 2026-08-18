@@ -164,12 +164,20 @@ _EMAIL_SYSTEM_PROMPT = (
     "interpret it as their job title. If NO concrete project/achievement is provided, do NOT invent "
     "one: write a short, honest note based only on the sender's real field, listed skills, and what "
     "they're looking for. It is fine for the email to be simple and modest.\n"
+    "- NEVER give the sender experience, expertise, or familiarity in the recipient's "
+    "industry or domain unless it appears in their own profile. Facts about the recipient's "
+    "company describe the COMPANY, not the sender. Writing that the sender has worked in "
+    "finance, healthcare, fintech, or any other domain purely because the recipient operates "
+    "there is a serious error. When there is no real overlap, an honest email that says so is "
+    "the correct output.\n"
     "- Write the sender's name EXACTLY as given. Do not shorten, expand, abbreviate, or alter it.\n"
     "- SENDER CITY is optional context. ONLY weave it in if it feels natural (e.g. lead's company is in "
     "same city). Never force it. If unsure, omit it entirely.\n\n"
     "ABSOLUTELY FORBIDDEN:\n"
     "- Em dashes (-- or —)\n"
     "- Inventing any project, tool, result, employer, experience, or skill not in the profile\n"
+    "- Attributing the recipient company's domain knowledge to the sender (e.g. writing that the "
+    "sender has done 'equity research' or 'mortgage lending' because the recipient works in that field)\n"
     '- Any specific number, percentage, metric, or timeframe not explicitly provided (e.g. "cut time by 40%")\n'
     '- Claiming the sender "built", "created", "shipped", or "launched" anything unless it is explicitly in the signal\n'
     '- "I hope this email finds you well"\n'
@@ -257,11 +265,14 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     raw_name = personal.get("name") or parsed.get("name") or ""
     name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
 
-    # Skills
+    # Skills. Ranking happens after primary_field is known -- see below. Taking
+    # skills[:3] in raw resume order meant whatever the parser emitted first
+    # (often coursework or an elective listed above the real stack) became the
+    # candidate's headline skill set in the email.
     skills = personal.get("skills_detected", []) or parsed.get("skills", [])
     if isinstance(skills, str):
         skills = [s.strip() for s in skills.split(",")]
-    key_skills = skills[:3]
+    skills = [s for s in skills if isinstance(s, str) and s.strip()]
 
     # Education
     education = ""
@@ -284,6 +295,11 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     # Summary / primary field
     summary = parsed.get("profile_summary", "")
     primary_field = _infer_primary_field(skills, target_roles, summary)
+
+    # Rank skills by relevance to the field and target roles, then take 3.
+    # A skill that corroborates the inferred field outranks one that merely
+    # appeared early in the document.
+    key_skills = _rank_key_skills(skills, primary_field, target_roles)
 
     # Recent project
     recent_project = _extract_recent_project(parsed)
@@ -347,25 +363,95 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     }
 
 
-def _infer_primary_field(skills: list, roles: list, summary: str) -> str:
-    """Infer the candidate's primary field from skills and roles."""
-    combined = " ".join(skills + roles + [summary]).lower()
-    fields = {
-        "machine learning": ["machine learning", "ml", "deep learning", "neural", "tensorflow", "pytorch"],
-        "data science": ["data science", "data analysis", "pandas", "statistics", "data engineer"],
-        "web development": ["react", "angular", "vue", "frontend", "full stack", "fullstack", "next.js", "node"],
-        "backend engineering": ["backend", "api", "django", "flask", "fastapi", "spring", "microservice"],
-        "mobile development": ["ios", "android", "react native", "flutter", "swift", "kotlin"],
-        "cloud engineering": ["aws", "azure", "gcp", "devops", "kubernetes", "docker", "infrastructure"],
-        "blockchain": ["blockchain", "solidity", "web3", "smart contract", "ethereum"],
-        "cybersecurity": ["security", "penetration", "cybersecurity", "soc", "threat"],
-        "product management": ["product manager", "product management", "roadmap", "stakeholder"],
-        "design": ["ui/ux", "figma", "design system", "user experience", "graphic design"],
+_FIELD_KEYWORDS = {
+    "machine learning": ["machine learning", "ml", "deep learning", "neural", "tensorflow", "pytorch"],
+    "data science": ["data science", "data analysis", "pandas", "statistics", "data engineer"],
+    "web development": ["react", "angular", "vue", "frontend", "full stack", "fullstack", "next.js", "node"],
+    "backend engineering": ["backend", "api", "django", "flask", "fastapi", "spring", "microservice"],
+    "mobile development": ["ios", "android", "react native", "flutter", "swift", "kotlin"],
+    "cloud engineering": ["aws", "azure", "gcp", "devops", "kubernetes", "docker", "infrastructure"],
+    "blockchain": ["blockchain", "solidity", "web3", "smart contract", "ethereum"],
+    "cybersecurity": ["security", "penetration", "cybersecurity", "soc", "threat"],
+    "product management": ["product manager", "product management", "roadmap", "stakeholder"],
+    "design": ["ui/ux", "figma", "design system", "user experience", "graphic design"],
+    # Non-engineering fields. Their absence was the direct cause of finance
+    # and business candidates being labelled "software engineering".
+    "finance": [
+        "equity research", "investment banking", "financial modelling",
+        "financial modeling", "valuation", "dcf", "capital markets",
+        "portfolio management", "corporate finance", "accounting",
+        "private equity", "venture capital", "fp&a", "cfa",
+    ],
+    "consulting": ["consulting", "management consulting", "case study", "strategy consulting"],
+    "business analysis": ["business analyst", "business analysis", "requirements gathering", "stakeholder management"],
+    "marketing": ["marketing", "seo", "content marketing", "growth marketing", "social media", "brand"],
+    "operations": ["operations", "supply chain", "logistics", "procurement", "process improvement"],
+    "human resources": ["human resources", "recruitment", "talent acquisition", "hr"],
+    "sales": ["sales", "business development", "account management", "lead generation"],
+}
+
+
+def _rank_key_skills(skills: list, field: str, roles: list, limit: int = 3) -> list:
+    """Pick the `limit` most defensible skills to put in front of the LLM.
+
+    Order: skills that match the inferred field's vocabulary, then skills named
+    in the candidate's target roles, then the remainder in resume order. This
+    is a reordering only -- nothing is invented and nothing outside the resume
+    is added.
+    """
+    if not skills:
+        return []
+
+    field_vocab = _FIELD_KEYWORDS.get(field, [])
+    roles_text = " ".join(r for r in roles if isinstance(r, str)).lower()
+
+    # Generic office/soft skills are true but say nothing about capability, and
+    # they crowd out the real stack when they happen to sit first on the resume.
+    # They rank last so they only appear when there is nothing better.
+    _LOW_SIGNAL = {
+        "excel", "ms excel", "microsoft excel", "ms word", "word", "powerpoint",
+        "ms office", "microsoft office", "google docs", "google sheets",
+        "communication", "teamwork", "leadership", "public speaking",
+        "time management", "problem solving", "hard working", "team player",
     }
-    for field, keywords in fields.items():
-        if any(kw in combined for kw in keywords):
-            return field
-    return "software engineering"
+
+    def score(skill: str) -> int:
+        s = skill.lower().strip()
+        if s in _LOW_SIGNAL:
+            return 3
+        if any(kw in s or s in kw for kw in field_vocab):
+            return 0
+        if s and s in roles_text:
+            return 1
+        return 2
+
+    # stable sort preserves resume order inside each tier
+    return sorted(skills, key=score)[:limit]
+
+
+def _infer_primary_field(skills: list, roles: list, summary: str) -> str:
+    """Infer the candidate's primary field from skills and roles.
+
+    Returns "" when nothing matches. An empty field is honest: the prompt then
+    omits the SENDER FIELD line entirely rather than asserting a specialism the
+    candidate never claimed. Previously this defaulted to "software engineering",
+    which put a false specialism in front of the LLM for every unmatched
+    candidate (finance, business, design-adjacent, and non-technical resumes).
+
+    Matching is word-boundary based. Substring matching produced false hits that
+    silently mis-filed people: "ml" inside "html", "api" inside "capital",
+    "soc" inside "associate", "node" inside "nodes", "design" inside
+    "designation" -- the last two being common on finance and ops resumes.
+    """
+    combined = " ".join(skills + roles + [summary]).lower()
+    for field, keywords in _FIELD_KEYWORDS.items():
+        for kw in keywords:
+            # \b handles alphanumerics; keywords with . & / + # need escaping and
+            # do not always sit on a word boundary (e.g. "next.js", "fp&a").
+            pattern = r"(?<!\w)" + re.escape(kw) + r"(?!\w)"
+            if re.search(pattern, combined):
+                return field
+    return ""
 
 
 def _extract_recent_project(parsed: dict) -> str:
@@ -387,16 +473,24 @@ def _extract_recent_project(parsed: dict) -> str:
 
 
 def _build_candidate_signal(_name: str, field: str, skills: list, project: str, education: str) -> str:
-    """Build a short, concrete signal about the candidate's ability."""
+    """Build a short, concrete signal about the candidate's ability.
+
+    `field` may be "" when _infer_primary_field could not classify the resume.
+    In that case say nothing about the field rather than emitting
+    "focused on " with a dangling blank.
+    """
     parts = []
     if education:
         parts.append(education.split(",")[0].strip())  # just degree or school
-    parts.append(f"focused on {field}")
+    if field:
+        parts.append(f"focused on {field}")
     if project:
         parts.append(f"recently worked on {project}")
     elif skills:
         parts.append(f"building with {', '.join(skills[:2])}")
-    return " ".join(parts) if parts else f"early-career {field} candidate"
+    if parts:
+        return " ".join(parts)
+    return f"early-career {field} candidate" if field else "early-career candidate"
 
 
 # ── Stage 2: Lead Profile Extraction ───────────────────────────────────────────
@@ -676,9 +770,13 @@ def _build_generation_prompt(
     # Synthesis note — make the connection between signal and company explicit
     synthesis = (
         "SYNTHESIS: Don't just list your background and then ask. "
-        "Make the connection: why would someone who built what you built be valuable to a company that does what "
-        f"{lead_profile['company_name']} does? One sentence that links your work to their context is worth more "
-        "than two sentences that don't connect. The email must feel written specifically for this company."
+        "Where a genuine connection exists, make it: why would someone who built what you built be valuable "
+        f"to a company that does what {lead_profile['company_name']} does? One sentence that links your work "
+        "to their context is worth more than two sentences that don't connect. "
+        "But only draw the link if it is real. If the sender's actual background does not connect to this "
+        "company's domain, do NOT manufacture one and do NOT attribute industry experience to the sender to "
+        "bridge the gap — write an honest, modest email about what they have genuinely done instead. "
+        "A truthful email with no clever link beats an invented specialism."
     )
     if has_company_desc:
         synthesis += (
@@ -692,16 +790,24 @@ def _build_generation_prompt(
     # generic opener.
     if lead_profile.get("what_they_build") or lead_profile.get("hiring_signal") or lead_profile.get("core_tech"):
         synthesis += (
-            "\n\nSPECIFICITY (mandatory): you have STRUCTURED FACTS about this company "
+            "\n\nSPECIFICITY: you have STRUCTURED FACTS about this company "
             "(WHAT THEY BUILD, CORE TECH STACK, HIRING NOW, RECENT NEWS / MOMENTUM, ACTIVE JOB POSTINGS). "
-            "The email MUST reference at least ONE of these facts by name in the opening sentence — "
-            "NOT 'I came across {company} while researching AI companies' or 'looks like your team is "
-            "doing fascinating work in AI' or any other generic intersection phrase. "
+            "Open by referencing one of these facts by name rather than a generic line like "
+            "'I came across {company} while researching AI companies' or 'looks like your team is "
+            "doing fascinating work in AI'. "
             "Example good openings: "
             "'Saw {company} is building [WHAT THEY BUILD] — same problem space as the [your project] I built.' "
             "'{company} is hiring [HIRING NOW] which lines up with what I've been doing.' "
             "'Noticed [RECENT MOMENTUM] — congrats. Reaching out because [link to your work].' "
-            "Pick the fact that genuinely connects to the sender's background; don't use facts as decoration."
+            "\n\nCRITICAL LIMIT ON SPECIFICITY: the company fact describes the COMPANY, never the sender. "
+            "You may state what the company does. You may NOT give the sender any experience, "
+            "domain knowledge, industry background, or skill in that domain unless it is already in "
+            "SENDER SIGNAL or SENDER KEY SKILLS. If the sender's background does not genuinely connect "
+            "to the company's domain, say so plainly and honestly: an email that reads "
+            "'Saw you are building X. I have not worked in that space, but here is what I have built and "
+            "why I would like to learn it' is CORRECT and far better than inventing a connection. "
+            "Never write that the sender has done work in the company's industry in order to manufacture "
+            "relevance. Truthfulness outranks specificity every time."
         ).replace("{company}", lead_profile["company_name"])
 
     candidate_city = candidate_profile.get("candidate_city") or ""
@@ -737,13 +843,19 @@ def _build_generation_prompt(
             facts_block.append(f"ACTIVE JOB POSTINGS: {', '.join(titles)}")
     facts_section = ("\n\n" + "\n".join(facts_block)) if facts_block else ""
 
+    # Field and skills are omitted entirely when unknown. Emitting an empty or
+    # guessed value here is what let the model assert specialisms the candidate
+    # never claimed.
+    _field = candidate_profile.get('primary_field') or ""
+    field_line = f"\nSENDER FIELD: {_field}" if _field else ""
+    _skills = candidate_profile.get('key_skills') or []
+    skills_line = f"\nSENDER KEY SKILLS: {', '.join(_skills)}" if _skills else ""
+
     prompt = f"""Write a short cold outreach email. Follow the STRUCTURE exactly.
 
 SENDER: {candidate_profile['candidate_name']}
-SENDER SIGNAL: {candidate_profile['short_candidate_signal']}
-SENDER FIELD: {candidate_profile['primary_field']}
-SENDER LOOKING FOR: {candidate_profile['job_interest']} roles
-SENDER KEY SKILLS: {', '.join(candidate_profile['key_skills']) if candidate_profile['key_skills'] else candidate_profile['primary_field']}{credential_line}{city_line}{why_now_line}
+SENDER SIGNAL: {candidate_profile['short_candidate_signal']}{field_line}
+SENDER LOOKING FOR: {candidate_profile['job_interest']} roles{skills_line}{credential_line}{city_line}{why_now_line}
 
 RECIPIENT: {lead_profile['lead_name']}
 RECIPIENT ROLE: {lead_profile['lead_role']} at {lead_profile['company_name']}
