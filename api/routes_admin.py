@@ -1,9 +1,12 @@
 """Admin endpoints for outreach order monitoring dashboard."""
 
+import copy
 import math
 from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import case, func, select as sa_select, text
 from sqlalchemy.orm import Session
 
@@ -772,6 +775,8 @@ async def outreach_user_detail(
 
         orders_data.append({
             "id": order.id,
+            # Surfaced so the admin panel can open the candidate profile editor.
+            "candidate_id": order.candidate_id,
             "status": order.status,
             "leads_collected": order.leads_collected,
             "leads_target": order.leads_target,
@@ -1407,3 +1412,284 @@ async def paid_funnel(
     # Sort: most recently paid first
     result.sort(key=lambda r: r["paid_at"], reverse=True)
     return {"users": result, "total": len(result)}
+
+# ── Candidate profile editor ──────────────────────────────────────────────────
+#
+# Support tooling for correcting a mis-parsed candidate profile. Before this
+# existed there was NO way for staff to fix a bad resume parse: every write path
+# that touches `candidates` is scoped to `current_user.id`, so a paying customer
+# with wrong skills had to redo onboarding themselves.
+#
+# Everything here writes to the fields the lead-search and email-generation
+# pipelines actually read. The precedence rules below are load-bearing — editing
+# the "obvious" field alone silently does nothing in several cases:
+#
+#   target role   flex_notes.target_role_user_input  OVERRIDES  target_roles
+#                 (_derive_role_and_locations, routes_discovery.py)
+#   roles used    parsed_json.career_analysis.recommended_roles[].title
+#                 falls back to candidates.target_roles only when empty
+#                 (routes_discovery.py, the /search payload builder)
+#   skills        parsed_json.personal_info.skills_detected
+#                 falls back to parsed_json.skills
+#                 (extract_candidate_profile, email_generator_service.py)
+#
+# So a role edit writes all three places, and a skills edit writes both.
+
+_PROFILE_EDITABLE_FIELDS = {
+    "target_role", "skills", "locations", "company_size", "company_stage",
+    "industries", "niche_keywords", "work_mode", "dream_companies",
+    "extra_manager_titles",
+    "best_project", "outcome", "why_now", "credential",
+}
+
+
+class CandidateProfilePatch(BaseModel):
+    """All operator-editable profile fields. Every field is optional —
+    omitted fields are left untouched, so a caller can PATCH one thing."""
+    target_role: Optional[str] = None
+    skills: Optional[List[str]] = None          # ordered; first 3 become email headline
+    locations: Optional[List[str]] = None
+    company_size: Optional[str] = None          # Apollo range, e.g. "50,500" or "1,10000"
+    company_stage: Optional[str] = None
+    industries: Optional[List[str]] = None
+    niche_keywords: Optional[List[str]] = None
+    work_mode: Optional[str] = None
+    dream_companies: Optional[List[str]] = None
+    # Extra hiring-manager titles merged into every Apollo segment. Use to widen
+    # targeting into a function the resume alone would not imply.
+    extra_manager_titles: Optional[List[str]] = None
+    # flex_notes — these feed the email's SENDER SIGNAL directly
+    best_project: Optional[str] = None
+    outcome: Optional[str] = None
+    why_now: Optional[str] = None
+    credential: Optional[str] = None
+    # audit
+    reason: Optional[str] = None                # why the operator made this edit
+
+
+def _clean_str_list(v) -> list:
+    """Trim, drop blanks, de-duplicate preserving order."""
+    if not isinstance(v, list):
+        return []
+    seen, out = set(), []
+    for item in v:
+        s = str(item).strip()
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            out.append(s)
+    return out
+
+
+@router.get("/candidates/{candidate_id}/profile")
+async def admin_get_candidate_profile(
+    candidate_id: int,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Current editable profile for a candidate, in the same shape PATCH accepts.
+
+    Returns the effective values — i.e. what the pipeline will actually use,
+    resolving the precedence rules rather than showing raw columns.
+    """
+    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+    personal = parsed.get("personal_info") if isinstance(parsed.get("personal_info"), dict) else {}
+    prefs = parsed.get("preferences") if isinstance(parsed.get("preferences"), dict) else {}
+    career = parsed.get("career_analysis") if isinstance(parsed.get("career_analysis"), dict) else {}
+    flex = candidate.flex_notes if isinstance(candidate.flex_notes, dict) else {}
+
+    # Effective target role, mirroring _derive_role_and_locations precedence.
+    role = (flex.get("target_role_user_input") or "").strip()
+    role_source = "flex_notes.target_role_user_input"
+    if not role:
+        rec = career.get("recommended_roles") or []
+        if rec and isinstance(rec[0], dict):
+            role = (rec[0].get("title") or "").strip()
+            role_source = "parsed_json.career_analysis.recommended_roles[0].title"
+    if not role:
+        tr = candidate.target_roles if isinstance(candidate.target_roles, list) else []
+        if tr:
+            first = tr[0]
+            role = first if isinstance(first, str) else (first.get("title") or first.get("role") or "")
+            role_source = "candidates.target_roles[0]"
+
+    skills = personal.get("skills_detected") or parsed.get("skills") or []
+
+    user = db.query(User).filter(User.id == candidate.user_id).first()
+
+    return {
+        "candidate_id": candidate.id,
+        "user_id": candidate.user_id,
+        "user_email": user.email if user else None,
+        "user_name": user.name if user else None,
+        "profile": {
+            "target_role": role,
+            "skills": _clean_str_list(skills),
+            "locations": _clean_str_list(prefs.get("locations")),
+            "company_size": prefs.get("company_size") or "",
+            "company_stage": prefs.get("company_stage") or "",
+            "industries": _clean_str_list(prefs.get("industry_interests")),
+            "niche_keywords": _clean_str_list(prefs.get("niche_keywords")),
+            "work_mode": prefs.get("work_mode") or "",
+            "extra_manager_titles": _clean_str_list(prefs.get("extra_manager_titles")),
+            "dream_companies": _clean_str_list(candidate.dream_companies),
+            "best_project": flex.get("best_project") or "",
+            "outcome": flex.get("outcome") or "",
+            "why_now": flex.get("why_now") or "",
+            "credential": flex.get("credential") or "",
+        },
+        "target_role_source": role_source,
+        "recommended_roles": [
+            r.get("title") for r in (career.get("recommended_roles") or [])
+            if isinstance(r, dict) and r.get("title")
+        ],
+        "edit_history": [
+            e for e in (candidate.parsed_json or {}).get("_admin_edits", [])
+        ] if isinstance(candidate.parsed_json, dict) else [],
+    }
+
+
+@router.patch("/candidates/{candidate_id}/profile")
+async def admin_patch_candidate_profile(
+    candidate_id: int,
+    patch: CandidateProfilePatch,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Correct a candidate's profile. Omitted fields are left untouched.
+
+    Every edit appends a before/after entry to parsed_json._admin_edits so the
+    change is attributable and reversible.
+    """
+    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # Deep-copy the JSONB blobs. SQLAlchemy does not track in-place mutation of
+    # a JSONB dict, so mutating candidate.parsed_json directly would not persist.
+    parsed = copy.deepcopy(candidate.parsed_json) if isinstance(candidate.parsed_json, dict) else {}
+    flex = copy.deepcopy(candidate.flex_notes) if isinstance(candidate.flex_notes, dict) else {}
+    parsed.setdefault("personal_info", {})
+    parsed.setdefault("preferences", {})
+    parsed.setdefault("career_analysis", {})
+
+    personal = parsed["personal_info"]
+    prefs = parsed["preferences"]
+    career = parsed["career_analysis"]
+
+    changes = {}
+
+    def _record(field, before, after):
+        if before != after:
+            changes[field] = {"before": before, "after": after}
+
+    # ── target role: write all three places precedence can read ──────────────
+    if patch.target_role is not None:
+        role = patch.target_role.strip()
+        before = flex.get("target_role_user_input") or ""
+        # 1. highest-precedence field, read by _derive_role_and_locations
+        flex["target_role_user_input"] = role
+        # 2. recommended_roles[0].title, read by the /search payload builder
+        rec = career.get("recommended_roles")
+        if not isinstance(rec, list) or not rec:
+            rec = [{}]
+        if not isinstance(rec[0], dict):
+            rec[0] = {}
+        rec[0]["title"] = role
+        rec[0].setdefault("seniority", "entry")
+        career["recommended_roles"] = rec
+        # 3. the column, used as the final fallback
+        candidate.target_roles = [role] if role else []
+        _record("target_role", before, role)
+
+    # ── skills: order matters, first 3 become the email headline ─────────────
+    if patch.skills is not None:
+        cleaned = _clean_str_list(patch.skills)
+        before = _clean_str_list(personal.get("skills_detected") or parsed.get("skills"))
+        personal["skills_detected"] = cleaned
+        if "skills" in parsed:            # keep the fallback key consistent
+            parsed["skills"] = cleaned
+        _record("skills", before, cleaned)
+
+    # ── preferences ──────────────────────────────────────────────────────────
+    if patch.locations is not None:
+        cleaned = _clean_str_list(patch.locations)
+        _record("locations", _clean_str_list(prefs.get("locations")), cleaned)
+        prefs["locations"] = cleaned
+
+    if patch.company_size is not None:
+        _record("company_size", prefs.get("company_size") or "", patch.company_size.strip())
+        prefs["company_size"] = patch.company_size.strip()
+
+    if patch.company_stage is not None:
+        _record("company_stage", prefs.get("company_stage") or "", patch.company_stage.strip())
+        prefs["company_stage"] = patch.company_stage.strip()
+
+    if patch.industries is not None:
+        cleaned = _clean_str_list(patch.industries)
+        _record("industries", _clean_str_list(prefs.get("industry_interests")), cleaned)
+        prefs["industry_interests"] = cleaned
+
+    if patch.niche_keywords is not None:
+        cleaned = _clean_str_list(patch.niche_keywords)
+        _record("niche_keywords", _clean_str_list(prefs.get("niche_keywords")), cleaned)
+        prefs["niche_keywords"] = cleaned
+
+    if patch.work_mode is not None:
+        _record("work_mode", prefs.get("work_mode") or "", patch.work_mode.strip())
+        prefs["work_mode"] = patch.work_mode.strip()
+
+    if patch.extra_manager_titles is not None:
+        # Cap at 30: _merge_extra_titles holds each segment under 60 titles, above
+        # which Apollo result quality degrades.
+        cleaned = _clean_str_list(patch.extra_manager_titles)[:30]
+        _record("extra_manager_titles",
+                _clean_str_list(prefs.get("extra_manager_titles")), cleaned)
+        prefs["extra_manager_titles"] = cleaned
+
+    # ── dream companies (own column) ─────────────────────────────────────────
+    if patch.dream_companies is not None:
+        cleaned = _clean_str_list(patch.dream_companies)[:10]  # same cap as the quiz
+        _record("dream_companies", _clean_str_list(candidate.dream_companies), cleaned)
+        candidate.dream_companies = cleaned
+
+    # ── flex_notes: these feed SENDER SIGNAL in every generated email ────────
+    for field in ("best_project", "outcome", "why_now", "credential"):
+        val = getattr(patch, field)
+        if val is not None:
+            _record(field, flex.get(field) or "", val.strip())
+            flex[field] = val.strip()
+
+    if not changes:
+        return {"ok": True, "candidate_id": candidate.id, "changed": {}, "note": "no changes"}
+
+    # ── audit trail ──────────────────────────────────────────────────────────
+    history = parsed.get("_admin_edits")
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "admin_id": admin.id,
+        "admin_email": admin.email,
+        "reason": (patch.reason or "").strip(),
+        "changes": changes,
+    })
+    parsed["_admin_edits"] = history[-50:]  # keep the last 50 edits
+
+    candidate.parsed_json = parsed
+    candidate.flex_notes = flex
+    db.commit()
+
+    return {
+        "ok": True,
+        "candidate_id": candidate.id,
+        "changed": changes,
+        "note": (
+            "Profile updated. Leads already collected are unaffected — "
+            "re-run lead discovery to apply the new targeting. Emails not yet "
+            "sent will use the new skills, since bodies are generated at send time."
+        ),
+    }
