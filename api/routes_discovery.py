@@ -672,9 +672,6 @@ async def search_leads(
                     "company_size": [prefs.get("company_size", "1,10000")],
                     "industries": prefs.get("industry_interests", []),
                     "niche_keywords": prefs.get("niche_keywords", []),
-                    # Operator override from the admin profile editor — merged
-                    # into every Apollo segment by _merge_extra_titles().
-                    "extra_manager_titles": prefs.get("extra_manager_titles", []),
                 },
                 work_preferences={
                     "work_mode": prefs.get("work_mode", "flexible"),

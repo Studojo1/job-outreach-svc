@@ -131,36 +131,6 @@ def _build_segments_from_strategy(strategy: dict) -> List[TargetSegment]:
     return segments
 
 
-def _merge_extra_titles(
-    segments: list[TargetSegment],
-    candidate_profile: CandidateProfile,
-) -> list[TargetSegment]:
-    """Append operator-supplied manager titles to every segment.
-
-    Set via the admin profile editor as
-    company_preferences["extra_manager_titles"]. Deduplicated case-insensitively
-    against titles already present. Capped so the combined list stays inside the
-    ~60-title ceiling above which Apollo result quality degrades.
-    """
-    prefs = candidate_profile.company_preferences or {}
-    extra = prefs.get("extra_manager_titles") or []
-    if isinstance(extra, str):
-        extra = [extra]
-    extra = [str(t).strip() for t in extra if str(t).strip()]
-    if not extra or not segments:
-        return segments
-
-    for seg in segments:
-        have = {t.lower() for t in seg.person_titles}
-        for t in extra:
-            if t.lower() not in have and len(seg.person_titles) < 60:
-                seg.person_titles.append(t)
-                have.add(t.lower())
-    logger.info("[FilterGen] Merged %d operator title(s) into %d segment(s)",
-                len(extra), len(segments))
-    return segments
-
-
 def _generate_filters_from_strategy(
     strategy: dict,
     candidate_profile: CandidateProfile,
@@ -181,12 +151,6 @@ def _generate_filters_from_strategy(
     if not all_segments:
         logger.warning("[FilterGen/LLM] No valid segments from strategy — using fallback segment")
         all_segments = [TargetSegment(company_size_range="1,10000", person_titles=list(FALLBACK_TITLES))]
-
-    # Operator-supplied manager titles (admin profile editor). These are merged
-    # into every segment so a support agent can widen targeting into a function
-    # the strategist would not infer from the resume alone — e.g. adding
-    # customer-support leadership for a data candidate open to CS roles.
-    all_segments = _merge_extra_titles(all_segments, candidate_profile)
 
     logger.info("[FilterGen/LLM] Segments from strategy: %d", len(all_segments))
     for seg in all_segments:
@@ -361,10 +325,6 @@ def _generate_filters_rules_based(
     tech_stack = None
     if clarity >= 3 and candidate_profile.tech_stack:
         tech_stack = [t.strip().lower().replace(" ", "_") for t in candidate_profile.tech_stack if t.strip()][:3] or None
-
-    # Operator-supplied manager titles — same merge as the LLM path, so the
-    # admin override applies regardless of which strategy path ran.
-    all_segments = _merge_extra_titles(all_segments, candidate_profile)
 
     # Job posting location
     org_job_locations = None
