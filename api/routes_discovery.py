@@ -12,7 +12,11 @@ from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
-from services.lead_discovery.lead_collector_service import collect_leads, collect_dream_company_leads
+from services.lead_discovery.lead_collector_service import (
+    collect_leads,
+    collect_dream_company_leads,
+    ApolloUnavailableError,
+)
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.candidate_schema import CandidateProfile
 from services.company_intelligence.company_enrichment_service import (
@@ -782,6 +786,18 @@ async def search_leads(
             background_tasks.add_task(_run_company_intel_bg, candidate.id)
 
         return {"status": "success", "leads_collected": count, "leads_scored": 0, "scoring_async": True}
+    except ApolloUnavailableError as e:
+        # Our lead provider is down or out of credits. This is NOT "no matches" —
+        # returning 0 here would show the user a successful search that found
+        # nobody, which is what the "0 hiring managers found" reports were.
+        logger.error("[DISCOVERY] Apollo unavailable for candidate %s: %s",
+                     request.candidate_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=("We could not reach our contact database just now, so no hiring "
+                    "managers could be loaded. This is a problem on our side, not with "
+                    "your profile. Your progress is saved — please try again shortly."),
+        )
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

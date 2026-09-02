@@ -519,11 +519,33 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
     return stages
 
 
+class ApolloUnavailableError(RuntimeError):
+    """Apollo cannot be reached with the credentials we hold.
+
+    Distinct from "the search legitimately matched nobody". Raised so callers
+    stop instead of walking the whole loosening ladder and reporting a
+    successful search that found zero people.
+    """
+
+
 def _try_collect_page(apollo_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Execute one Apollo search and return the people array."""
+    """Execute one Apollo search and return the people array.
+
+    A credential/quota failure is re-raised as ApolloUnavailableError. Swallowing
+    it and returning [] made an outage indistinguishable from an empty result
+    set: every user saw "0 hiring managers found" after sitting through all ten
+    loosening stages, and nothing in the funnel recorded that Apollo was down.
+    """
     try:
         api_response = search_people_chunked(apollo_payload)
         return api_response.get("people", [])
+    except ValueError as e:
+        # apollo_key_manager raises ValueError once every key is exhausted.
+        if "exhausted" in str(e).lower():
+            logger.error("[Apollo] No usable API key: %s", e)
+            raise ApolloUnavailableError(str(e)) from e
+        logger.error("Apollo API error: %s", e, exc_info=True)
+        return []
     except Exception as e:
         logger.error("Apollo API error: %s", e, exc_info=True)
         return []
@@ -669,6 +691,9 @@ def collect_leads(
 ) -> int:
     """Execute iterative Apollo search logic until target_leads are secured.
 
+    Raises ApolloUnavailableError if Apollo has no usable API key, rather than
+    walking the loosening ladder and returning 0 as though the search ran.
+
     Strategy:
       1. Paginate through Apollo using the original filters.
       2. If pagination exhausts before reaching target_leads, try
@@ -679,6 +704,15 @@ def collect_leads(
     excluded_companies: company names flagged by probe-loop LLM as hard mismatches —
     skipped even when Apollo returns them during full collection.
     """
+    # Fail fast when Apollo has no usable credentials. Without this the run walks
+    # every loosening stage making doomed calls, then reports "0 leads" several
+    # minutes later — the user sees a stuck progress screen and a false result.
+    from services.shared.apollo_key_manager import apollo_keys
+    if not apollo_keys.has_valid_key():
+        raise ApolloUnavailableError(
+            "Apollo has no usable API key — every configured key is exhausted or invalid."
+        )
+
     # Phase 1: Original filters — paginate fully
     logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
                 target_leads, len(excluded_companies or []))
