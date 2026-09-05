@@ -104,6 +104,28 @@ class SendOneRequest(BaseModel):
     email_account_id: Optional[int] = None
 
 
+class ContactCheckRequest(BaseModel):
+    """Just enough to identify the person — no email content."""
+
+    contact_name: str = Field(min_length=1, max_length=255)
+    company: str = Field(min_length=1, max_length=255)
+    contact_title: Optional[str] = Field(default=None, max_length=255)
+    linkedin_url: Optional[str] = Field(default=None, max_length=2000)
+    contact_email: Optional[str] = Field(default=None, max_length=320)
+    # Off by default. A lookup costs an Apollo API call, and drafting happens
+    # far more often than sending — so the preview answers from what we already
+    # know unless the caller explicitly asks to spend one.
+    allow_lookup: bool = False
+
+
+class ContactCheckResponse(BaseModel):
+    # "reachable" | "unreachable" | "unknown"
+    status: str
+    message: str
+    # True when answered from stored data, so the caller knows nothing was spent.
+    cached: bool
+
+
 class SendOneResponse(BaseModel):
     sent: bool
     to_email: str
@@ -180,6 +202,145 @@ def _sends_today(db: Session, candidate_id: int) -> int:
             EmailSent.sent_at >= since,
         )
         .count()
+    )
+
+
+def _log_resolution(user_id: str, company: str, outcome: str, cached: bool, source: str) -> None:
+    """One structured line per contact resolution.
+
+    This is the number that decides whether the product works: if Apollo finds
+    a verified address for most LinkedIn contacts, the flow is sound; if it
+    finds few, students do all the work of editing an email that can never be
+    sent. Nothing recorded that so far, so the hit rate was a guess.
+
+    Greppable on purpose — `grep EXT-RESOLVE` over the pod logs answers it
+    without a dashboard.
+    """
+    logger.info(
+        "[EXT-RESOLVE] outcome=%s cached=%s source=%s company=%s user=%s",
+        outcome, str(cached).lower(), source, (company or "")[:60], user_id,
+    )
+
+
+@router.post("/contact-check", response_model=ContactCheckResponse)
+def check_contact(
+    request: ContactCheckRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Can we actually reach this person?
+
+    Asked at DRAFT time, so a student learns there is no address before
+    writing an email rather than after. `no_contact_email` is the most likely
+    failure of the whole flow — Apollo only returns verified addresses and
+    rejects the guessed ones that bounce — and discovering it at the end,
+    having already edited the message, is the worst possible moment.
+
+    Free by default: answers from the page and from leads we already resolved.
+    Only spends an Apollo call when the caller passes allow_lookup.
+    """
+    from services.enrichment.enrichment_service import enrich_single_lead_classified
+
+    # The page itself gave us an address — nothing to resolve.
+    if request.contact_email:
+        _log_resolution(current_user.id, request.company, "reachable", True, "page")
+        return ContactCheckResponse(
+            status="reachable",
+            message="We have an address for this person.",
+            cached=True,
+        )
+
+    candidate = _resolve_candidate(db, current_user.id)
+    if not candidate:
+        return ContactCheckResponse(
+            status="unknown",
+            message="Add your resume and we'll check whether we can reach this person.",
+            cached=True,
+        )
+
+    lead = (
+        db.query(Lead)
+        .filter(
+            Lead.candidate_id == candidate.id,
+            Lead.name == request.contact_name,
+            Lead.company == request.company,
+            Lead.status.in_(EXTENSION_LEAD_STATUSES),
+        )
+        .order_by(Lead.id.desc())
+        .first()
+    )
+
+    # Already resolved once — reuse it rather than paying Apollo twice.
+    if lead and lead.email and lead.email_verified:
+        _log_resolution(current_user.id, request.company, "reachable", True, "cache")
+        return ContactCheckResponse(
+            status="reachable",
+            message="We can reach this person.",
+            cached=True,
+        )
+
+    # Already tried and failed. Apollo will not find them on a retry, so say so
+    # instead of spending another call to learn the same thing.
+    if lead and lead.status == "extension_no_email":
+        _log_resolution(current_user.id, request.company, "unreachable", True, "cache")
+        return ContactCheckResponse(
+            status="unreachable",
+            message="We don't have a verified email for this person yet.",
+            cached=True,
+        )
+
+    if not request.allow_lookup:
+        return ContactCheckResponse(
+            status="unknown",
+            message="We'll look for their email when you send.",
+            cached=True,
+        )
+
+    # Spend the lookup. The lead is committed first for the same reason as in
+    # send-one: a rollback here would discard it and the next attempt would pay
+    # Apollo again for the same person.
+    if lead is None:
+        lead = Lead(
+            candidate_id=candidate.id,
+            name=request.contact_name,
+            title=request.contact_title,
+            company=request.company,
+            linkedin_url=request.linkedin_url,
+            status="extension_pending",
+        )
+        db.add(lead)
+        db.commit()
+        db.refresh(lead)
+
+    result = enrich_single_lead_classified(lead)
+    if result.success:
+        lead.email = (result.data or {}).get("email")
+        lead.email_verified = True
+        db.commit()
+        _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
+        return ContactCheckResponse(
+            status="reachable", message="We can reach this person.", cached=False
+        )
+
+    lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
+    if result.error_type == "no_match":
+        lead.status = "extension_no_email"
+        db.commit()
+        _log_resolution(current_user.id, request.company, "unreachable", False, "apollo")
+        return ContactCheckResponse(
+            status="unreachable",
+            message="We don't have a verified email for this person yet.",
+            cached=False,
+        )
+
+    # Transient — do not record it as unreachable, or a temporary outage would
+    # permanently mark a findable person as a dead end.
+    db.commit()
+    _log_resolution(current_user.id, request.company, "error", False, result.error_type or "unknown")
+    return ContactCheckResponse(
+        status="unknown",
+        message="We couldn't check just now. You can still write your email.",
+        cached=False,
     )
 
 
@@ -280,7 +441,9 @@ def send_one_email(
     # ── Resolve the email address ────────────────────────────────────────
     # The only step that costs an Apollo credit, and it is skipped entirely
     # when we already hold a verified address for this person.
-    if not (lead.email and lead.email_verified):
+    if lead.email and lead.email_verified:
+        _log_resolution(current_user.id, request.company, "reachable", True, "cache")
+    else:
         result = enrich_single_lead_classified(lead)
         if not result.success:
             # Keep the lead and record what happened. enrichment_fail_count is
@@ -289,6 +452,7 @@ def send_one_email(
             lead.status = "extension_no_email" if result.error_type == "no_match" else "extension_lookup_failed"
             db.commit()
             if result.error_type == "no_match":
+                _log_resolution(current_user.id, request.company, "unreachable", False, "apollo")
                 raise HTTPException(
                     status_code=422,
                     detail="no_contact_email: We couldn't find a verified email for this person. Your draft is saved.",
@@ -299,6 +463,7 @@ def send_one_email(
                     status_code=503,
                     detail="lookup_unavailable: We can't look up contacts right now. Your draft is saved — try again shortly.",
                 )
+            _log_resolution(current_user.id, request.company, "error", False, result.error_type or "unknown")
             logger.warning(
                 "[EXT-SEND] Apollo lookup failed (%s): %s",
                 result.error_type, result.error_detail[:200],
@@ -309,6 +474,7 @@ def send_one_email(
             )
         lead.email = (result.data or {}).get("email")
         lead.email_verified = True
+        _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
         # Commit the address we just PAID Apollo for. If the send below fails
         # and this were rolled back, the retry would buy the same address a
         # second time.
