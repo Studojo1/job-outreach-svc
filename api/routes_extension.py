@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 
 from api.dependencies import get_current_user
 from database.session import get_db
-from database.models import Candidate, EmailAccount, Lead, User
+from database.models import Candidate, EmailAccount, EmailSent, Lead, User
 
 logger = logging.getLogger(__name__)
 
@@ -142,19 +142,25 @@ def _resolve_email_account(
 
 
 def _sends_today(db: Session, candidate_id: int) -> int:
-    """How many extension emails this student has already sent today.
+    """How many extension emails this student has actually sent in 24h.
 
-    Counted from the Lead rows this endpoint creates, which is the only record
-    of extension sends. ``status`` is set to "extension_sent" precisely so this
-    query can find them without touching campaign data.
+    Counted from EmailSent.sent_at, NOT from the Lead rows. A lead is reused
+    when the student emails the same person twice, so it keeps its original
+    created_at — counting leads meant a student re-contacting people saved last
+    week saw a count of zero and walked straight past the cap.
+
+    Extension sends are the rows with no campaign_id: they belong to no
+    campaign, which is the entire point of this endpoint.
     """
     since = datetime.utcnow() - timedelta(days=1)
     return (
-        db.query(Lead)
+        db.query(EmailSent)
+        .join(Lead, EmailSent.lead_id == Lead.id)
         .filter(
             Lead.candidate_id == candidate_id,
-            Lead.status == "extension_sent",
-            Lead.created_at >= since,
+            EmailSent.campaign_id.is_(None),
+            EmailSent.status == "sent",
+            EmailSent.sent_at >= since,
         )
         .count()
     )
@@ -231,7 +237,14 @@ def send_one_email(
             status="extension_pending",
         )
         db.add(lead)
-        db.flush()
+        # COMMIT before the Apollo call, not flush. Everything below can fail,
+        # and a rollback would discard this row — so the next attempt would
+        # insert a fresh lead and pay Apollo again for the same person. That is
+        # worst for `no_match`: Apollo charges for a lookup that finds nothing,
+        # so a student retrying a contact with no findable address would burn a
+        # credit every time. Persisting first makes the dedupe above real.
+        db.commit()
+        db.refresh(lead)
 
     # ── Resolve the email address ────────────────────────────────────────
     # The only step that costs an Apollo credit, and it is skipped entirely
@@ -239,7 +252,11 @@ def send_one_email(
     if not (lead.email and lead.email_verified):
         result = enrich_single_lead_classified(lead)
         if not result.success:
-            db.rollback()
+            # Keep the lead and record what happened. enrichment_fail_count is
+            # the column the enrichment flow already uses for this.
+            lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
+            lead.status = "extension_no_email" if result.error_type == "no_match" else "extension_lookup_failed"
+            db.commit()
             if result.error_type == "no_match":
                 raise HTTPException(
                     status_code=422,
@@ -261,11 +278,13 @@ def send_one_email(
             )
         lead.email = (result.data or {}).get("email")
         lead.email_verified = True
-        db.flush()
+        # Commit the address we just PAID Apollo for. If the send below fails
+        # and this were rolled back, the retry would buy the same address a
+        # second time.
+        db.commit()
 
     to_email = lead.email
     if not to_email:
-        db.rollback()
         raise HTTPException(
             status_code=422,
             detail="no_contact_email: We couldn't find a verified email for this person. Your draft is saved.",
@@ -282,7 +301,9 @@ def send_one_email(
             email_account_id=account.id,
         )
     except Exception as e:
-        db.rollback()
+        # No rollback: the verified address is already paid for and worth
+        # keeping. Nothing was charged to the student — the credit is deducted
+        # further down, only on success.
         logger.error("[EXT-SEND] Gmail send raised for user %s: %s", current_user.id, e)
         raise HTTPException(
             status_code=502,
@@ -290,7 +311,6 @@ def send_one_email(
         )
 
     if not ok:
-        db.rollback()
         raise HTTPException(
             status_code=502,
             detail="send_failed: Gmail didn't accept the message. Your draft is saved.",
@@ -306,6 +326,22 @@ def send_one_email(
             current_user.id,
         )
 
+    # Record what went out. This is what the cap counts, and it gives the
+    # student a durable record of the email rather than only a Lead status.
+    # campaign_id stays NULL — this email belongs to no campaign, which is the
+    # whole point of the endpoint.
+    db.add(
+        EmailSent(
+            campaign_id=None,
+            lead_id=lead.id,
+            to_email=to_email,
+            subject=request.subject,
+            body=request.body,
+            enrichment_status="enriched",
+            status="sent",
+            sent_at=datetime.utcnow(),
+        )
+    )
     lead.status = "extension_sent"
     db.commit()
 
