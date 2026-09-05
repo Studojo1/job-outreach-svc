@@ -308,7 +308,7 @@ def send_one_email(
         raise HTTPException(
             status_code=502,
             detail="send_failed: Gmail rejected the message. Your draft is saved.",
-        )
+        ) from e
 
     if not ok:
         raise HTTPException(

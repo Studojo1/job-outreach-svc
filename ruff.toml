@@ -1,0 +1,40 @@
+# Ruff — the mechanical checks, tuned to what actually catches bugs here.
+#
+# Deliberately narrow. A linter that reports 91 findings on existing, working
+# code gets ignored, and then it catches nothing at all. These rules are the
+# ones where a hit means something is genuinely wrong.
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "F",    # pyflakes — undefined names, unused imports. Real bugs, no debate.
+    "E9",   # syntax and IO errors only, not whitespace opinions.
+    "B",    # bugbear — mutable defaults, exception chaining, silent surprises.
+    "S",    # bandit — hardcoded secrets, SQL injection, unsafe calls.
+    "T20",  # stray print()/pprint left in a service.
+]
+
+ignore = [
+    # FastAPI's core idiom is `x = Depends(...)` in a signature. Every route in
+    # this service uses it; flagging it would flag the framework.
+    "B008",
+    # `datetime.utcnow()` is used throughout the models and services. Changing
+    # it is a real migration, not a lint fix — and doing it piecemeal would mix
+    # naive and aware datetimes in the same columns, which is worse.
+    "DTZ003",
+    # try/except/pass is used deliberately in several best-effort paths where
+    # failing loudly would break the request for no benefit.
+    "S110",
+]
+
+[lint.per-file-ignores]
+# Assertions are the point of a test.
+"tests/*" = ["S101"]
+"scripts/*" = ["T20"]      # scripts are meant to print
+"migrations/*" = ["ALL"]   # historical, never edited
+
+[lint.flake8-bugbear]
+# FastAPI dependency injection, again — these are safe as defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
