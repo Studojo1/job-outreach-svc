@@ -35,6 +35,7 @@ NOTHING in the campaign path is read, called, or modified here.
 """
 
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -59,6 +60,22 @@ CREDITS_PER_SEND = 1
 # shared Apollo quota before anyone notices. This is a blast-radius limit, not
 # a product decision.
 DAILY_SEND_CAP = 25
+
+# Every status this endpoint sets. Used to scope lead reuse so we never touch a
+# lead the campaign flow owns — those carry statuses like "new" or "contacted".
+# Kill switch. Turning a feature off must not require a deploy — a deploy is
+# slow exactly when you most need the feature stopped. Read per-request, so
+# `kubectl set env` takes effect on the next call.
+def _sends_disabled() -> bool:
+    return os.getenv("EXTENSION_SEND_DISABLED", "").strip().lower() in {"1", "true", "yes"}
+
+
+EXTENSION_LEAD_STATUSES = (
+    "extension_pending",
+    "extension_sent",
+    "extension_no_email",
+    "extension_lookup_failed",
+)
 
 
 class SendOneRequest(BaseModel):
@@ -182,6 +199,14 @@ def send_one_email(
     from services.enrichment.enrichment_service import enrich_single_lead_classified
     from services.email_campaign.gmail_send_service import send_email_via_gmail
 
+    # Checked before anything else: when this is off, nothing is looked up,
+    # nothing is charged, and nothing is written.
+    if _sends_disabled():
+        raise HTTPException(
+            status_code=503,
+            detail="send_paused: Sending is paused right now. Your draft is saved.",
+        )
+
     # ── Free checks first ────────────────────────────────────────────────
     candidate = _resolve_candidate(db, current_user.id)
     if not candidate:
@@ -215,12 +240,18 @@ def send_one_email(
     # A Lead is how this service represents "a person you might email", and
     # both Apollo enrichment and the send path expect one. Reusing an existing
     # row for the same person avoids paying Apollo twice for one contact.
+    # Only ever reuse a lead THIS endpoint created. The name+company match
+    # would otherwise hit a lead discovered by the campaign flow, and the
+    # status writes below would overwrite its campaign state — corrupting a
+    # row this feature does not own, in a way no rollback here could undo.
+    # A duplicate row is the cheaper mistake.
     lead = (
         db.query(Lead)
         .filter(
             Lead.candidate_id == candidate.id,
             Lead.name == request.contact_name,
             Lead.company == request.company,
+            Lead.status.in_(EXTENSION_LEAD_STATUSES),
         )
         .order_by(Lead.id.desc())
         .first()
