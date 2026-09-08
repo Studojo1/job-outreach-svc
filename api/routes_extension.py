@@ -300,6 +300,37 @@ def _log_resolution(user_id: str, company: str, outcome: str, cached: bool, sour
     )
 
 
+def _reachable(
+    contact: Dict[str, Any],
+    message: str,
+    cached: bool,
+) -> "ContactCheckResponse":
+    """We have an address: naming them is a promise we can keep."""
+    return ContactCheckResponse(
+        status="reachable",
+        message=message,
+        cached=cached,
+        contact_name=contact["name"],
+        contact_title=contact.get("title"),
+        found_by_search=bool(contact.get("found_by_search")),
+    )
+
+
+def _not_yet(message: str, cached: bool, status: str = "unreachable") -> "ContactCheckResponse":
+    """We have no address, so we name NOBODY.
+
+    Announcing "we found Santoshi — Recruiter at Joveo" and then being unable
+    to send is worse than saying nothing: the student believes they have a
+    contact, writes to that person in their head, and the tool cannot deliver
+    it. A name is a promise that we can reach them. We only make it when we
+    can keep it.
+
+    The name is still stored on the lead — a later lookup may resolve the
+    address, and then we can say it.
+    """
+    return ContactCheckResponse(status=status, message=message, cached=cached)
+
+
 @router.post("/contact-check", response_model=ContactCheckResponse)
 def check_contact(
     request: ContactCheckRequest,
@@ -345,18 +376,9 @@ def check_contact(
             message=f"We couldn't find anyone at {request.company} to write to yet.",
             cached=True,
         )
-    found_by_search = bool(contact.get("found_by_search"))
-
     if contact.get("email"):
         _log_resolution(current_user.id, request.company, "reachable", True, "search")
-        return ContactCheckResponse(
-            status="reachable",
-            message=f"We can reach {contact['name']}.",
-            cached=True,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
-        )
+        return _reachable(contact, f"We can reach {contact['name']}.", True)
 
     lead = (
         db.query(Lead)
@@ -373,37 +395,19 @@ def check_contact(
     # Already resolved once — reuse it rather than paying Apollo twice.
     if lead and lead.email and lead.email_verified:
         _log_resolution(current_user.id, request.company, "reachable", True, "cache")
-        return ContactCheckResponse(
-            status="reachable",
-            message=f"We can reach {contact['name']}.",
-            cached=True,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
-        )
+        return _reachable(contact, f"We can reach {contact['name']}.", True)
 
     # Already tried and failed. Apollo will not find them on a retry, so say so
     # instead of spending another call to learn the same thing.
     if lead and lead.status == "extension_no_email":
         _log_resolution(current_user.id, request.company, "unreachable", True, "cache")
-        return ContactCheckResponse(
-            status="unreachable",
-            message=f"We found {contact['name']}, but don't have a verified email address for them yet.",
-            cached=True,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
+        return _not_yet(
+            f"We don't have a confirmed email address for anyone at {request.company} yet.",
+            True,
         )
 
     if not request.allow_lookup:
-        return ContactCheckResponse(
-            status="unknown",
-            message=f"We'll look for {contact['name']}'s email when you send.",
-            cached=True,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
-        )
+        return _not_yet("We'll look for an address when you send.", True, status="unknown")
 
     # Spend the lookup. The lead is committed first for the same reason as in
     # send-one: a rollback here would discard it and the next attempt would pay
@@ -427,45 +431,23 @@ def check_contact(
         lead.email_verified = True
         db.commit()
         _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
-        return ContactCheckResponse(
-            status="reachable",
-            message=f"We can reach {contact['name']}.",
-            cached=False,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
-        )
+        return _reachable(contact, f"We can reach {contact['name']}.", False)
 
     lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
     if result.error_type == "no_match":
         lead.status = "extension_no_email"
         db.commit()
         _log_resolution(current_user.id, request.company, "unreachable", False, "apollo")
-        return ContactCheckResponse(
-            status="unreachable",
-            # Name them. Losing the name here is what made the page say
-            # "we found Santoshi" and then "we'll find whoever hires for this
-            # role" one click later — two contradictory claims about the same
-            # draft, which reads as the tool not knowing what it is doing.
-            message=f"We found {contact['name']}, but don't have a verified email address for them yet.",
-            cached=False,
-            contact_name=contact["name"],
-            contact_title=contact.get("title"),
-            found_by_search=found_by_search,
+        return _not_yet(
+            f"We don't have a confirmed email address for anyone at {request.company} yet.",
+            False,
         )
 
     # Transient — do not record it as unreachable, or a temporary outage would
     # permanently mark a findable person as a dead end.
     db.commit()
     _log_resolution(current_user.id, request.company, "error", False, result.error_type or "unknown")
-    return ContactCheckResponse(
-        status="unknown",
-        message="We couldn't check just now. You can still write your email.",
-        cached=False,
-        contact_name=contact["name"],
-        contact_title=contact.get("title"),
-        found_by_search=found_by_search,
-    )
+    return _not_yet("We couldn't check just now. You can still write your email.", False, status="unknown")
 
 
 @router.post("/send-one", response_model=SendOneResponse)
