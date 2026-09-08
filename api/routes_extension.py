@@ -37,7 +37,7 @@ NOTHING in the campaign path is read, called, or modified here.
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -84,9 +84,12 @@ class SendOneRequest(BaseModel):
     # Who to write to. The extension scrapes these off the job page; all of it
     # is public. What it CANNOT see is the email address, which is the one
     # field Apollo is paid to return.
-    contact_name: str = Field(min_length=1, max_length=255)
+    # OPTIONAL — see ContactCheckRequest. When the page named nobody we find
+    # the hiring contacts ourselves instead of refusing to send.
+    contact_name: Optional[str] = Field(default=None, max_length=255)
     company: str = Field(min_length=1, max_length=255)
     contact_title: Optional[str] = Field(default=None, max_length=255)
+    role: Optional[str] = Field(default=None, max_length=255)
     linkedin_url: Optional[str] = Field(default=None, max_length=2000)
     # When a page did expose an address, skip the lookup entirely and save the
     # Apollo call. Deliberately a plain str: pydantic's EmailStr needs the
@@ -107,9 +110,14 @@ class SendOneRequest(BaseModel):
 class ContactCheckRequest(BaseModel):
     """Just enough to identify the person — no email content."""
 
-    contact_name: str = Field(min_length=1, max_length=255)
+    # OPTIONAL. A job page names someone maybe half the time; when it does
+    # not, we search the company for whoever actually hires for this role
+    # rather than calling it a dead end. Requiring a name here is what made
+    # "no contact on the page" mean "you can never send this".
+    contact_name: Optional[str] = Field(default=None, max_length=255)
     company: str = Field(min_length=1, max_length=255)
     contact_title: Optional[str] = Field(default=None, max_length=255)
+    role: Optional[str] = Field(default=None, max_length=255)
     linkedin_url: Optional[str] = Field(default=None, max_length=2000)
     contact_email: Optional[str] = Field(default=None, max_length=320)
     # Off by default. A lookup costs an Apollo API call, and drafting happens
@@ -124,6 +132,10 @@ class ContactCheckResponse(BaseModel):
     message: str
     # True when answered from stored data, so the caller knows nothing was spent.
     cached: bool
+    # Set when we found the person ourselves rather than being given one.
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    found_by_search: bool = False
 
 
 class SendOneResponse(BaseModel):
@@ -131,6 +143,12 @@ class SendOneResponse(BaseModel):
     to_email: str
     credits_charged: int
     lead_id: int
+    # Who it actually went to. When the page named nobody we found someone, and
+    # the student must be told who rather than discovering it in their Sent
+    # folder.
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    found_by_search: bool = False
 
 
 def _resolve_candidate(db: Session, user_id: str) -> Optional[Candidate]:
@@ -205,6 +223,66 @@ def _sends_today(db: Session, candidate_id: int) -> int:
     )
 
 
+def _resolve_contact(
+    db: Session,
+    candidate_id: int,
+    request: Any,
+) -> Optional[Dict[str, Any]]:
+    """Who are we writing to?
+
+    The page's own contact when it named one. Otherwise the best hiring contact
+    we can find at that company — because "this page didn't name anyone" is a
+    property of the job board, not a reason the student cannot reach the team.
+
+    Returns None only when the company genuinely yields nobody.
+    """
+    if (request.contact_name or "").strip():
+        return {
+            "name": request.contact_name.strip(),
+            "title": request.contact_title,
+            "linkedin_url": request.linkedin_url,
+            "email": request.contact_email,
+            "found_by_search": False,
+        }
+
+    # Reuse a contact we already found for this company — it saves an Apollo
+    # search, and keeps the student writing to the same person across drafts
+    # rather than a different stranger each time.
+    prior = (
+        db.query(Lead)
+        .filter(
+            Lead.candidate_id == candidate_id,
+            Lead.company == request.company,
+            Lead.status.in_(EXTENSION_LEAD_STATUSES),
+            Lead.name.isnot(None),
+        )
+        .order_by(Lead.id.desc())
+        .first()
+    )
+    if prior and (prior.name or "").strip():
+        return {
+            "name": prior.name,
+            "title": prior.title,
+            "linkedin_url": prior.linkedin_url,
+            "email": prior.email if prior.email_verified else None,
+            "found_by_search": True,
+        }
+
+    from services.extension.contact_finder import find_hiring_contacts
+
+    found = find_hiring_contacts(request.company, getattr(request, "role", None), limit=3)
+    if not found:
+        return None
+    best = found[0]
+    return {
+        "name": best["name"],
+        "title": best.get("title"),
+        "linkedin_url": best.get("linkedin_url"),
+        "email": best.get("email"),
+        "found_by_search": True,
+    }
+
+
 def _log_resolution(user_id: str, company: str, outcome: str, cached: bool, source: str) -> None:
     """One structured line per contact resolution.
 
@@ -258,11 +336,33 @@ def check_contact(
             cached=True,
         )
 
+    # Same resolution as send-one, so the preview tells the truth about who
+    # the email will actually go to.
+    contact = _resolve_contact(db, candidate.id, request)
+    if contact is None:
+        return ContactCheckResponse(
+            status="unreachable",
+            message=f"We couldn't find anyone at {request.company} to write to yet.",
+            cached=True,
+        )
+    found_by_search = bool(contact.get("found_by_search"))
+
+    if contact.get("email"):
+        _log_resolution(current_user.id, request.company, "reachable", True, "search")
+        return ContactCheckResponse(
+            status="reachable",
+            message=f"We can reach {contact['name']}.",
+            cached=True,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
+        )
+
     lead = (
         db.query(Lead)
         .filter(
             Lead.candidate_id == candidate.id,
-            Lead.name == request.contact_name,
+            Lead.name == contact["name"],
             Lead.company == request.company,
             Lead.status.in_(EXTENSION_LEAD_STATUSES),
         )
@@ -275,8 +375,11 @@ def check_contact(
         _log_resolution(current_user.id, request.company, "reachable", True, "cache")
         return ContactCheckResponse(
             status="reachable",
-            message="We can reach this person.",
+            message=f"We can reach {contact['name']}.",
             cached=True,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
         )
 
     # Already tried and failed. Apollo will not find them on a retry, so say so
@@ -285,15 +388,21 @@ def check_contact(
         _log_resolution(current_user.id, request.company, "unreachable", True, "cache")
         return ContactCheckResponse(
             status="unreachable",
-            message="We don't have a verified email for this person yet.",
+            message=f"We don't have a verified email for {contact['name']} yet.",
             cached=True,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
         )
 
     if not request.allow_lookup:
         return ContactCheckResponse(
             status="unknown",
-            message="We'll look for their email when you send.",
+            message=f"We'll look for {contact['name']}'s email when you send.",
             cached=True,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
         )
 
     # Spend the lookup. The lead is committed first for the same reason as in
@@ -302,10 +411,10 @@ def check_contact(
     if lead is None:
         lead = Lead(
             candidate_id=candidate.id,
-            name=request.contact_name,
-            title=request.contact_title,
+            name=contact["name"],
+            title=contact.get("title"),
             company=request.company,
-            linkedin_url=request.linkedin_url,
+            linkedin_url=contact.get("linkedin_url"),
             status="extension_pending",
         )
         db.add(lead)
@@ -319,7 +428,12 @@ def check_contact(
         db.commit()
         _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
         return ContactCheckResponse(
-            status="reachable", message="We can reach this person.", cached=False
+            status="reachable",
+            message=f"We can reach {contact['name']}.",
+            cached=False,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
         )
 
     lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
@@ -406,11 +520,23 @@ def send_one_email(
     # status writes below would overwrite its campaign state — corrupting a
     # row this feature does not own, in a way no rollback here could undo.
     # A duplicate row is the cheaper mistake.
+    # Who to write to. The page's contact, or the best hiring contact we can
+    # find at the company — a page that names nobody is not a reason to give up.
+    contact = _resolve_contact(db, candidate.id, request)
+    if contact is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no_contact_found: We couldn't find anyone at {request.company} to write to. "
+                "Your draft is saved."
+            ),
+        )
+
     lead = (
         db.query(Lead)
         .filter(
             Lead.candidate_id == candidate.id,
-            Lead.name == request.contact_name,
+            Lead.name == contact["name"],
             Lead.company == request.company,
             Lead.status.in_(EXTENSION_LEAD_STATUSES),
         )
@@ -420,12 +546,12 @@ def send_one_email(
     if lead is None:
         lead = Lead(
             candidate_id=candidate.id,
-            name=request.contact_name,
-            title=request.contact_title,
+            name=contact["name"],
+            title=contact.get("title"),
             company=request.company,
-            linkedin_url=request.linkedin_url,
-            email=str(request.contact_email) if request.contact_email else None,
-            email_verified=bool(request.contact_email),
+            linkedin_url=contact.get("linkedin_url"),
+            email=str(contact["email"]) if contact.get("email") else None,
+            email_verified=bool(contact.get("email")),
             status="extension_pending",
         )
         db.add(lead)
@@ -551,4 +677,7 @@ def send_one_email(
         to_email=to_email,
         credits_charged=CREDITS_PER_SEND,
         lead_id=lead.id,
+        contact_name=lead.name,
+        contact_title=lead.title,
+        found_by_search=bool(contact.get("found_by_search")),
     )
