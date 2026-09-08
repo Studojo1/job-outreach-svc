@@ -388,7 +388,7 @@ def check_contact(
         _log_resolution(current_user.id, request.company, "unreachable", True, "cache")
         return ContactCheckResponse(
             status="unreachable",
-            message=f"We don't have a verified email for {contact['name']} yet.",
+            message=f"We found {contact['name']}, but don't have a verified email address for them yet.",
             cached=True,
             contact_name=contact["name"],
             contact_title=contact.get("title"),
@@ -443,8 +443,15 @@ def check_contact(
         _log_resolution(current_user.id, request.company, "unreachable", False, "apollo")
         return ContactCheckResponse(
             status="unreachable",
-            message="We don't have a verified email for this person yet.",
+            # Name them. Losing the name here is what made the page say
+            # "we found Santoshi" and then "we'll find whoever hires for this
+            # role" one click later — two contradictory claims about the same
+            # draft, which reads as the tool not knowing what it is doing.
+            message=f"We found {contact['name']}, but don't have a verified email address for them yet.",
             cached=False,
+            contact_name=contact["name"],
+            contact_title=contact.get("title"),
+            found_by_search=found_by_search,
         )
 
     # Transient — do not record it as unreachable, or a temporary outage would
@@ -455,6 +462,9 @@ def check_contact(
         status="unknown",
         message="We couldn't check just now. You can still write your email.",
         cached=False,
+        contact_name=contact["name"],
+        contact_title=contact.get("title"),
+        found_by_search=found_by_search,
     )
 
 
