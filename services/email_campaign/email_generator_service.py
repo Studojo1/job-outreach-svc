@@ -248,6 +248,16 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     # Resume parsers often grab a header/title instead of the name (e.g. "AIML STUDENT").
     # Reject those so we fall back to the authenticated account name.
     _NON_NAME_WORDS = {"student", "resume", "cv", "curriculum", "vitae", "fresher", "aiml", "profile", "objective"}
+    # Words that appear in resume section headings but never inside a person's
+    # name. Used to tell "OTHER INTERESTS AND ACTIVITIES" from "KAAVYA CHANDRASEKHAR".
+    _HEADER_WORDS = {
+        "and", "or", "of", "the", "in", "for", "with", "other", "interests",
+        "activities", "experience", "education", "skills", "projects", "summary",
+        "contact", "details", "achievements", "certifications", "languages",
+        "hobbies", "references", "work", "personal", "information", "career",
+        "employment", "history", "qualification", "qualifications", "extra",
+        "curricular", "awards", "publications", "internship", "internships",
+    }
     def _is_valid_name(n: str) -> bool:
         if not n:
             return False
@@ -257,13 +267,24 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
         words = low.split()
         if any(w in _NON_NAME_WORDS for w in words):
             return False
-        # All-caps multi-word strings are almost always resume section headers, not names.
+        # All-caps multi-word strings are often resume section headers ("OTHER
+        # INTERESTS AND ACTIVITIES"), but most people also type their own name in
+        # caps at the top of a resume. Rejecting every all-caps name threw away
+        # the correctly parsed name and fell back to the account name, which is
+        # frequently stored in the wrong order. So reject only what actually
+        # looks like a heading: joining words, or more names than a person has.
         if n.isupper() and len(words) >= 2:
-            return False
+            if len(words) > 4:
+                return False
+            if any(w in _HEADER_WORDS for w in words):
+                return False
         return True
 
     raw_name = personal.get("name") or parsed.get("name") or ""
     name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
+    # A name typed in caps on the resume should not sign the email as "KAAVYA".
+    if name.isupper():
+        name = name.title()
 
     # Skills. Ranking happens after primary_field is known -- see below. Taking
     # skills[:3] in raw resume order meant whatever the parser emitted first
