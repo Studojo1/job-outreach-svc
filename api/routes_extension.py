@@ -198,7 +198,7 @@ def _resolve_email_account(
     return account
 
 
-def _sends_today(db: Session, candidate_id: int) -> int:
+def _sends_today(db: Session, user_id: str) -> int:
     """How many extension emails this student has actually sent in 24h.
 
     Counted from EmailSent.sent_at, NOT from the Lead rows. A lead is reused
@@ -213,8 +213,14 @@ def _sends_today(db: Session, candidate_id: int) -> int:
     return (
         db.query(EmailSent)
         .join(Lead, EmailSent.lead_id == Lead.id)
+        .join(Candidate, Lead.candidate_id == Candidate.id)
         .filter(
-            Lead.candidate_id == candidate_id,
+            # Scoped to the USER, across every candidate row they own.
+            # Scoping to one candidate_id made the cap trivially resettable:
+            # /candidate/upload creates a NEW Candidate on every upload, so
+            # re-uploading a resume produced a fresh id with zero sends against
+            # it. A limit that resets on demand is not a limit.
+            Candidate.user_id == user_id,
             EmailSent.campaign_id.is_(None),
             EmailSent.status == "sent",
             EmailSent.sent_at >= since,
@@ -227,6 +233,7 @@ def _resolve_contact(
     db: Session,
     candidate_id: int,
     request: Any,
+    user_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Who are we writing to?
 
@@ -248,17 +255,23 @@ def _resolve_contact(
     # Reuse a contact we already found for this company — it saves an Apollo
     # search, and keeps the student writing to the same person across drafts
     # rather than a different stranger each time.
-    prior = (
-        db.query(Lead)
-        .filter(
-            Lead.candidate_id == candidate_id,
-            Lead.company == request.company,
-            Lead.status.in_(EXTENSION_LEAD_STATUSES),
-            Lead.name.isnot(None),
-        )
-        .order_by(Lead.id.desc())
-        .first()
+    # Searched across every candidate row this user owns, not just the current
+    # one. /candidate/upload creates a NEW Candidate each time, so scoping to
+    # one id meant a student who re-uploaded their resume lost every contact
+    # they had already resolved — and we paid Apollo a second time for the
+    # same person at the same company.
+    prior_q = db.query(Lead).filter(
+        Lead.company == request.company,
+        Lead.status.in_(EXTENSION_LEAD_STATUSES),
+        Lead.name.isnot(None),
     )
+    if user_id:
+        prior_q = prior_q.join(Candidate, Lead.candidate_id == Candidate.id).filter(
+            Candidate.user_id == user_id
+        )
+    else:
+        prior_q = prior_q.filter(Lead.candidate_id == candidate_id)
+    prior = prior_q.order_by(Lead.id.desc()).first()
     if prior and (prior.name or "").strip():
         return {
             "name": prior.name,
@@ -369,7 +382,7 @@ def check_contact(
 
     # Same resolution as send-one, so the preview tells the truth about who
     # the email will actually go to.
-    contact = _resolve_contact(db, candidate.id, request)
+    contact = _resolve_contact(db, candidate.id, request, current_user.id)
     if contact is None:
         return ContactCheckResponse(
             status="unreachable",
@@ -484,7 +497,7 @@ def send_one_email(
 
     account = _resolve_email_account(db, current_user.id, request.email_account_id)
 
-    already = _sends_today(db, candidate.id)
+    already = _sends_today(db, current_user.id)
     if already >= DAILY_SEND_CAP:
         raise HTTPException(
             status_code=429,
@@ -514,7 +527,7 @@ def send_one_email(
     # A duplicate row is the cheaper mistake.
     # Who to write to. The page's contact, or the best hiring contact we can
     # find at the company — a page that names nobody is not a reason to give up.
-    contact = _resolve_contact(db, candidate.id, request)
+    contact = _resolve_contact(db, candidate.id, request, current_user.id)
     if contact is None:
         raise HTTPException(
             status_code=422,
