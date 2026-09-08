@@ -1075,10 +1075,12 @@ def _extract_unused_project(candidate: Candidate, parent_body: str) -> Dict[str,
             desc += ". " + flex["outcome"].strip()
         return {"name": "project", "description": desc}
 
-    return {
-        "name": "recent coursework",
-        "description": "hands-on student projects focused on user research and interface design",
-    }
+    # No real project anywhere. Previously this returned a placeholder describing
+    # "user research and interface design", which put fabricated design experience
+    # into the follow-up of every candidate without structured resume projects,
+    # whatever their actual field. Return nothing instead and let the caller drop
+    # the project sentence: a shorter honest bump beats an invented credential.
+    return {}
 
 
 def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, followup_number: int) -> str:
@@ -1148,9 +1150,27 @@ Format:
         project = _extract_unused_project(candidate, parent_body)
 
         linkedin_line = (
-            f'\nAfter Sentence 3, add one final line on its own: "Here\'s my LinkedIn if you\'d like to connect: {linkedin_url}" — output this exactly.'
+            f'\nAfter the final sentence, add one line on its own: "Here\'s my LinkedIn if you\'d like to connect: {linkedin_url}" - output this exactly.'
             if linkedin_url else ""
         )
+
+        # With no real project on file, drop the project sentence rather than
+        # inventing one. A two-sentence bump is honest; a fabricated credential
+        # is not, and it is the recipient who would catch it.
+        if project.get("name") and project.get("description"):
+            project_block = ("ONE NEW PROJECT to mention (was NOT in the original email above):\n"
+                             f"Name: {project['name']}\n"
+                             f"What it was: {project['description']}\n")
+            project_sentence = (
+                "\nSentence 2: Introduce the project above in one punchy sentence. State what it was "
+                "and one concrete thing from it (a deliverable, outcome, or specific feature). Do NOT "
+                "say \"which might align\" or \"could be relevant\" or \"I recently\". Just state it as "
+                "a fact about past work.\n")
+            sentence_count = 3
+        else:
+            project_block = ""
+            project_sentence = ""
+            sentence_count = 2
 
         prompt = f"""Ghostwriting a short follow-up email for {candidate_name}, a student looking for internship roles.
 
@@ -1161,22 +1181,18 @@ ORIGINAL EMAIL (already sent, do NOT reference or repeat anything from it):
 {parent_body}
 ---
 
-ONE NEW PROJECT to mention (was NOT in the original email above):
-Name: {project['name']}
-What it was: {project['description']}
-
+{project_block}
 Lead: {lead_first}, {lead_title} at {lead_company}
 
-Write the email body ONLY (greeting + 3 sentences + sign-off). Exactly 3 sentences between the greeting and sign-off:
+Write the email body ONLY (greeting + {sentence_count} sentences + sign-off). Exactly {sentence_count} sentences between the greeting and sign-off:
 
 Sentence 1: Bump the thread in one casual line. Use something like "just bumping this up" or "wanted to resurface this". Do NOT say "following up on my previous note" or "just checking in".
-
-Sentence 2: Introduce the project above in one punchy sentence. State what it was and one concrete thing from it (a deliverable, outcome, or specific feature). Do NOT say "which might align" or "could be relevant" or "I recently". Just state it as a fact about past work.
-
-Sentence 3: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"{linkedin_line}
+{project_sentence}
+Final sentence: Use this exact sentence: "Would you know if there's an opening, or who I should reach out to?"{linkedin_line}
 
 Format:
 - Start with "Hi {lead_first},"
+- Put a blank line between every sentence, so each sits in its own paragraph
 - Sign off: "{first_name_candidate}" on its own line, nothing else
 - Body total under 65 words"""
 
@@ -1193,6 +1209,7 @@ Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door op
 
 Format:
 - Start with "Hi {lead_first},"
+- Put a blank line between every sentence, so each sits in its own paragraph
 - Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
 - Body total under 30 words
 
