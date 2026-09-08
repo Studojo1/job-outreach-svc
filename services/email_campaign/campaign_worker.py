@@ -344,8 +344,60 @@ def _enrich_upcoming(db) -> int:
 
 # ── JIT Phase 2: Generate Email Content ─────────────────────────────────────
 
+def _promote_prewritten(db) -> int:
+    """Queue emails whose copy was written ahead of time, without touching it.
+
+    `_generate_pending` deliberately skips any row that already has a subject, so
+    that pre-written copy is never overwritten by the generator. But queuing was
+    only ever done inside that same function, which left such rows enriched and
+    complete yet permanently unsent.
+
+    This promotes them instead: if a row already carries both a subject and a
+    body, it is ready to send as-is. Rows without pre-written copy are untouched
+    and still flow through the generator as before.
+
+    Returns number of emails promoted to `queued`.
+    """
+    now = datetime.utcnow()
+    lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
+
+    prewritten = (
+        db.query(EmailSent)
+        .join(Campaign, EmailSent.campaign_id == Campaign.id)
+        .filter(
+            Campaign.status == "running",
+            EmailSent.enrichment_status == "enriched",
+            EmailSent.status == "pending_enrichment",
+            EmailSent.subject.isnot(None),
+            EmailSent.subject != "",
+            EmailSent.body.isnot(None),
+            EmailSent.body != "",
+            EmailSent.scheduled_at.isnot(None),
+            EmailSent.scheduled_at <= lookahead,
+        )
+        .order_by(EmailSent.scheduled_at.asc())
+        .limit(MAX_GENERATE_PER_CYCLE)
+        .all()
+    )
+
+    if not prewritten:
+        return 0
+
+    for email in prewritten:
+        email.status = "queued"
+        logger.info(
+            "[JIT-PREWRITTEN] Queued pre-written email %d for lead %s - generator skipped",
+            email.id, email.lead_id,
+        )
+    db.commit()
+    return len(prewritten)
+
+
 def _generate_pending(db) -> int:
     """Generate email content for enriched leads that don't have content yet.
+
+    Rows that already have a subject are skipped here on purpose: their copy was
+    supplied by the author and `_promote_prewritten` queues them untouched.
 
     Returns number of emails successfully generated.
     """
@@ -1012,7 +1064,7 @@ def _process_cycle():
     """
     db = SessionLocal()
     result = {
-        "enriched": 0, "generated": 0, "sent": 0, "failed": 0,
+        "enriched": 0, "prewritten": 0, "generated": 0, "sent": 0, "failed": 0,
         "replies": 0, "bounces": 0,
         "followups_sent": 0, "followups_cancelled": 0, "followups_failed": 0,
     }
@@ -1020,7 +1072,9 @@ def _process_cycle():
         # Phase 1: Enrich upcoming leads
         result["enriched"] = _enrich_upcoming(db)
 
-        # Phase 2: Generate email content for enriched leads
+        # Phase 2: Generate email content for enriched leads. Anything that
+        # already has author-written copy is queued as-is rather than generated.
+        result["prewritten"] = _promote_prewritten(db)
         result["generated"] = _generate_pending(db)
 
         # Phase 3: Send ready emails (Touch 1)
@@ -1051,9 +1105,10 @@ def _process_cycle():
         db.close()
 
     if any(v > 0 for v in result.values()):
-        logger.info("[CYCLE] enriched=%d generated=%d sent=%d failed=%d replies=%d bounces=%d",
-                    result["enriched"], result["generated"], result["sent"], result["failed"],
-                    result["replies"], result["bounces"])
+        logger.info(
+            "[CYCLE] enriched=%d prewritten=%d generated=%d sent=%d failed=%d replies=%d bounces=%d",
+            result["enriched"], result["prewritten"], result["generated"], result["sent"],
+            result["failed"], result["replies"], result["bounces"])
 
     return result
 
