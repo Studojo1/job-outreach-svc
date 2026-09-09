@@ -90,6 +90,11 @@ class SendOneRequest(BaseModel):
     company: str = Field(min_length=1, max_length=255)
     contact_title: Optional[str] = Field(default=None, max_length=255)
     role: Optional[str] = Field(default=None, max_length=255)
+    # The job's location. Without it, alternatives are unfiltered by city — a
+    # Bengaluru student gets suggested companies anywhere in the world. My code
+    # read getattr(request, "location") which was ALWAYS None because no model
+    # declared it.
+    location: Optional[str] = Field(default=None, max_length=255)
     linkedin_url: Optional[str] = Field(default=None, max_length=2000)
     # When a page did expose an address, skip the lookup entirely and save the
     # Apollo call. Deliberately a plain str: pydantic's EmailStr needs the
@@ -118,6 +123,11 @@ class ContactCheckRequest(BaseModel):
     company: str = Field(min_length=1, max_length=255)
     contact_title: Optional[str] = Field(default=None, max_length=255)
     role: Optional[str] = Field(default=None, max_length=255)
+    # The job's location. Without it, alternatives are unfiltered by city — a
+    # Bengaluru student gets suggested companies anywhere in the world. My code
+    # read getattr(request, "location") which was ALWAYS None because no model
+    # declared it.
+    location: Optional[str] = Field(default=None, max_length=255)
     linkedin_url: Optional[str] = Field(default=None, max_length=2000)
     contact_email: Optional[str] = Field(default=None, max_length=320)
     # Off by default. A lookup costs an Apollo API call, and drafting happens

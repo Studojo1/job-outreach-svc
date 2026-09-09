@@ -28,7 +28,16 @@ student's behalf; they choose.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+
+def _days_ago_iso(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +122,55 @@ def _size_band(headcount: Optional[int]) -> Optional[str]:
     return "5001,10000"
 
 
+# Words that appear in job titles everywhere and narrow nothing.
+_TITLE_NOISE = {
+    "intern", "internship", "trainee", "fresher", "junior", "senior", "lead",
+    "associate", "assistant", "and", "or", "the", "a", "an", "of", "for",
+    "in", "at", "i", "ii", "iii", "full", "time", "part", "remote", "hybrid",
+    "onsite", "graduate", "entry", "level", "new", "grad",
+}
+
+
+def _role_families(role: Optional[str]) -> Optional[List[str]]:
+    """A LinkedIn job title reduced to searchable role families.
+
+    ``q_organization_job_titles`` asks Apollo "which companies are hiring for
+    this?" — and no company posts a job called "Financial Market Analyst and
+    Trading Intern". Passing the raw title matches almost nothing, which
+    silently narrows the search to zero.
+
+    The outreach tool passes ``preferred_roles`` here: short families like
+    "Analyst" or "Product Manager" (filter_generator_service.py:187). This
+    derives the same thing from the title the student clicked.
+    """
+    if not role:
+        return None
+
+    import re
+
+    words = [w for w in re.split(r"[^A-Za-z]+", role.lower()) if w]
+    core = [w for w in words if w not in _TITLE_NOISE and len(w) > 2]
+    if not core:
+        return None
+
+    families: List[str] = []
+    # Adjacent pairs first — "market analyst" is a real posting title, and a
+    # more useful match than either word alone.
+    for i in range(len(core) - 1):
+        families.append(f"{core[i]} {core[i + 1]}".title())
+    families.extend(w.title() for w in core)
+
+    # Deduplicate, keep order, and cap at 8 exactly as the outreach tool does.
+    seen: set = set()
+    out: List[str] = []
+    for f in families:
+        if f.lower() in seen:
+            continue
+        seen.add(f.lower())
+        out.append(f)
+    return out[:8] or None
+
+
 def find_similar_companies(
     company: str,
     role: Optional[str] = None,
@@ -169,7 +227,13 @@ def find_similar_companies(
         email_status=["verified"],
         # Companies currently hiring this role — the field the leads page uses
         # for exactly this purpose (filter_schema.py:4).
-        q_organization_job_titles=[role] if role else None,
+        q_organization_job_titles=_role_families(role),
+        # Paired with a recency window, as the outreach tool does
+        # (filter_generator_service.py:189-193): "currently hiring" only means
+        # something if the posting is recent.
+        organization_job_posted_at_range=(
+            {"min": _days_ago_iso(30), "max": _today_iso()} if role else None
+        ),
         q_organization_keyword_tags=profile["keywords"] or None,
         organization_job_locations=locations or None,
     )
