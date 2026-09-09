@@ -411,7 +411,14 @@ def check_contact(
     if contact is None:
         return ContactCheckResponse(
             status="unreachable",
-            message=f"We couldn't find anyone at {request.company} to write to yet.",
+            # Grep [CONTACT-FIND] in the pod logs to see WHICH cause this was:
+            # a refused Apollo call (HTTP 200 with a body error), no matches at
+            # all, or matches with no verified address. From the outside those
+            # looked identical, which is why this took four rounds to diagnose.
+            message=(
+                f"We haven't found anyone at {request.company} we can email yet. "
+                "Your draft is saved and we keep looking."
+            ),
             cached=True,
         )
     if contact.get("email"):
@@ -567,7 +574,7 @@ def send_one_email(
         raise HTTPException(
             status_code=422,
             detail=(
-                f"no_contact_found: We couldn't find anyone at {request.company} to write to. "
+                f"no_contact_found: We haven't found anyone at {request.company} we can email yet. "
                 "Your draft is saved."
             ),
         )

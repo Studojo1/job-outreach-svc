@@ -104,6 +104,53 @@ _TITLE_RANK: Dict[str, int] = {
 }
 
 
+_LEGAL_SUFFIXES = (
+    "private limited", "pvt ltd", "pvt", "private", "limited", "ltd",
+    "incorporated", "inc", "corporation", "corp", "llc", "llp", "plc", "gmbh",
+    "technologies", "technology", "labs", "software", "solutions", "systems",
+    "india", "global", "group", "holdings", "co",
+)
+
+
+def _normalise_company(name: str) -> str:
+    """A company name reduced to its distinctive core.
+
+    "Pipraiser Technologies Pvt Ltd" and "Pipraiser" must compare equal, or a
+    real match is thrown away and the student is told nobody works there.
+    """
+    import re
+
+    n = (name or "").lower()
+    n = re.sub(r"[^a-z0-9 ]+", " ", n)
+    words = [w for w in n.split() if w]
+    while words and words[-1] in _LEGAL_SUFFIXES:
+        words.pop()
+    joined = " ".join(words)
+    for suffix in ("private limited", "pvt ltd"):
+        if joined.endswith(suffix):
+            joined = joined[: -len(suffix)].strip()
+    return joined or " ".join(w for w in n.split() if w)
+
+
+def _same_company(a: str, b: str) -> bool:
+    """Do these two names refer to the same company?
+
+    WHOLE WORDS, never a raw substring: "Stripe" is not "Striped Analytics"
+    and "Meta" is not "Metabase". A substring test matched both and would have
+    emailed a stranger at a company the student never applied to.
+    """
+    na, nb = _normalise_company(a), _normalise_company(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    wa, wb = na.split(), nb.split()
+    if wa[0] == wb[0] and len(wa[0]) >= 3:
+        return True
+    shorter, longer = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
+    return any(longer[i : i + len(shorter)] == shorter for i in range(len(longer) - len(shorter) + 1))
+
+
 def _score_title(title: str) -> int:
     t = (title or "").strip().lower()
     if not t:
@@ -169,10 +216,68 @@ def find_hiring_contacts(
         return []
 
     try:
-        people = resp.json().get("people", []) or []
+        data = resp.json()
     except Exception:
         logger.warning("[CONTACT-FIND] Apollo sent a body we could not read for %s", company)
         return []
+
+    # Apollo returns HTTP 200 with the error INSIDE the body when a key is
+    # exhausted or the plan does not permit the call. Without this check a
+    # refused request is indistinguishable from "this company has nobody":
+    # resp.ok is True, `people` is absent, and we report a dead end. The
+    # enrichment path has always checked for it (enrichment_service.py:209-213);
+    # this search never did, which is why four rounds of fixes could not tell
+    # the two apart.
+    body_error = (data.get("error") or "") if isinstance(data, dict) else ""
+    if body_error:
+        logger.error(
+            "[CONTACT-FIND] Apollo REFUSED the search for %s (HTTP 200, body error): %s",
+            company, str(body_error)[:200],
+        )
+        if any(
+            phrase in str(body_error).lower()
+            for phrase in ("insufficient credits", "not accessible", "upgrade your plan", "credit limit")
+        ):
+            from services.shared.apollo_key_manager import apollo_keys
+            current = apollo_keys.get_key()
+            if current:
+                apollo_keys.report_failure(current, 402)
+        return []
+
+    people = data.get("people", []) or []
+
+    # total_entries separates "Apollo holds nobody matching" from "this page
+    # returned nothing". The working discovery flow logs it
+    # (apollo_service.py:56-58); not having it is why every failure looked
+    # identical from the outside.
+    total = 0
+    if isinstance(data, dict):
+        total = data.get("pagination", {}).get("total_entries", data.get("total_entries", 0)) or 0
+    logger.info(
+        "[CONTACT-FIND] apollo company=%s returned=%d total_available=%d titles=%d verified_only=True",
+        company[:60], len(people), total, len(HIRING_TITLES),
+    )
+
+    # Nothing came back WITH the verified filter. Probe once without it, so the
+    # logs distinguish "Apollo has no verified contacts here" from "Apollo has
+    # nobody here" — the first is a coverage limit we can work around, the
+    # second is not, and telling them apart decides whether this works for
+    # small companies at all.
+    if not people:
+        try:
+            probe = dict(payload)
+            probe.pop("contact_email_status", None)
+            probe["per_page"] = 5
+            probe_resp = apollo_post(APOLLO_SEARCH_URL, json=probe, timeout=15)
+            if probe_resp.ok:
+                probe_people = (probe_resp.json() or {}).get("people", []) or []
+                logger.info(
+                    "[CONTACT-FIND] probe company=%s unverified_matches=%d "
+                    "(0 = Apollo has nobody; >0 = people exist but no verified email)",
+                    company[:60], len(probe_people),
+                )
+        except Exception as e:
+            logger.debug("[CONTACT-FIND] probe failed for %s: %s", company, e)
 
     out: List[Dict[str, Any]] = []
     for p in people:
@@ -188,7 +293,11 @@ def find_hiring_contacts(
         # Apollo matches loosely on company. Reject anyone who is not actually
         # at the company the student applied to — emailing a stranger at a
         # similarly-named firm is worse than finding nobody.
-        if org_name and company.lower() not in org_name.lower() and org_name.lower() not in company.lower():
+        # Compare on a NORMALISED name, not a raw substring. A job board says
+        # "Pipraiser" while Apollo holds "Pipraiser Technologies Pvt Ltd" —
+        # once the suffixes differ neither string contains the other, so every
+        # legitimate result was dropped and the page reported nobody there.
+        if org_name and not _same_company(company, org_name):
             continue
 
         title = (p.get("title") or "").strip()
