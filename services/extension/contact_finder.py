@@ -193,6 +193,13 @@ def find_hiring_contacts(
 
         title = (p.get("title") or "").strip()
         out.append({
+            # Apollo's own id for this person. The reveal passes it as the
+            # match key (enrichment_service.py:179), and it is the strongest
+            # one there is — without it we search Apollo, find someone, throw
+            # away the exact identifier, and ask Apollo to guess them again
+            # from a name and a company. The lead-discovery flow requires it
+            # (lead_collector_service.py:248 drops anyone without an id).
+            "apollo_id": (p.get("id") or "").strip() or None,
             "name": name,
             "title": title,
             "company": org_name or company,

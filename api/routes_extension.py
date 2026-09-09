@@ -316,6 +316,7 @@ def _resolve_contact(
         "title": best.get("title"),
         "linkedin_url": best.get("linkedin_url"),
         "email": best.get("email"),
+        "apollo_id": best.get("apollo_id"),
         "found_by_search": True,
     }
 
@@ -458,6 +459,7 @@ def check_contact(
     if lead is None:
         lead = Lead(
             candidate_id=candidate.id,
+            apollo_id=contact.get("apollo_id"),
             name=contact["name"],
             title=contact.get("title"),
             company=request.company,
@@ -584,6 +586,7 @@ def send_one_email(
     if lead is None:
         lead = Lead(
             candidate_id=candidate.id,
+            apollo_id=contact.get("apollo_id"),
             name=contact["name"],
             title=contact.get("title"),
             company=request.company,
@@ -686,6 +689,23 @@ def send_one_email(
             "[EXT-SEND] Email sent but credit deduction failed for user %s — not charged.",
             current_user.id,
         )
+    else:
+        # COMMIT THE CHARGE ON ITS OWN, before anything else can fail.
+        #
+        # deduct_credits only mutates the session — routes_enrichment.py:225
+        # commits immediately after calling it, for exactly this reason. Here
+        # the charge shared a commit with the EmailSent insert at the end of
+        # the function, so any failure in between rolled BOTH back: the email
+        # had already left Gmail, and the student was neither charged nor
+        # counted against their daily cap. Free, uncapped sends on any
+        # transient database error.
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error(
+                "[EXT-SEND] Could not commit the credit charge for user %s: %s",
+                current_user.id, e,
+            )
 
     # Record what went out. This is what the cap counts, and it gives the
     # student a durable record of the email rather than only a Lead status.
@@ -704,7 +724,13 @@ def send_one_email(
         )
     )
     lead.status = "extension_sent"
-    db.commit()
+    # Separate from the charge above. If this fails the student has been
+    # charged for an email that did leave — the right way round. Losing the
+    # record costs them a cap slot; losing the charge costs us the send.
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error("[EXT-SEND] Sent but could not record the send: %s", e)
 
     logger.info(
         "[EXT-SEND] user=%s lead=%d company=%s sent",
