@@ -37,7 +37,7 @@ NOTHING in the campaign path is read, called, or modified here.
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -126,6 +126,14 @@ class ContactCheckRequest(BaseModel):
     allow_lookup: bool = False
 
 
+class SimilarCompany(BaseModel):
+    """A company we CAN reach, matched on the one the student clicked."""
+
+    company: str
+    contact_title: Optional[str] = None
+    industry: Optional[str] = None
+
+
 class ContactCheckResponse(BaseModel):
     # "reachable" | "unreachable" | "unknown"
     status: str
@@ -136,6 +144,11 @@ class ContactCheckResponse(BaseModel):
     contact_name: Optional[str] = None
     contact_title: Optional[str] = None
     found_by_search: bool = False
+    # Populated ONLY when this company is unreachable. Same industry, size band
+    # and role, and every one has a contact with a verified email — an
+    # alternative we cannot email is the dead end we are escaping.
+    # Advisory: nothing is drafted, redirected or sent for the student.
+    similar: List["SimilarCompany"] = []
 
 
 class SendOneResponse(BaseModel):
@@ -354,7 +367,40 @@ def _reachable(
     )
 
 
-def _not_yet(message: str, cached: bool, status: str = "unreachable") -> "ContactCheckResponse":
+def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
+    """Companies like this one that we CAN email.
+
+    Only called when the clicked company is unreachable — a student with a
+    working contact needs no alternative. Never raises: this runs on a page
+    they are already reading.
+    """
+    try:
+        from services.extension.similar_companies import find_similar_companies
+
+        found = find_similar_companies(
+            request.company,
+            getattr(request, "role", None),
+            getattr(request, "location", None),
+        )
+        return [
+            SimilarCompany(
+                company=c["company"],
+                contact_title=c.get("contact_title"),
+                industry=c.get("industry"),
+            )
+            for c in found
+        ]
+    except Exception as e:
+        logger.warning("[SIMILAR] suggestion lookup failed: %s", e)
+        return []
+
+
+def _not_yet(
+    message: str,
+    cached: bool,
+    status: str = "unreachable",
+    similar: Optional[List["SimilarCompany"]] = None,
+) -> "ContactCheckResponse":
     """We have no address, so we name NOBODY.
 
     Announcing "we found Santoshi — Recruiter at Joveo" and then being unable
@@ -366,7 +412,9 @@ def _not_yet(message: str, cached: bool, status: str = "unreachable") -> "Contac
     The name is still stored on the lead — a later lookup may resolve the
     address, and then we can say it.
     """
-    return ContactCheckResponse(status=status, message=message, cached=cached)
+    return ContactCheckResponse(
+        status=status, message=message, cached=cached, similar=similar or []
+    )
 
 
 @router.post("/contact-check", response_model=ContactCheckResponse)
@@ -420,6 +468,7 @@ def check_contact(
                 "Your draft is saved and we keep looking."
             ),
             cached=True,
+            similar=_suggest_alternatives(request),
         )
     if contact.get("email"):
         _log_resolution(current_user.id, request.company, "reachable", True, "search")
@@ -455,6 +504,7 @@ def check_contact(
                 "Your draft is saved and we keep looking."
             ),
             True,
+            similar=_suggest_alternatives(request),
         )
 
     if not request.allow_lookup:
@@ -496,6 +546,7 @@ def check_contact(
                 "Your draft is saved and we keep looking."
             ),
             False,
+            similar=_suggest_alternatives(request),
         )
 
     # Transient — do not record it as unreachable, or a temporary outage would
