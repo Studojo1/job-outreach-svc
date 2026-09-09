@@ -17,6 +17,7 @@ from database.models import User, Coupon, PaymentOrder, UserCredit, OutreachOrde
 from core.config import settings
 from core.pricing import (
     get_plan, get_plans, get_tier_pricing, get_dodo_product_id, apply_coupon,
+    is_internal_only_coupon,
     TIERS, TEST_TIERS,
 )
 from core.geo import detect_country, is_india
@@ -152,6 +153,12 @@ async def validate_coupon(
         raise HTTPException(status_code=400, detail="Coupon is not yet active")
     if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
         raise HTTPException(status_code=400, detail="Coupon usage limit reached")
+    # High-discount internal codes work on staging only. Same 404 an unknown
+    # code gets, so probing can't distinguish "blocked" from "does not exist".
+    if not settings.RAZORPAY_TEST_MODE and is_internal_only_coupon(
+        coupon.discount_type, coupon.discount_value
+    ):
+        raise HTTPException(status_code=404, detail="Invalid coupon code")
     # Per-recipient founder coupons are bound to one buyer — reject if someone
     # else tries to redeem a leaked code.
     if coupon.user_id and str(coupon.user_id) != str(current_user.id):
@@ -251,6 +258,11 @@ async def create_order(
             if coupon.valid_from and coupon.valid_from > now:
                 valid = False
             if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
+                valid = False
+            # High-discount internal codes are staging-only.
+            if not settings.RAZORPAY_TEST_MODE and is_internal_only_coupon(
+                coupon.discount_type, coupon.discount_value
+            ):
                 valid = False
             # Per-recipient founder coupons are bound to one buyer.
             if coupon.user_id and str(coupon.user_id) != str(current_user.id):

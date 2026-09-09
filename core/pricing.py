@@ -108,6 +108,19 @@ def get_dodo_product_id(settings) -> str:
     return settings.DODO_PRODUCT_OUTREACH
 
 
+# Coupons at or above this discount are internal tools — the 99%/100% codes we
+# use for testing, Google's OAuth review, and one-off comps. They are usable on
+# staging (test mode) and rejected in production so a leaked code cannot hand
+# out free plans on the live site. Campus-ambassador and partner codes sit far
+# below this line.
+INTERNAL_DISCOUNT_FLOOR = 50.0
+
+
+def is_internal_only_coupon(discount_type: str, discount_value: float) -> bool:
+    """True for the high-discount codes that must not work in production."""
+    return discount_type == "percent" and float(discount_value) >= INTERNAL_DISCOUNT_FLOOR
+
+
 def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -> int:
     """Apply coupon discount. Returns final amount in cents/paise (minimum 0).
 
