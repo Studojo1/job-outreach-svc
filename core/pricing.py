@@ -109,9 +109,17 @@ def get_dodo_product_id(settings) -> str:
 
 
 def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -> int:
-    """Apply coupon discount. Returns final amount in cents/paise (minimum 0)."""
+    """Apply coupon discount. Returns final amount in cents/paise (minimum 0).
+
+    The result is floored to a whole rupee/dollar so checkout never shows a
+    fractional price: 10% off ₹499 is ₹449, not ₹449.10. Flooring (rather than
+    rounding) means the customer is never charged more than the exact discount.
+    A price that is already fully discounted stays at 0.
+    """
     if discount_type == "percent":
         discount = int(amount_cents * discount_value / 100)
     else:  # flat
         discount = int(discount_value)
-    return max(0, amount_cents - discount)
+    remaining = max(0, amount_cents - discount)
+    # Floor to the whole currency unit (100 paise / 100 cents).
+    return (remaining // 100) * 100
