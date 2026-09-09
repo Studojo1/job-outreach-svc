@@ -35,18 +35,39 @@ APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 # specific role. Searched as one query — Apollo ranks within the set, and we
 # re-rank by this order afterwards.
 HIRING_TITLES: List[str] = [
+    # Recruiting and people — they own the requisition whatever the role is.
     "Technical Recruiter",
     "Recruiter",
+    "Senior Recruiter",
     "Talent Acquisition",
     "Talent Acquisition Specialist",
+    "Talent Partner",
     "Head of Talent",
+    "Head of People",
+    "People Operations",
+    "People Partner",
     "HR Manager",
+    "HR Business Partner",
     "Human Resources",
     "Hiring Manager",
+    "Campus Recruiter",          # the one that matters for an internship
+    "University Recruiter",
+    # Function leads. The previous list was engineering-only, which found
+    # nobody for a Product Operations or Analytics opening — the exact role
+    # that failed at Sarvam.
     "Engineering Manager",
     "Head of Engineering",
     "VP Engineering",
     "Director of Engineering",
+    "Product Manager",
+    "Head of Product",
+    "Director of Product",
+    "Head of Operations",
+    "Operations Manager",
+    "Head of Analytics",
+    "Data Science Manager",
+    "Chief of Staff",            # common owner of hiring at Indian startups
+    # Last resort — right at a 10-person company, wrong at a large one.
     "Founder",
     "Co-Founder",
     "CTO",
@@ -54,7 +75,12 @@ HIRING_TITLES: List[str] = [
 
 # How strongly to prefer each title, highest first. Anything unlisted scores 0
 # and can still be used, but only if nothing better came back.
+# ORDER MATTERS: the first substring hit wins. "campus recruiter" contains
+# "recruit", so the student-specific entries must come first or they never
+# score above a generic recruiter.
 _TITLE_RANK: Dict[str, int] = {
+    "campus recruit": 110,
+    "university recruit": 110,
     "recruit": 100,
     "talent": 95,
     "human resources": 85,
@@ -63,6 +89,13 @@ _TITLE_RANK: Dict[str, int] = {
     "people ops": 75,
     "engineering manager": 60,
     "head of engineering": 55,
+    "chief of staff": 58,
+    "head of product": 55,
+    "product manager": 48,
+    "head of operations": 55,
+    "operations manager": 48,
+    "head of analytics": 55,
+    "data science": 45,
     "director": 50,
     "vp ": 45,
     "founder": 30,
