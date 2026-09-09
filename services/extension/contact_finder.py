@@ -139,6 +139,18 @@ def find_hiring_contacts(
     payload: Dict[str, Any] = {
         "q_organization_name": company,
         "person_titles": HIRING_TITLES,
+        # THE FIX. Without this Apollo returns people whose addresses it cannot
+        # verify — so every reveal came back no_match and the page honestly
+        # reported "we haven't found a confirmed email address", having
+        # searched a set that could never contain one.
+        #
+        # The lead-discovery flow has always sent it, with the comment: "leads
+        # without verified emails cannot be enriched and waste enrichment
+        # credits. This is a hard rule." (apollo_query_builder.py:50-52). I
+        # wrote this search without reading theirs.
+        #
+        # It also stops us paying for reveals that were always going to fail.
+        "contact_email_status": ["verified"],
         "per_page": max(limit * 3, 15),
         "page": 1,
     }
