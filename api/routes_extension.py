@@ -370,7 +370,12 @@ def _reachable(
 def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
     """Companies like this one that we CAN email.
 
-    Only called when the clicked company is unreachable — a student with a
+    Runs the outreach tool's own discovery — same LeadFilter, same
+    build_apollo_query, same search — capped at a handful instead of 500. The
+    student already told us what they want by clicking a specific job, which is
+    the same signal the resume and quiz give the outreach tool.
+
+    Only called when the clicked company is unreachable; a student with a
     working contact needs no alternative. Never raises: this runs on a page
     they are already reading.
     """
