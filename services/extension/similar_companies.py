@@ -119,59 +119,75 @@ def find_similar_companies(
     location: Optional[str] = None,
     limit: int = MAX_SUGGESTIONS,
 ) -> List[Dict[str, Any]]:
-    """Companies like ``company``, hiring like ``role``, that we can reach.
+    """Run the outreach tool's discovery, capped at a handful instead of 500.
 
-    Every result has a named contact with a VERIFIED email — an alternative we
-    cannot email is the same dead end we are trying to escape.
+    The outreach tool reads a resume and a quiz to learn what a student wants,
+    builds a LeadFilter, and hands it to Apollo. The extension already knows
+    the same things — the student told us by clicking a specific job: the role
+    they want, the kind of company, the city. So this builds the SAME
+    LeadFilter from the job page and runs the SAME query, asking for three
+    results rather than five hundred.
 
-    Returns [] rather than raising: this runs on a page the student is already
-    reading, and a failure here must leave that page working.
+    Nothing is reimplemented: build_apollo_query and search_people_chunked are
+    the functions the leads page uses, so any fix there applies here too.
+
+    Every result has a verified email — LeadFilter carries
+    ``email_status=["verified"]``, which build_apollo_query turns into Apollo's
+    hard rule (apollo_query_builder.py:52). An alternative we cannot email is
+    the dead end we are escaping.
     """
-    from services.shared.apollo_key_manager import apollo_post
+    from services.lead_discovery.apollo_query_builder import build_apollo_query
+    from services.lead_discovery.apollo_service import search_people_chunked
+    from services.shared.schemas.filter_schema import LeadFilter
+    from services.shared.schemas.target_segment_schema import TargetSegment
     from services.extension.contact_finder import HIRING_TITLES, _same_company, _score_title
 
     profile = _company_profile(company, location)
     if not profile:
+        # Apollo does not know the company, so we have no shape to match on.
+        # Suggesting at random would be worse than suggesting nothing.
+        logger.info("[SIMILAR] no profile for %s — not suggesting", company[:60])
         return []
 
-    payload: Dict[str, Any] = {
-        "person_titles": HIRING_TITLES,
-        # The hard rule from apollo_query_builder.py:52. Without it we would
-        # suggest companies we cannot email either.
-        "contact_email_status": ["verified"],
-        "per_page": 25,
-        "page": 1,
-    }
-    if profile["industry"]:
-        payload["organization_industries"] = [profile["industry"]]
-    if profile["keywords"]:
-        payload["q_organization_keyword_tags"] = profile["keywords"]
-    if profile["size_range"]:
-        payload["organization_num_employees_ranges"] = [profile["size_range"]]
-    if location:
-        payload["organization_locations"] = [location]
-    # Companies currently hiring this role — the field the leads page uses for
-    # exactly this purpose (filter_schema.py:4).
-    if role:
-        payload["q_organization_job_titles"] = [role]
+    locations = [location] if location else []
+
+    # One segment: the size band of the company they actually clicked. A
+    # student who applied to a 30-person startup wants other startups, not a
+    # 30,000-person bank.
+    segments = [
+        TargetSegment(
+            company_size_range=profile["size_range"] or "11,50",
+            person_titles=list(HIRING_TITLES),
+        )
+    ]
+
+    filters = LeadFilter(
+        target_segments=segments,
+        person_locations=locations,
+        organization_locations=locations or None,
+        organization_industries=[profile["industry"]] if profile["industry"] else None,
+        email_status=["verified"],
+        # Companies currently hiring this role — the field the leads page uses
+        # for exactly this purpose (filter_schema.py:4).
+        q_organization_job_titles=[role] if role else None,
+        q_organization_keyword_tags=profile["keywords"] or None,
+        organization_job_locations=locations or None,
+    )
+
+    payload = build_apollo_query(filters, page=1)
+    # 500 is for a campaign. We need a handful, and a smaller page is faster
+    # and cheaper. Over-fetch a little because results are deduped by company
+    # and the clicked company is dropped.
+    payload["per_page"] = 25
 
     try:
-        resp = apollo_post(APOLLO_PEOPLE_URL, json=payload, timeout=20)
+        data = search_people_chunked(payload)
     except Exception as e:
-        logger.warning("[SIMILAR] people search failed for %s: %s", company, e)
-        return []
-
-    if not resp.ok:
-        logger.warning("[SIMILAR] people search HTTP %d for %s", resp.status_code, company)
-        return []
-
-    try:
-        data = resp.json()
-    except Exception:
+        logger.warning("[SIMILAR] discovery search failed for %s: %s", company, e)
         return []
 
     if isinstance(data, dict) and data.get("error"):
-        logger.error("[SIMILAR] Apollo refused the people search: %s", str(data["error"])[:160])
+        logger.error("[SIMILAR] Apollo refused the discovery search: %s", str(data["error"])[:160])
         return []
 
     people = (data.get("people") or []) if isinstance(data, dict) else []
@@ -186,9 +202,19 @@ def find_similar_companies(
         org_name = (org.get("name") or p.get("organization_name") or "").strip()
         if not org_name:
             continue
-        # Never suggest the company they already tried.
+        # Never suggest the company that just failed.
         if _same_company(company, org_name):
             continue
+
+        # Apollo's SEARCH returns a placeholder like
+        # "email_not_unlocked@domain.com" when the address has not been
+        # revealed — revealing is a separate paid call. Treating that as a real
+        # address would suggest a company we cannot actually email, which is
+        # the dead end we are escaping. Only count someone as reachable when
+        # the address is real; otherwise we still suggest them, because the
+        # reveal happens when the student applies there.
+        raw_email = (p.get("email") or "").strip().lower()
+        email_locked = (not raw_email) or "not_unlocked" in raw_email or "email_not_unlocked" in raw_email
 
         title = (p.get("title") or "").strip()
         score = _score_title(title)
@@ -201,14 +227,23 @@ def find_similar_companies(
             "contact_name": f"{first} {(p.get('last_name') or '').strip()}".strip(),
             "contact_title": title,
             "apollo_id": (p.get("id") or "").strip() or None,
+            # False when Apollo already holds a revealed address for them.
+            "email_locked": email_locked,
             "linkedin_url": (p.get("linkedin_url") or "").strip() or None,
             "industry": org.get("industry") or profile["industry"],
             "score": score,
         }
 
-    out = sorted(by_company.values(), key=lambda c: c["score"], reverse=True)[:limit]
+    # Unlocked addresses first: those are reachable today, without another
+    # paid reveal. Then by how likely the person is to reply.
+    out = sorted(
+        by_company.values(),
+        key=lambda c: (not c["email_locked"], c["score"]),
+        reverse=True,
+    )[:limit]
     logger.info(
-        "[SIMILAR] company=%s role=%s suggested=%d from=%d people",
-        company[:40], (role or "")[:40], len(out), len(people),
+        "[SIMILAR] company=%s role=%s industry=%s size=%s suggested=%d from=%d people",
+        company[:40], (role or "")[:40], profile["industry"], profile["size_range"],
+        len(out), len(people),
     )
     return out
