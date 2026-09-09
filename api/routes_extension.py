@@ -283,10 +283,34 @@ def _resolve_contact(
 
     from services.extension.contact_finder import find_hiring_contacts
 
-    found = find_hiring_contacts(request.company, getattr(request, "role", None), limit=3)
+    found = find_hiring_contacts(request.company, getattr(request, "role", None), limit=6)
     if not found:
         return None
-    best = found[0]
+
+    # Skip anyone we have ALREADY tried and failed to reveal. Apollo will not
+    # find them on a retry, and returning the same dead contact is what made
+    # the page say "no confirmed email for anyone at Sarvam" — when in truth
+    # we had tried exactly one person and never looked at the other five the
+    # search returned.
+    tried_q = db.query(Lead.name).filter(
+        Lead.company == request.company,
+        Lead.status == "extension_no_email",
+    )
+    if user_id:
+        tried_q = tried_q.join(Candidate, Lead.candidate_id == Candidate.id).filter(
+            Candidate.user_id == user_id
+        )
+    else:
+        tried_q = tried_q.filter(Lead.candidate_id == candidate_id)
+    tried = {(n or "").strip().lower() for (n,) in tried_q.all()}
+
+    best = next(
+        (c for c in found if (c["name"] or "").strip().lower() not in tried),
+        None,
+    )
+    if best is None:
+        return None
+
     return {
         "name": best["name"],
         "title": best.get("title"),
@@ -410,12 +434,18 @@ def check_contact(
         _log_resolution(current_user.id, request.company, "reachable", True, "cache")
         return _reachable(contact, f"We can reach {contact['name']}.", True)
 
-    # Already tried and failed. Apollo will not find them on a retry, so say so
-    # instead of spending another call to learn the same thing.
+    # This PERSON was tried and failed. That is not the same as the company
+    # being unreachable — _resolve_contact now skips anyone already marked
+    # extension_no_email and returns the next candidate from the search, so
+    # reaching here means either the page named this specific person, or every
+    # alternate is exhausted too.
     if lead and lead.status == "extension_no_email":
         _log_resolution(current_user.id, request.company, "unreachable", True, "cache")
         return _not_yet(
-            f"We don't have a confirmed email address for anyone at {request.company} yet.",
+            (
+                f"We haven't found a confirmed email address at {request.company} yet. "
+                "Your draft is saved and we keep looking."
+            ),
             True,
         )
 
@@ -452,7 +482,10 @@ def check_contact(
         db.commit()
         _log_resolution(current_user.id, request.company, "unreachable", False, "apollo")
         return _not_yet(
-            f"We don't have a confirmed email address for anyone at {request.company} yet.",
+            (
+                f"We haven't found a confirmed email address at {request.company} yet. "
+                "Your draft is saved and we keep looking."
+            ),
             False,
         )
 
