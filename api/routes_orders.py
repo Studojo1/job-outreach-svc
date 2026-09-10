@@ -217,6 +217,19 @@ async def update_order(
     return _serialize_order(order)
 
 
+def _has_mailbox(db: Session, user_id: str) -> bool:
+    return db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id).first() is not None
+
+
+def _has_paid_credits(db: Session, user_id: str) -> bool:
+    """True if the user has credits left to spend, i.e. they have already paid."""
+    from database.models import UserCredit
+    row = db.query(UserCredit).filter(UserCredit.user_id == user_id).first()
+    if not row:
+        return False
+    return (row.total_credits or 0) - (row.used_credits or 0) > 0
+
+
 @router.get("/{order_id}/resume")
 async def resume_order(
     order_id: int,
@@ -262,6 +275,12 @@ async def resume_order(
                 redirect = "/campaign/linkedin-safety"
             else:
                 redirect = "/connect/linkedin"
+        elif _has_paid_credits(db, order.user_id) and not _has_mailbox(db, order.user_id):
+            # Already paid, just never connected a mailbox. That is the single
+            # biggest place paying users stall, so send them straight at the one
+            # thing that is actually blocking them rather than to a landing page
+            # or back through pricing they have already cleared.
+            redirect = "/connect/gmail"
         else:
             redirect = "/campaign/setup"
     elif status == "email_connected":
