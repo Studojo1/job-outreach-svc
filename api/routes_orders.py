@@ -113,6 +113,7 @@ async def get_active_order(
     if not order:
         return {"order": None}
 
+    _heal_candidate_binding(db, order)
     return _serialize_order(order)
 
 
@@ -129,6 +130,8 @@ async def list_orders(
         .all()
     )
 
+    for o in orders:
+        _heal_candidate_binding(db, o)
     return {"orders": [_serialize_order(o) for o in orders]}
 
 
@@ -142,6 +145,7 @@ async def get_order(
     order = db.query(OutreachOrder).filter_by(id=order_id, user_id=current_user.id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    _heal_candidate_binding(db, order)
     return _serialize_order(order)
 
 
@@ -315,6 +319,66 @@ async def mark_funnel_stage(
     from services.stage_tracking import safe_mark_stage
     safe_mark_stage(db, str(current_user.id), request.stage)
     return {"ok": True, "stage": request.stage}
+
+
+# Statuses that assert discovery has already happened. Only these can be healed;
+# an order earlier than this is allowed to have an empty candidate.
+_LEADS_EXPECTED_STATUSES = {
+    "leads_ready", "campaign_setup", "email_connected", "campaign_running",
+    "enriching", "enrichment_complete", "completed",
+}
+
+
+def _heal_candidate_binding(db: Session, order: OutreachOrder) -> None:
+    """Repoint an order that is bound to a candidate holding no leads.
+
+    Re-onboarding creates a fresh candidate. If that happens after discovery has
+    already run, the order follows the new empty record and the dashboard renders
+    nothing, even for a user who has paid and had leads generated.
+
+    `_resolve_effective_candidate` in routes_campaign already repairs this, but it
+    only runs on campaign operations, so the leads dashboard never benefited. Heal
+    it here instead, on the single path every order read goes through.
+
+    Only ever moves an order OFF a candidate with zero leads, and only ONTO a
+    candidate belonging to the same user that actually has leads. An order whose
+    candidate has leads is never touched.
+
+    Critically, this only applies to orders that have already passed discovery.
+    A user starting a SECOND run has a brand new candidate with legitimately zero
+    leads, and healing that would drag the new order back onto the old candidate.
+    Before leads_ready, empty is the expected state, so leave it alone.
+    """
+    if not order.candidate_id:
+        return
+    if order.status not in _LEADS_EXPECTED_STATUSES:
+        return
+    bound_leads = (
+        db.query(func.count(Lead.id)).filter(Lead.candidate_id == order.candidate_id).scalar() or 0
+    )
+    if bound_leads:
+        return
+
+    best = (
+        db.query(Lead.candidate_id, func.count(Lead.id).label("n"))
+        .join(Candidate, Candidate.id == Lead.candidate_id)
+        .filter(Candidate.user_id == order.user_id)
+        .group_by(Lead.candidate_id)
+        .order_by(func.count(Lead.id).desc(), Lead.candidate_id.desc())
+        .first()
+    )
+    if not best or not best[1]:
+        return
+
+    logger.warning(
+        "[ORDER-HEAL] order %s was bound to candidate %s with 0 leads; repointing to %s (%d leads)",
+        order.id, order.candidate_id, best[0], best[1],
+    )
+    order.candidate_id = best[0]
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _serialize_order(order: OutreachOrder) -> dict:
