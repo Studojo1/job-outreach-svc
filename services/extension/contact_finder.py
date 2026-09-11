@@ -160,7 +160,7 @@ _PUBLIC_MAIL = {
 }
 
 
-def email_matches_company(email: str, company: str) -> bool:
+def email_matches_company(email: str, company: str, domains: Optional[List[str]] = None) -> bool:
     """Does this address plausibly belong to someone AT this company?
 
     THE REVEAL DOES NOT CHECK THIS, AND CANNOT.
@@ -186,6 +186,17 @@ def email_matches_company(email: str, company: str) -> bool:
     domain = addr.rsplit("@", 1)[1]
     if not domain or domain in _PUBLIC_MAIL:
         return False
+
+    # A DOMAIN Apollo itself gave us for this employer is the strongest
+    # evidence there is — stronger than comparing names, which cannot tell
+    # "Bajaj Finance" from "Bajaj Housing Finance". When the caller has
+    # resolved one, trust it and skip the name heuristics entirely.
+    for d in (domains or []):
+        d = (d or "").strip().lower().lstrip("@")
+        if not d:
+            continue
+        if domain == d or domain.endswith("." + d) or d.endswith("." + domain):
+            return True
 
     # Compare the domain's distinctive part against the normalised company.
     host = domain.rsplit(".", 1)[0]           # razorcapital.net -> razorcapital
@@ -228,6 +239,47 @@ def _score_title(title: str) -> int:
     return 10  # a real person at the company still beats nobody
 
 
+def _resolve_company_domains(company: str) -> List[str]:
+    """The domain(s) Apollo associates with this employer.
+
+    Returns [] when Apollo does not know the company or is not confident —
+    the caller then falls back to comparing names, which is weaker but better
+    than nothing. Never raises: this is an optimisation, not a gate.
+    """
+    from services.shared.apollo_key_manager import apollo_post
+
+    try:
+        resp = apollo_post(
+            "https://api.apollo.io/api/v1/mixed_companies/search",
+            json={"q_organization_name": company, "per_page": 5, "page": 1},
+            timeout=15,
+        )
+        if not resp.ok:
+            return []
+        data = resp.json() or {}
+        if isinstance(data, dict) and data.get("error"):
+            return []
+        orgs = data.get("organizations") or data.get("accounts") or []
+    except Exception as e:
+        logger.debug("[CONTACT-FIND] domain lookup failed for %s: %s", company, e)
+        return []
+
+    out: List[str] = []
+    for o in orgs:
+        name = (o.get("name") or "").strip()
+        dom = (o.get("primary_domain") or "").strip().lower()
+        # Only a company whose NAME actually matches. Apollo returns siblings
+        # first — "Bajaj Housing Finance" for "Bajaj Finance" — and taking the
+        # top hit is how we ended up searching the wrong entity.
+        if dom and name and _same_company(company, name):
+            out.append(dom)
+    if out:
+        logger.info("[CONTACT-FIND] %s resolved to domains: %s", company[:40], out[:3])
+    else:
+        logger.info("[CONTACT-FIND] no confident domain for %s — matching on name", company[:40])
+    return out[:3]
+
+
 def find_hiring_contacts(
     company: str,
     role: Optional[str] = None,
@@ -249,6 +301,19 @@ def find_hiring_contacts(
         return []
 
     from services.shared.apollo_key_manager import apollo_post
+
+    # Resolve the employer to a DOMAIN before searching for people at it.
+    #
+    # q_organization_name alone is not precise enough: Apollo's own company
+    # search for "Bajaj Finance" returns Bajaj Housing Finance and Bajaj Auto
+    # Finance — real sibling companies, not the one the student applied to. So
+    # the people search returned recruiters at bajajhousing.co.in and every
+    # reveal was correctly rejected, which read to the student as "we couldn't
+    # find anyone at Bajaj Finance". Wrong conclusion, right rejection.
+    #
+    # With a domain, the search is aimed at one company and the reveal has
+    # hard evidence to check against.
+    domains = _resolve_company_domains(company)
 
     payload: Dict[str, Any] = {
         "q_organization_name": company,
@@ -330,6 +395,9 @@ def find_hiring_contacts(
     # nobody here" — the first is a coverage limit we can work around, the
     # second is not, and telling them apart decides whether this works for
     # small companies at all.
+    if domains:
+        payload["q_organization_domains_list"] = domains
+
     if not people:
         try:
             probe = dict(payload)
