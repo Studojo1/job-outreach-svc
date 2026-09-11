@@ -340,11 +340,12 @@ def _resolve_contact(
         "linkedin_url": best.get("linkedin_url"),
         "email": best.get("email"),
         "apollo_id": best.get("apollo_id"),
+        "company_domains": best.get("company_domains"),
         "found_by_search": True,
     }
 
 
-def _reveal_belongs_to(email: Optional[str], company: str) -> bool:
+def _reveal_belongs_to(email: Optional[str], company: str, domains: Optional[List[str]] = None) -> bool:
     """Did the reveal actually find someone AT this company?
 
     Apollo's people/match returns organization: None on every call — verified
@@ -359,7 +360,14 @@ def _reveal_belongs_to(email: Optional[str], company: str) -> bool:
     """
     try:
         from services.extension.contact_finder import email_matches_company
-        return email_matches_company(email or "", company or "")
+
+        # Prefer a resolved DOMAIN over a name. Names cannot separate a company
+        # from its siblings: Apollo's own company search for "Bajaj Finance"
+        # returns Bajaj Housing Finance and Bajaj Auto Finance, so every
+        # recruiter it found was at bajajhousing.co.in and every reveal was
+        # correctly rejected — which read to the student as "nobody works at
+        # Bajaj Finance". Right rejection, wrong conclusion.
+        return email_matches_company(email or "", company or "", domains)
     except Exception as e:
         logger.warning("[EXT-SEND] company check failed, refusing: %s", e)
         return False
@@ -564,7 +572,7 @@ def check_contact(
         db.refresh(lead)
 
     result = enrich_single_lead_classified(lead)
-    if result.success and _reveal_belongs_to((result.data or {}).get("email"), request.company):
+    if result.success and _reveal_belongs_to((result.data or {}).get("email"), request.company, (contact or {}).get("company_domains")):
         lead.email = (result.data or {}).get("email")
         lead.email_verified = True
         db.commit()
@@ -734,7 +742,7 @@ def send_one_email(
                 detail="lookup_failed: Couldn't reach the contact lookup service. Your draft is saved — try again shortly.",
             )
         revealed = (result.data or {}).get("email")
-        if not _reveal_belongs_to(revealed, request.company):
+        if not _reveal_belongs_to(revealed, request.company, (contact or {}).get("company_domains")):
             logger.warning("[EXT-SEND] reveal rejected: %s is not at %s",
                            str(revealed)[:60], request.company[:40])
             lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
