@@ -151,6 +151,73 @@ def _same_company(a: str, b: str) -> bool:
     return any(longer[i : i + len(shorter)] == shorter for i in range(len(longer) - len(shorter) + 1))
 
 
+# Free public mail domains. An address at one of these tells us nothing about
+# where the person works, so it can never confirm a company match.
+_PUBLIC_MAIL = {
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.in", "outlook.com",
+    "hotmail.com", "live.com", "icloud.com", "proton.me", "protonmail.com",
+    "rediffmail.com", "aol.com", "zoho.com", "mail.com",
+}
+
+
+def email_matches_company(email: str, company: str) -> bool:
+    """Does this address plausibly belong to someone AT this company?
+
+    THE REVEAL DOES NOT CHECK THIS, AND CANNOT.
+
+    Apollo's people/match returns ``organization: None`` on every call —
+    verified against Razorpay, Fractal, Zerodha and Swiggy — so there is no
+    organisation field to compare. It matches largely on NAME, and marks the
+    result ``email_status: "verified"`` regardless of employer.
+
+    Searching for "Sumit Kumar at Razorpay" returned
+    ``sumit@razorcapital.net`` — Razor Capital, a different company — and our
+    only gate was the verified flag, which says the ADDRESS is real, not that
+    it is the RIGHT PERSON. A student would have emailed a stranger at a
+    company they never applied to. That is worse than finding nobody.
+
+    So the domain is the evidence we have. A public mailbox proves nothing
+    either way and is rejected: we cannot confirm it, and confirming is the
+    whole point.
+    """
+    addr = (email or "").strip().lower()
+    if "@" not in addr:
+        return False
+    domain = addr.rsplit("@", 1)[1]
+    if not domain or domain in _PUBLIC_MAIL:
+        return False
+
+    # Compare the domain's distinctive part against the normalised company.
+    host = domain.rsplit(".", 1)[0]           # razorcapital.net -> razorcapital
+    host = host.rsplit(".", 1)[-1]            # mail.acme.co.uk  -> acme
+    target = _normalise_company(company).replace(" ", "")
+    if not target:
+        return False
+    host_c = "".join(ch for ch in host if ch.isalnum())
+    if not host_c:
+        return False
+    # Strip the legal//generic suffixes a domain tacks on, the same ones
+    # _normalise_company removes from the name: acmecorp.com -> acme.
+    for suffix in ("technologies", "technology", "solutions", "systems",
+                   "software", "labs", "group", "global", "india",
+                   "corp", "inc", "llc", "ltd", "hq", "co"):
+        if host_c.endswith(suffix) and len(host_c) > len(suffix) + 2:
+            host_c = host_c[: -len(suffix)]
+            break
+    # EXACT, or the domain extends the company name ("acme" -> "acmecorp").
+    # NOT bare containment: "stripe" is inside "stripedanalytics", so a
+    # containment test accepted q@stripe.com for "Striped Analytics" — the
+    # same substring trap that matched Meta to Metabase.
+    if host_c == target:
+        return True
+    if host_c.startswith(target) or target.startswith(host_c):
+        # Guard against a short prefix matching by accident: require the
+        # shorter side to be a substantial part of the longer one.
+        shorter, longer = sorted((host_c, target), key=len)
+        return len(shorter) >= 4 and len(shorter) / len(longer) >= 0.6
+    return False
+
+
 def _score_title(title: str) -> int:
     t = (title or "").strip().lower()
     if not t:

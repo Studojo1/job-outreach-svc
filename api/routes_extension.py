@@ -344,6 +344,27 @@ def _resolve_contact(
     }
 
 
+def _reveal_belongs_to(email: Optional[str], company: str) -> bool:
+    """Did the reveal actually find someone AT this company?
+
+    Apollo's people/match returns organization: None on every call — verified
+    against Razorpay, Fractal, Zerodha and Swiggy — so there is nothing to
+    compare, and it marks a NAME match email_status: "verified" regardless of
+    employer. Searching "Sumit Kumar at Razorpay" returned
+    sumit@razorcapital.net, a different company, and the verified flag passed
+    it. A student would have emailed a stranger at a company they never
+    applied to.
+
+    Verified means the ADDRESS is real. It does not mean the PERSON is right.
+    """
+    try:
+        from services.extension.contact_finder import email_matches_company
+        return email_matches_company(email or "", company or "")
+    except Exception as e:
+        logger.warning("[EXT-SEND] company check failed, refusing: %s", e)
+        return False
+
+
 def _log_resolution(user_id: str, company: str, outcome: str, cached: bool, source: str) -> None:
     """One structured line per contact resolution.
 
@@ -543,7 +564,7 @@ def check_contact(
         db.refresh(lead)
 
     result = enrich_single_lead_classified(lead)
-    if result.success:
+    if result.success and _reveal_belongs_to((result.data or {}).get("email"), request.company):
         lead.email = (result.data or {}).get("email")
         lead.email_verified = True
         db.commit()
@@ -712,7 +733,20 @@ def send_one_email(
                 status_code=503,
                 detail="lookup_failed: Couldn't reach the contact lookup service. Your draft is saved — try again shortly.",
             )
-        lead.email = (result.data or {}).get("email")
+        revealed = (result.data or {}).get("email")
+        if not _reveal_belongs_to(revealed, request.company):
+            logger.warning("[EXT-SEND] reveal rejected: %s is not at %s",
+                           str(revealed)[:60], request.company[:40])
+            lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
+            lead.status = "extension_no_email"
+            db.commit()
+            _log_resolution(current_user.id, request.company, "unreachable", False, "wrong_company")
+            raise HTTPException(
+                status_code=422,
+                detail=("no_contact_email: We couldn't confirm an email address at "
+                        f"{request.company} for this person. Your draft is saved."),
+            )
+        lead.email = revealed
         lead.email_verified = True
         _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
         # Commit the address we just PAID Apollo for. If the send below fails
