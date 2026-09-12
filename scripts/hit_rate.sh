@@ -7,7 +7,10 @@
 # rate, split by WHERE the answer came from so a bad number points at a cause.
 #
 #   usage:  ./scripts/hit_rate.sh [namespace] [since]
-#   e.g.    ./scripts/hit_rate.sh studojo-staging 24h
+#   e.g.    ./scripts/hit_rate.sh staging 24h
+#
+# Namespace defaults to "staging" — checked against the cluster, and it is
+# what deploy-staging.yml sets. Pods are labelled app=job-outreach-svc.
 #
 # Read it like this:
 #   reachable/total          the headline hit rate
@@ -18,7 +21,7 @@
 #   outcome=error            Apollo failed — NOT the same as "nobody there",
 #                            and if this is large the hit rate is meaningless
 set -eu
-NS="${1:-studojo-staging}"
+NS="${1:-staging}"
 SINCE="${2:-24h}"
 
 echo "namespace=$NS since=$SINCE"
