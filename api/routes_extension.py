@@ -450,6 +450,7 @@ def _reachable(
 
 
 def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
+
     """Companies like this one that we CAN email.
 
     Runs the outreach tool's own discovery — same LeadFilter, same
@@ -461,6 +462,19 @@ def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
     working contact needs no alternative. Never raises: this runs on a page
     they are already reading.
     """
+    # A draft that already NAMES someone gets no alternatives.
+    #
+    # Pranav: "when i click on the company it takes to me another comapny and
+    # does not change the email but says more companies now based on the new
+    # company". That was a loop with no exit: click a suggestion -> land on a
+    # draft addressed to that person -> and be shown MORE suggestions, forever,
+    # never an email.
+    #
+    # Once we have a named human the student is meant to write to, offering
+    # different companies is not help; it is a distraction from the thing they
+    # asked for. Suggestions exist for one case only: nobody to write to here.
+    if (getattr(request, "contact_name", "") or "").strip():
+        return []
     try:
         from services.extension.similar_companies import find_similar_companies
 
