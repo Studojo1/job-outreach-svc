@@ -25,6 +25,7 @@ about them being the best first ask at a large one.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,62 @@ _LEGAL_SUFFIXES = (
     "technologies", "technology", "labs", "software", "solutions", "systems",
     "india", "global", "group", "holdings", "co",
 )
+
+
+# Mirrors looksLikePerson() in the extension's src/sites/util.js. Both sides
+# check, because either alone leaves a hole: the extension can be stale (a
+# student on an old build), and the service is also fed names from Apollo and
+# from stored leads that never passed through the extension at all.
+_NOT_A_PERSON = re.compile(
+    # Descriptive tiles rendered where a name would go.
+    r"\b(school alumni|alumni|university|college|institute|school)\b"
+    # Group and section labels — never one individual.
+    r"|\b(people|members?|connections?|followers?|employees?|team|others?)\b"
+    # UI chrome and calls to action.
+    r"|^(message|connect|follow|view|see|show|more|save|apply|premium|unlock)\b"
+    # LinkedIn section labels that name a group, not a human.
+    r"|^(your|my|our)\s"
+    # Connection degrees and bare ordinals: "2nd", "3rd+".
+    r"|^\d+(st|nd|rd|th)\b"
+    # Counts: "3 connections", "Over 100 applicants".
+    r"|\b\d+\s*(connections?|followers?|applicants?|employees?|mutual)\b"
+    # A name is not a phrase like "X from Y" or "Head of Talent at Z".
+    r"|\b(from|at|in|of)\s+[A-Z]",
+    re.IGNORECASE,
+)
+
+
+def looks_like_person(value: object) -> bool:
+    """Is this a PERSON'S NAME, or a scrap of a web page that sat where one goes?
+
+    "School alumni from Christ University, Bangalore" reached a real student's
+    draft as their hiring contact. Nothing checked — not the extension, not the
+    frontend, not here — so it propagated end to end. Worse, _resolve_contact
+    treats a named contact as final and skips the Apollo search entirely, so
+    the bad name also SUPPRESSED the lookup that would have found the real
+    hiring manager. The student saw "this posting didn't name anyone".
+
+    Deliberately CONSERVATIVE: reject what is clearly not a person, accept
+    anything plausible. A wrongly rejected name costs one free search; a
+    wrongly accepted one emails a stranger, or nobody. Real names here are
+    Indian, Anglo, hyphenated, single-word, accented — so no rule about word
+    count or character set survives contact with them.
+    """
+    if not isinstance(value, str):
+        return False
+    name = " ".join(value.split())
+    if len(name) < 2 or len(name) > 60:
+        return False
+    if len(name.split()) > 6:      # a name is not a sentence
+        return False
+    if name.endswith((".", "!", "?")):
+        return False
+    if _NOT_A_PERSON.search(name):
+        return False
+    # Must carry at least one letter: "2nd" and "+3" are not names.
+    if not re.search(r"[^\W\d_]", name, re.UNICODE):
+        return False
+    return True
 
 
 def _normalise_company(name: str) -> str:

@@ -266,9 +266,28 @@ def _resolve_contact(
 
     Returns None only when the company genuinely yields nobody.
     """
-    if (request.contact_name or "").strip():
+    from services.extension.contact_finder import looks_like_person
+
+    page_name = (request.contact_name or "").strip()
+    if page_name and not looks_like_person(page_name):
+        # The page handed us something that is not a human. Ninjacart sent
+        # "School alumni from Christ University, Bangalore" — a tile LinkedIn
+        # renders under "People you can reach out to", scraped as the hiring
+        # contact.
+        #
+        # Dropping it matters twice over. It never reaches a draft, AND the
+        # branch below is skipped, so the Apollo search runs and finds the real
+        # hiring manager. Accepting it did the opposite: it took the bad name
+        # as final, never searched, and told the student nobody was named.
+        logger.info(
+            "[CONTACT-FIND] rejecting non-person contact_name %r for %s",
+            page_name[:80], (request.company or "")[:60],
+        )
+        page_name = ""
+
+    if page_name:
         return {
-            "name": request.contact_name.strip(),
+            "name": page_name,
             "title": request.contact_title,
             "linkedin_url": request.linkedin_url,
             "email": request.contact_email,
@@ -295,6 +314,15 @@ def _resolve_contact(
     else:
         prior_q = prior_q.filter(Lead.candidate_id == candidate_id)
     prior = prior_q.order_by(Lead.id.desc()).first()
+    # Rows written BEFORE the guard above existed can hold a bad name, and this
+    # branch is checked ahead of the search — so without this check one bad
+    # scrape would keep suppressing the lookup for that company forever.
+    if prior and not looks_like_person((prior.name or "").strip()):
+        logger.info(
+            "[CONTACT-FIND] ignoring stored non-person lead name %r for %s",
+            (prior.name or "")[:80], (request.company or "")[:60],
+        )
+        prior = None
     if prior and (prior.name or "").strip():
         return {
             "name": prior.name,
