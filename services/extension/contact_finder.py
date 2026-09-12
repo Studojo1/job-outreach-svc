@@ -144,11 +144,28 @@ def _same_company(a: str, b: str) -> bool:
         return False
     if na == nb:
         return True
+
     wa, wb = na.split(), nb.split()
-    if wa[0] == wb[0] and len(wa[0]) >= 3:
-        return True
     shorter, longer = (wa, wb) if len(wa) <= len(wb) else (wb, wa)
-    return any(longer[i : i + len(shorter)] == shorter for i in range(len(longer) - len(shorter) + 1))
+
+    # A shared FIRST WORD is not a match. That rule accepted "Bajaj Housing
+    # Finance" and "Bajaj Auto Finance" as "Bajaj Finance" — different
+    # companies in one group, with their own domains and their own recruiters.
+    # We searched the wrong entity and then correctly rejected every address it
+    # returned, which read to the student as "nobody works at Bajaj Finance".
+    #
+    # What IS a match: the shorter name appearing as a contiguous run of whole
+    # words in the longer one. "Razorpay" is inside "Razorpay Software"
+    # (suffix stripped to "razorpay"), but "bajaj finance" is NOT inside
+    # "bajaj housing finance" — a word is wedged in the middle, and that word
+    # is precisely what separates the two companies.
+    if len(shorter) == len(longer):
+        return False
+
+    return any(
+        longer[i : i + len(shorter)] == shorter
+        for i in range(len(longer) - len(shorter) + 1)
+    )
 
 
 # Free public mail domains. An address at one of these tells us nothing about
@@ -451,6 +468,13 @@ def find_hiring_contacts(
             # Present only when Apollo already holds it unlocked; otherwise the
             # normal enrichment path resolves it when the student sends.
             "email": (p.get("email") or "").strip() or None,
+            # Carried so the REVEAL can verify against a domain rather than a
+            # name. Names cannot separate a company from its siblings; domains
+            # can. This was added to the resolver but never onto the result, so
+            # every contact arrived with company_domains: None and the reveal
+            # fell back to name comparison — the weaker check, for the exact
+            # case the domains exist to settle.
+            "company_domains": list(domains or []),
             "score": _score_title(title),
         })
 
