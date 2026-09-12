@@ -14,15 +14,19 @@ class PlanTier:
     price_usd: int         # cents (0 = India-only plan, not offered internationally)
     price_inr: int         # paise
     duration_days: int = 0 # 0 = unlimited; >0 = campaign auto-completes after N days
+    retired: bool = False  # still resolvable for existing records, no longer sellable
 
 
 # Production plans — 10 tiers (email x4, linkedin x3, both x3)
 PLANS: list[PlanTier] = [
     # ── Email-only ──────────────────────────────────────────────────────────
-    # email_50: India-only entry plan. price_usd=0 means it won't surface for USD users.
+    # email_50 is RETIRED as of Sept 2026. It stays in the table so historical orders,
+    # payments and credits still resolve, but it is hidden from pricing and cannot be
+    # bought again. Anyone who already holds its credits keeps them and can spend them
+    # normally. email_200 is now the entry plan.
     # INR anchors (for visual "save X%") live in routes_payment.py:
     #   ₹2500 → ₹1825 (27% off) · ₹3500 → ₹2325 (34% off) · ₹5000 → ₹3465 (31% off)
-    PlanTier("email_50",     "email",    "Starter",  50, 0,      0,  49900, duration_days=8),
+    PlanTier("email_50",     "email",    "Starter",  50, 0,      0,  49900, duration_days=8, retired=True),
     PlanTier("email_200",    "email",    "Growth",  200, 0,   2000,  182500),
     PlanTier("email_350",    "email",    "Pro",     350, 0,   2700,  232500),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   5000,  346500),
@@ -39,7 +43,7 @@ PLANS: list[PlanTier] = [
 
 # Test-mode plans (~$1 / ₹90) — used when RAZORPAY_TEST_MODE=true
 TEST_PLANS: list[PlanTier] = [
-    PlanTier("email_50",     "email",    "Starter",  50, 0,   100,   9000, duration_days=8),
+    PlanTier("email_50",     "email",    "Starter",  50, 0,   100,   9000, duration_days=8, retired=True),
     PlanTier("email_200",    "email",    "Growth",  200, 0,   100,   9000),
     PlanTier("email_350",    "email",    "Pro",     350, 0,   100,   9000),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   100,   9000),
@@ -63,8 +67,12 @@ def get_plan(plan_id: str, test_mode: bool = False) -> PlanTier:
     return plan
 
 
-def get_plans(test_mode: bool = False) -> list[PlanTier]:
-    return TEST_PLANS if test_mode else PLANS
+def get_plans(test_mode: bool = False, include_retired: bool = False) -> list[PlanTier]:
+    """Sellable plans. Retired ones are excluded unless explicitly asked for."""
+    source = TEST_PLANS if test_mode else PLANS
+    if include_retired:
+        return source
+    return [p for p in source if not p.retired]
 
 
 # ── Backwards-compat shims (email-only tier int → plan) ─────────────────────
