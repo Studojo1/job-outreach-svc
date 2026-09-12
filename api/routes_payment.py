@@ -221,6 +221,15 @@ async def create_order(
     else:
         raise HTTPException(status_code=400, detail="plan_id or tier required")
 
+    # Retired plans stay resolvable so historical orders, payments and credits still
+    # work, and anyone already holding their credits can spend them. They just cannot
+    # be bought again.
+    if getattr(plan, "retired", False):
+        raise HTTPException(
+            status_code=400,
+            detail="That plan is no longer available. Please choose one of the current plans.",
+        )
+
     # email_50 is India-only (no USD price); block non-India orders
     if resolved_plan_id == "email_50" and not is_india(req):
         raise HTTPException(status_code=400, detail="This plan is only available in India.")
