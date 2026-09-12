@@ -25,6 +25,7 @@ import re
 from urllib.parse import quote
 
 from core.config import settings
+from services.mesa import postparse
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +265,26 @@ def scrape_posts(keywords: str, location: str = "", date_posted: str = "24h",
             continue
         kept.append(p)
     for p in kept:
-        parsed = _parse(p["text"], p["links"])
-        if parsed:
+        text = postparse.fold_unicode(p["text"])  # bold-unicode field labels break the regexes below
+        parsed = _parse(text, p["links"])
+        if not parsed:
+            continue
+        # multi-job digest posts ("1) Company - X ... 2) Company - Y ...") carry
+        # several jobs; emit one row per block instead of losing all but the first
+        digest = postparse.split_digest(parsed["post_text"])
+        if digest:
+            for j in digest:
+                apply_link = postparse.resolve_short(j["apply_url"] or parsed["apply_link"])
+                rows.append({**parsed,
+                             "external_id": "post_" + hashlib.sha1(
+                                 f"{j['company']}|{j['role']}|{parsed['external_id']}".encode()).hexdigest()[:20],
+                             "title": j["role"] or parsed["title"],
+                             "company": j["company"],
+                             "location": j["location"] or parsed["location"],
+                             "apply_link": apply_link,
+                             "url": apply_link or parsed["url"]})
+        else:
+            parsed["apply_link"] = postparse.resolve_short(parsed["apply_link"])
             rows.append(parsed)
     logger.info("[MESA_POSTS] %r -> %d hiring posts", keywords, len(rows))
     return rows

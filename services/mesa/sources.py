@@ -16,6 +16,8 @@ import httpx
 from services.mesa.getro import scrape_jobs as _getro_scrape
 from services.mesa.linkedin_jobs import scrape_jobs as _linkedin_scrape
 from services.mesa.linkedin_posts import scrape_posts as _linkedin_posts_scrape
+from services.mesa.grok_x import scrape_x_posts as _x_posts_scrape
+from services.mesa.naukri_render import scrape_naukri_rendered as _naukri_render_scrape
 
 logger = logging.getLogger(__name__)
 
@@ -291,8 +293,8 @@ def _src_naukri(keywords, location, *_):
     try:
         r = _get(url, headers=h, proxy=True)
         if r.status_code != 200:
-            logger.info("[MESA] naukri blocked (HTTP %d)", r.status_code)
-            return []
+            logger.info("[MESA] naukri API blocked (HTTP %d) — falling back to rendered page", r.status_code)
+            return _naukri_render_scrape(keywords, location)
         for j in r.json().get("jobDetails", []):
             ph = j.get("placeholders") or []
             loc = next((p.get("label", "") for p in ph if p.get("type") == "location"), "")
@@ -311,6 +313,7 @@ def _src_naukri(keywords, location, *_):
 SOURCE_SCRAPERS = {
     "linkedin": _src_linkedin,
     "linkedin_posts": _src_linkedin_posts,
+    "x_posts": _src_x_posts,          # live X via xAI x_search (key-gated: XAI_API_KEY)
     "getro": _src_getro,
     "themuse": _src_themuse,
     "remotive": _src_remotive,

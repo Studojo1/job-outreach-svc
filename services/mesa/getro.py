@@ -74,11 +74,28 @@ def _iso(epoch) -> str | None:
 
 
 def _query_board(cid: int, query: str, filters: dict, page: int) -> list[dict]:
+    """POST one board query. Getro IP-throttles busy callers by returning empty
+    result sets (not errors), so on an empty/failed direct hit we retry once
+    through the residential proxy — that restored full yield in live runs."""
+    from core.config import settings
     body = {"query": query or "", "page": page, "filters": filters}
-    r = httpx.post(f"https://api.getro.com/api/v2/collections/{cid}/search/jobs",
-                   json=body, headers=_HEADERS, timeout=_TIMEOUT, verify=False)
-    r.raise_for_status()
-    return (r.json().get("results") or {}).get("jobs") or []
+    url = f"https://api.getro.com/api/v2/collections/{cid}/search/jobs"
+    proxy_url = (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+    last_exc: Exception | None = None
+    for px in ([None, proxy_url] if proxy_url else [None]):
+        try:
+            r = httpx.post(url, json=body, headers=_HEADERS, timeout=_TIMEOUT,
+                           verify=False, proxy=px)
+            r.raise_for_status()
+            jobs = (r.json().get("results") or {}).get("jobs") or []
+            if jobs or px is not None:
+                return jobs
+            # empty direct response: likely the throttle — fall through to proxy
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+    if last_exc is not None:
+        raise last_exc
+    return []
 
 
 def scrape_jobs(keywords, location, date_posted, workplace_types, experience_levels, max_results):

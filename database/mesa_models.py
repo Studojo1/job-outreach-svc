@@ -46,4 +46,24 @@ class MesaJob(Base):
     author = Column(Text)              # who posted the hiring post
     apply_link = Column(Text)          # apply email/form pulled from the post body
     post_text = Column(Text)           # first ~1500 chars of the post
+    # comma-list of OTHER sources that independently returned this company+role —
+    # independent confirmation is the strongest liveness/realness signal we have
+    corroborating_sources = Column(Text, nullable=False, default="")
     scraped_at = Column(DateTime, default=datetime.utcnow)
+
+
+class MesaSourceRun(Base):
+    """Per-run, per-source yield telemetry (migration 043). A source that breaks
+    (layout change, IP throttle, auth loss) fails SILENTLY as zero yield; this
+    table makes zero-yield streaks visible instead of starving searches."""
+    __tablename__ = "mesa_source_runs"
+
+    id = Column(Integer, primary_key=True)
+    search_id = Column(Integer, ForeignKey("mesa_searches.id", ondelete="CASCADE"),
+                       index=True, nullable=False)
+    source = Column(String(20), nullable=False)
+    scraped = Column(Integer, nullable=False, default=0)   # raw rows returned
+    kept = Column(Integer, nullable=False, default=0)      # survived relevance/freshness gates
+    new_rows = Column(Integer, nullable=False, default=0)  # actually inserted
+    error = Column(Text)                                    # last error, NULL on clean run
+    ran_at = Column(DateTime, default=datetime.utcnow)
