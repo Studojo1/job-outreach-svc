@@ -25,6 +25,7 @@ about them being the best first ask at a large one.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,62 @@ _LEGAL_SUFFIXES = (
     "technologies", "technology", "labs", "software", "solutions", "systems",
     "india", "global", "group", "holdings", "co",
 )
+
+
+# Mirrors looksLikePerson() in the extension's src/sites/util.js. Both sides
+# check, because either alone leaves a hole: the extension can be stale (a
+# student on an old build), and the service is also fed names from Apollo and
+# from stored leads that never passed through the extension at all.
+_NOT_A_PERSON = re.compile(
+    # Descriptive tiles rendered where a name would go.
+    r"\b(school alumni|alumni|university|college|institute|school)\b"
+    # Group and section labels — never one individual.
+    r"|\b(people|members?|connections?|followers?|employees?|team|others?)\b"
+    # UI chrome and calls to action.
+    r"|^(message|connect|follow|view|see|show|more|save|apply|premium|unlock)\b"
+    # LinkedIn section labels that name a group, not a human.
+    r"|^(your|my|our)\s"
+    # Connection degrees and bare ordinals: "2nd", "3rd+".
+    r"|^\d+(st|nd|rd|th)\b"
+    # Counts: "3 connections", "Over 100 applicants".
+    r"|\b\d+\s*(connections?|followers?|applicants?|employees?|mutual)\b"
+    # A name is not a phrase like "X from Y" or "Head of Talent at Z".
+    r"|\b(from|at|in|of)\s+[A-Z]",
+    re.IGNORECASE,
+)
+
+
+def looks_like_person(value: object) -> bool:
+    """Is this a PERSON'S NAME, or a scrap of a web page that sat where one goes?
+
+    "School alumni from Christ University, Bangalore" reached a real student's
+    draft as their hiring contact. Nothing checked — not the extension, not the
+    frontend, not here — so it propagated end to end. Worse, _resolve_contact
+    treats a named contact as final and skips the Apollo search entirely, so
+    the bad name also SUPPRESSED the lookup that would have found the real
+    hiring manager. The student saw "this posting didn't name anyone".
+
+    Deliberately CONSERVATIVE: reject what is clearly not a person, accept
+    anything plausible. A wrongly rejected name costs one free search; a
+    wrongly accepted one emails a stranger, or nobody. Real names here are
+    Indian, Anglo, hyphenated, single-word, accented — so no rule about word
+    count or character set survives contact with them.
+    """
+    if not isinstance(value, str):
+        return False
+    name = " ".join(value.split())
+    if len(name) < 2 or len(name) > 60:
+        return False
+    if len(name.split()) > 6:      # a name is not a sentence
+        return False
+    if name.endswith((".", "!", "?")):
+        return False
+    if _NOT_A_PERSON.search(name):
+        return False
+    # Must carry at least one letter: "2nd" and "+3" are not names.
+    if not re.search(r"[^\W\d_]", name, re.UNICODE):
+        return False
+    return True
 
 
 def _normalise_company(name: str) -> str:
@@ -415,21 +472,48 @@ def find_hiring_contacts(
     if domains:
         payload["q_organization_domains_list"] = domains
 
+    # WIDEN, do not give up.
+    #
+    # This block used to run the same query without contact_email_status, learn
+    # that people DO work there, log it, and throw the answer away — then the
+    # student was told "we don't have a confirmed email for anyone at Novo".
+    # Pranav, correctly: that message "should be last resort, you are using it
+    # to be lazy and just not do the work".
+    #
+    # Three widenings, each strictly cheaper to be wrong about than reporting a
+    # dead end. Every one still only SEARCHES; the reveal is paid later and is
+    # what actually confirms the address.
+    #
+    #   1. Drop contact_email_status. Apollo's "verified" flag is its own
+    #      confidence, not a guarantee, and the reveal verifies for real. A
+    #      startup with no flagged contacts is the common case, not an edge.
+    #   2. Drop the title filter. A 20-person company has no "Head of Talent";
+    #      it has a founder who reads every application.
+    #   3. Drop the role hint. Any human at the company beats nobody.
     if not people:
-        try:
-            probe = dict(payload)
-            probe.pop("contact_email_status", None)
-            probe["per_page"] = 5
-            probe_resp = apollo_post(APOLLO_SEARCH_URL, json=probe, timeout=15)
-            if probe_resp.ok:
-                probe_people = (probe_resp.json() or {}).get("people", []) or []
-                logger.info(
-                    "[CONTACT-FIND] probe company=%s unverified_matches=%d "
-                    "(0 = Apollo has nobody; >0 = people exist but no verified email)",
-                    company[:60], len(probe_people),
-                )
-        except Exception as e:
-            logger.debug("[CONTACT-FIND] probe failed for %s: %s", company, e)
+        widenings = [
+            ("no_email_filter", lambda q: q.pop("contact_email_status", None)),
+            ("no_titles", lambda q: q.pop("person_titles", None)),
+            ("no_role", lambda q: q.pop("q_organization_job_titles", None)),
+        ]
+        widened = dict(payload)
+        for label, drop in widenings:
+            drop(widened)
+            widened["per_page"] = max(limit * 3, 15)
+            try:
+                r2 = apollo_post(APOLLO_SEARCH_URL, json=widened, timeout=20)
+                if not r2.ok:
+                    continue
+                people = (r2.json() or {}).get("people", []) or []
+            except Exception as e:
+                logger.debug("[CONTACT-FIND] widening %s failed for %s: %s", label, company, e)
+                continue
+            logger.info(
+                "[CONTACT-FIND] widened to %s for %s -> %d people",
+                label, company[:60], len(people),
+            )
+            if people:
+                break
 
     out: List[Dict[str, Any]] = []
     for p in people:

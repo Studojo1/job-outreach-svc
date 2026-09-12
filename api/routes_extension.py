@@ -137,10 +137,25 @@ class ContactCheckRequest(BaseModel):
 
 
 class SimilarCompany(BaseModel):
-    """A company we CAN reach, matched on the one the student clicked."""
+    """A company we CAN reach, matched on the one the student clicked.
+
+    Carries the PERSON, not just the company name. The search that produced
+    this already knew who they were and Apollo's id for them, and the model
+    dropped both — so the student got a list of names to go and research
+    themselves. Pranav: "it is not interactive it is not usefull what do you
+    think theyll go search for it".
+
+    With the person attached, one click drafts an email to a real human at that
+    company, which is the whole point of the tool.
+    """
 
     company: str
+    contact_name: Optional[str] = None
     contact_title: Optional[str] = None
+    # Apollo's own identifier for this person. Without it the draft-from-
+    # alternative flow has to search Apollo AGAIN by name and company and hope
+    # it lands on the same human.
+    apollo_id: Optional[str] = None
     industry: Optional[str] = None
 
 
@@ -266,9 +281,28 @@ def _resolve_contact(
 
     Returns None only when the company genuinely yields nobody.
     """
-    if (request.contact_name or "").strip():
+    from services.extension.contact_finder import looks_like_person
+
+    page_name = (request.contact_name or "").strip()
+    if page_name and not looks_like_person(page_name):
+        # The page handed us something that is not a human. Ninjacart sent
+        # "School alumni from Christ University, Bangalore" — a tile LinkedIn
+        # renders under "People you can reach out to", scraped as the hiring
+        # contact.
+        #
+        # Dropping it matters twice over. It never reaches a draft, AND the
+        # branch below is skipped, so the Apollo search runs and finds the real
+        # hiring manager. Accepting it did the opposite: it took the bad name
+        # as final, never searched, and told the student nobody was named.
+        logger.info(
+            "[CONTACT-FIND] rejecting non-person contact_name %r for %s",
+            page_name[:80], (request.company or "")[:60],
+        )
+        page_name = ""
+
+    if page_name:
         return {
-            "name": request.contact_name.strip(),
+            "name": page_name,
             "title": request.contact_title,
             "linkedin_url": request.linkedin_url,
             "email": request.contact_email,
@@ -295,6 +329,15 @@ def _resolve_contact(
     else:
         prior_q = prior_q.filter(Lead.candidate_id == candidate_id)
     prior = prior_q.order_by(Lead.id.desc()).first()
+    # Rows written BEFORE the guard above existed can hold a bad name, and this
+    # branch is checked ahead of the search — so without this check one bad
+    # scrape would keep suppressing the lookup for that company forever.
+    if prior and not looks_like_person((prior.name or "").strip()):
+        logger.info(
+            "[CONTACT-FIND] ignoring stored non-person lead name %r for %s",
+            (prior.name or "")[:80], (request.company or "")[:60],
+        )
+        prior = None
     if prior and (prior.name or "").strip():
         return {
             "name": prior.name,
@@ -429,7 +472,9 @@ def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
         return [
             SimilarCompany(
                 company=c["company"],
+                contact_name=c.get("contact_name") or None,
                 contact_title=c.get("contact_title"),
+                apollo_id=c.get("apollo_id"),
                 industry=c.get("industry"),
             )
             for c in found
@@ -552,7 +597,25 @@ def check_contact(
         )
 
     if not request.allow_lookup:
-        return _not_yet("We'll look for an address when you send.", True, status="unknown")
+        # We found a PERSON but have not paid to reveal their address, so the
+        # honest status is "unknown", not "unreachable" — we have not looked.
+        #
+        # But the alternatives still belong here. Pranav's instruction was that
+        # when we cannot put an email in front of the student, we offer
+        # companies we can reach. Until the reveal happens this draft has no
+        # address either, which is the same dead end from where the student is
+        # standing. Withholding the suggestions until someone presses "Check
+        # now" meant they almost never appeared: the automatic check on page
+        # load passes allow_lookup=false, so THIS is the branch nearly every
+        # draft takes.
+        #
+        # The search that produced these is free; only the reveal costs.
+        return _not_yet(
+            "We'll look for an address when you send.",
+            True,
+            status="unknown",
+            similar=_suggest_alternatives(request),
+        )
 
     # Spend the lookup. The lead is committed first for the same reason as in
     # send-one: a rollback here would discard it and the next attempt would pay
