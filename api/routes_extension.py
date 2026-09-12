@@ -137,10 +137,25 @@ class ContactCheckRequest(BaseModel):
 
 
 class SimilarCompany(BaseModel):
-    """A company we CAN reach, matched on the one the student clicked."""
+    """A company we CAN reach, matched on the one the student clicked.
+
+    Carries the PERSON, not just the company name. The search that produced
+    this already knew who they were and Apollo's id for them, and the model
+    dropped both — so the student got a list of names to go and research
+    themselves. Pranav: "it is not interactive it is not usefull what do you
+    think theyll go search for it".
+
+    With the person attached, one click drafts an email to a real human at that
+    company, which is the whole point of the tool.
+    """
 
     company: str
+    contact_name: Optional[str] = None
     contact_title: Optional[str] = None
+    # Apollo's own identifier for this person. Without it the draft-from-
+    # alternative flow has to search Apollo AGAIN by name and company and hope
+    # it lands on the same human.
+    apollo_id: Optional[str] = None
     industry: Optional[str] = None
 
 
@@ -457,7 +472,9 @@ def _suggest_alternatives(request: Any) -> List["SimilarCompany"]:
         return [
             SimilarCompany(
                 company=c["company"],
+                contact_name=c.get("contact_name") or None,
                 contact_title=c.get("contact_title"),
+                apollo_id=c.get("apollo_id"),
                 industry=c.get("industry"),
             )
             for c in found

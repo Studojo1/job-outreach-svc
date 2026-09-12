@@ -472,21 +472,48 @@ def find_hiring_contacts(
     if domains:
         payload["q_organization_domains_list"] = domains
 
+    # WIDEN, do not give up.
+    #
+    # This block used to run the same query without contact_email_status, learn
+    # that people DO work there, log it, and throw the answer away — then the
+    # student was told "we don't have a confirmed email for anyone at Novo".
+    # Pranav, correctly: that message "should be last resort, you are using it
+    # to be lazy and just not do the work".
+    #
+    # Three widenings, each strictly cheaper to be wrong about than reporting a
+    # dead end. Every one still only SEARCHES; the reveal is paid later and is
+    # what actually confirms the address.
+    #
+    #   1. Drop contact_email_status. Apollo's "verified" flag is its own
+    #      confidence, not a guarantee, and the reveal verifies for real. A
+    #      startup with no flagged contacts is the common case, not an edge.
+    #   2. Drop the title filter. A 20-person company has no "Head of Talent";
+    #      it has a founder who reads every application.
+    #   3. Drop the role hint. Any human at the company beats nobody.
     if not people:
-        try:
-            probe = dict(payload)
-            probe.pop("contact_email_status", None)
-            probe["per_page"] = 5
-            probe_resp = apollo_post(APOLLO_SEARCH_URL, json=probe, timeout=15)
-            if probe_resp.ok:
-                probe_people = (probe_resp.json() or {}).get("people", []) or []
-                logger.info(
-                    "[CONTACT-FIND] probe company=%s unverified_matches=%d "
-                    "(0 = Apollo has nobody; >0 = people exist but no verified email)",
-                    company[:60], len(probe_people),
-                )
-        except Exception as e:
-            logger.debug("[CONTACT-FIND] probe failed for %s: %s", company, e)
+        widenings = [
+            ("no_email_filter", lambda q: q.pop("contact_email_status", None)),
+            ("no_titles", lambda q: q.pop("person_titles", None)),
+            ("no_role", lambda q: q.pop("q_organization_job_titles", None)),
+        ]
+        widened = dict(payload)
+        for label, drop in widenings:
+            drop(widened)
+            widened["per_page"] = max(limit * 3, 15)
+            try:
+                r2 = apollo_post(APOLLO_SEARCH_URL, json=widened, timeout=20)
+                if not r2.ok:
+                    continue
+                people = (r2.json() or {}).get("people", []) or []
+            except Exception as e:
+                logger.debug("[CONTACT-FIND] widening %s failed for %s: %s", label, company, e)
+                continue
+            logger.info(
+                "[CONTACT-FIND] widened to %s for %s -> %d people",
+                label, company[:60], len(people),
+            )
+            if people:
+                break
 
     out: List[Dict[str, Any]] = []
     for p in people:
