@@ -552,7 +552,25 @@ def check_contact(
         )
 
     if not request.allow_lookup:
-        return _not_yet("We'll look for an address when you send.", True, status="unknown")
+        # We found a PERSON but have not paid to reveal their address, so the
+        # honest status is "unknown", not "unreachable" — we have not looked.
+        #
+        # But the alternatives still belong here. Pranav's instruction was that
+        # when we cannot put an email in front of the student, we offer
+        # companies we can reach. Until the reveal happens this draft has no
+        # address either, which is the same dead end from where the student is
+        # standing. Withholding the suggestions until someone presses "Check
+        # now" meant they almost never appeared: the automatic check on page
+        # load passes allow_lookup=false, so THIS is the branch nearly every
+        # draft takes.
+        #
+        # The search that produced these is free; only the reveal costs.
+        return _not_yet(
+            "We'll look for an address when you send.",
+            True,
+            status="unknown",
+            similar=_suggest_alternatives(request),
+        )
 
     # Spend the lookup. The lead is committed first for the same reason as in
     # send-one: a rollback here would discard it and the next attempt would pay

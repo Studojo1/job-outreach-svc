@@ -48,6 +48,48 @@ APOLLO_PEOPLE_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 # and few enough that the student reads all of them.
 MAX_SUGGESTIONS = 3
 
+# Two Apollo SEARCH calls per suggestion set. That was acceptable when this ran
+# only on an explicit "Check now", but the CRM now asks on every draft page
+# mount — which is the whole point, since nobody pressed the button — and a
+# student who opens the same draft five times must not spend ten calls on an
+# answer that cannot have changed.
+#
+# Keyed on exactly what the query reads (company, role, location); anything
+# else in the request cannot change the result. An hour is far shorter than the
+# rate at which a company's industry, size band or hiring set moves, and the
+# cache is process-local, so a redeploy clears it.
+_SUGGEST_TTL_SECONDS = 3600
+_SUGGEST_CACHE_MAX = 512
+_suggest_cache: Dict[str, Any] = {}
+
+
+def _cache_key(company: str, role: Optional[str], location: Optional[str]) -> str:
+    return "\x1f".join(
+        (x or "").strip().lower() for x in (company, role, location)
+    )
+
+
+def _cache_get(key: str) -> Optional[List[Dict[str, Any]]]:
+    hit = _suggest_cache.get(key)
+    if not hit:
+        return None
+    expires, value = hit
+    if expires < datetime.now(timezone.utc):
+        _suggest_cache.pop(key, None)
+        return None
+    return value
+
+
+def _cache_put(key: str, value: List[Dict[str, Any]]) -> None:
+    # Drop the whole thing rather than carry an LRU: this is a convenience
+    # cache, and a cold start costs two searches, not correctness.
+    if len(_suggest_cache) >= _SUGGEST_CACHE_MAX:
+        _suggest_cache.clear()
+    _suggest_cache[key] = (
+        datetime.now(timezone.utc) + timedelta(seconds=_SUGGEST_TTL_SECONDS),
+        value,
+    )
+
 
 def _company_profile(company: str, location: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Industry, tags and size of the company the student actually clicked.
@@ -172,6 +214,31 @@ def _role_families(role: Optional[str]) -> Optional[List[str]]:
 
 
 def find_similar_companies(
+    company: str,
+    role: Optional[str] = None,
+    location: Optional[str] = None,
+    limit: int = MAX_SUGGESTIONS,
+) -> List[Dict[str, Any]]:
+    """Cached entry point. See _find_similar_companies_uncached for the work.
+
+    Wrapping rather than caching inside: the worker has several early returns
+    (no profile, no results, a failed call) and caching at each one would mean
+    the first path added later silently skips the cache. One door in, one door
+    out. An empty result is cached too — "Apollo does not know this company"
+    is a real answer and repeating those two searches will not change it.
+    """
+    key = _cache_key(company, role, location)
+    hit = _cache_get(key)
+    if hit is not None:
+        logger.info("[SIMILAR] cache hit for %s (%d)", company[:60], len(hit))
+        return hit[:limit]
+
+    found = _find_similar_companies_uncached(company, role, location, limit)
+    _cache_put(key, found)
+    return found
+
+
+def _find_similar_companies_uncached(
     company: str,
     role: Optional[str] = None,
     location: Optional[str] = None,
