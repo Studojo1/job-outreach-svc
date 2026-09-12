@@ -378,14 +378,32 @@ def _heal_candidate_binding(db: Session, order: OutreachOrder) -> None:
     if bound_leads:
         return
 
-    best = (
-        db.query(Lead.candidate_id, func.count(Lead.id).label("n"))
-        .join(Candidate, Candidate.id == Lead.candidate_id)
-        .filter(Candidate.user_id == order.user_id)
-        .group_by(Lead.candidate_id)
-        .order_by(func.count(Lead.id).desc(), Lead.candidate_id.desc())
-        .first()
-    )
+    # If the order already has a campaign, follow THAT campaign's candidate. The
+    # campaign is the thing actually sending, so the dashboard must show the same
+    # lead set it is working through. Picking merely the candidate with the most
+    # leads can point the user at a different list than their campaign is using.
+    target = None
+    if order.campaign_id:
+        row = (
+            db.query(Campaign.candidate_id, func.count(Lead.id))
+            .outerjoin(Lead, Lead.candidate_id == Campaign.candidate_id)
+            .filter(Campaign.id == order.campaign_id)
+            .group_by(Campaign.candidate_id)
+            .first()
+        )
+        if row and row[0] and row[1]:
+            target = (row[0], row[1])
+
+    if target is None:
+        target = (
+            db.query(Lead.candidate_id, func.count(Lead.id).label("n"))
+            .join(Candidate, Candidate.id == Lead.candidate_id)
+            .filter(Candidate.user_id == order.user_id)
+            .group_by(Lead.candidate_id)
+            .order_by(func.count(Lead.id).desc(), Lead.candidate_id.desc())
+            .first()
+        )
+    best = target
     if not best or not best[1]:
         return
 
