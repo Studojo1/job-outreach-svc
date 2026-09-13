@@ -649,12 +649,46 @@ def check_contact(
         db.refresh(lead)
 
     result = enrich_single_lead_classified(lead)
-    if result.success and _reveal_belongs_to((result.data or {}).get("email"), request.company, (contact or {}).get("company_domains")):
-        lead.email = (result.data or {}).get("email")
-        lead.email_verified = True
+
+    # SPLIT the reveal from the verification. They were one condition:
+    #
+    #     if result.success and _reveal_belongs_to(...):
+    #
+    # so a reveal that SUCCEEDED but was rejected as the wrong company fell
+    # through to the error branch, where result.error_type is empty — logged as
+    # "source=unknown". Combined with _reveal_belongs_to returning False
+    # silently on a plain mismatch, the logs showed nothing at all between
+    # "found 17 people" and "error". Four rounds of this were undiagnosable
+    # from outside, which is the actual reason it kept recurring.
+    revealed = (result.data or {}).get("email") if result.success else None
+    if result.success:
+        domains = (contact or {}).get("company_domains")
+        if _reveal_belongs_to(revealed, request.company, domains):
+            lead.email = revealed
+            lead.email_verified = True
+            db.commit()
+            _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
+            return _reachable(contact, f"We can reach {contact['name']}.", False)
+
+        # Apollo gave us an address and it is NOT at this employer. That is a
+        # real, nameable outcome — not an unclassified error.
+        logger.warning(
+            "[EXT-RESOLVE] wrong-company reveal for %s: %s not at %s (domains=%s)",
+            (contact or {}).get("name", "?"), str(revealed)[:60],
+            request.company[:40], domains,
+        )
+        lead.status = "extension_no_email"
+        lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
         db.commit()
-        _log_resolution(current_user.id, request.company, "reachable", False, "apollo")
-        return _reachable(contact, f"We can reach {contact['name']}.", False)
+        _log_resolution(current_user.id, request.company, "unreachable", False, "wrong_company")
+        return _not_yet(
+            (
+                f"We haven't found a confirmed email address at {request.company} yet. "
+                "Your draft is saved and we keep looking."
+            ),
+            False,
+            similar=_suggest_alternatives(request),
+        )
 
     lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
     if result.error_type == "no_match":

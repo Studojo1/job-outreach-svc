@@ -219,10 +219,42 @@ def _same_company(a: str, b: str) -> bool:
     if len(shorter) == len(longer):
         return False
 
-    return any(
-        longer[i : i + len(shorter)] == shorter
-        for i in range(len(longer) - len(shorter) + 1)
-    )
+    # A SHORT ONE-WORD name is not enough to match a longer name.
+    #
+    # "Neo" resolved to kotakneo.com, neo.gg AND neofinancial.com — an Indian
+    # broking app, a gaming site, and a Canadian fintech. None was the Neo
+    # hiring in Bengaluru, so we searched three wrong companies, "found" 17
+    # people at them, and then rejected every address as wrong-company. The
+    # student was told nobody at Neo could be reached while a real person was
+    # on screen.
+    #
+    # The subsequence rule below was written for "Pipraiser" vs "Pipraiser
+    # Technologies Pvt Ltd", where the extra words are legal suffixes that
+    # _normalise_company should have stripped. For a short generic word the
+    # extra words are not suffixes — they are what identifies a DIFFERENT
+    # company, and "Kotak Neo" is exactly as far from "Neo" as "Bajaj Housing
+    # Finance" is from "Bajaj Finance".
+    #
+    # The honest test is WHERE the extra words sit, not how long the name is.
+    #
+    #   "Ninjacart India"  -> normalises to "ninjacart"  (suffix stripped)
+    #   "Razorpay Software"-> normalises to "razorpay"   (suffix stripped)
+    #   "Kotak Neo"        -> stays "kotak neo"          (Kotak is a PREFIX)
+    #   "Sarvam AI"        -> stays "sarvam ai"          (AI is a real word)
+    #
+    # A word BEFORE the name changes which company it is: Kotak Neo is Kotak's
+    # product, not Neo. A word AFTER it usually does not: Sarvam AI is Sarvam.
+    # So require the shorter name to be a PREFIX of the longer one, never
+    # buried in the middle or tacked on the end.
+    #
+    # This keeps "Sarvam" == "Sarvam AI" (a real case) and "Razorpay" ==
+    # "Razorpay Software", while rejecting "Neo" == "Kotak Neo" and — still —
+    # "Bajaj Finance" == "Bajaj Housing Finance", where the wedged word is
+    # exactly what separates the two.
+    if longer[: len(shorter)] != shorter:
+        return False
+
+    return True
 
 
 # Free public mail domains. An address at one of these tells us nothing about
@@ -339,6 +371,7 @@ def _resolve_company_domains(company: str) -> List[str]:
         return []
 
     out: List[str] = []
+    names: List[str] = []
     for o in orgs:
         name = (o.get("name") or "").strip()
         dom = (o.get("primary_domain") or "").strip().lower()
@@ -347,11 +380,47 @@ def _resolve_company_domains(company: str) -> List[str]:
         # top hit is how we ended up searching the wrong entity.
         if dom and name and _same_company(company, name):
             out.append(dom)
+            names.append(name)
+
+    # AMBIGUITY IS NOT CONFIDENCE.
+    #
+    # "Neo" matched kotakneo.com, neo.gg AND neofinancial.com — an Indian
+    # broking app, a gaming site and a Canadian fintech. We then searched all
+    # three, "found" 17 people, and told the student nobody at Neo could be
+    # reached while a real person was on their screen.
+    #
+    # Collecting several domains was the mistake. These addresses are handed to
+    # email_matches_company as "the strongest evidence there is", so a wrong one
+    # does not merely miss — it ACCEPTS a stranger at a company the student
+    # never clicked, and that is how a student's email gets sent to the wrong
+    # employer.
+    #
+    # An exact name match is the tie-break: "Neo" == "Neo" beats "Neo
+    # Financial". Without one, several equally-good candidates mean we do not
+    # know which company this is, and the honest answer is to claim no domain
+    # and let the name-based check downstream be the (stricter) judge.
+    if len(out) > 1:
+        exact = [
+            d for d, n in zip(out, names)
+            if _normalise_company(n) == _normalise_company(company)
+        ]
+        if len(exact) == 1:
+            logger.info(
+                "[CONTACT-FIND] %s matched %d orgs (%s) — taking the exact name match %s",
+                company[:40], len(out), names[:3], exact[0],
+            )
+            return exact
+        logger.warning(
+            "[CONTACT-FIND] %s is AMBIGUOUS across %d orgs (%s) — claiming no domain",
+            company[:40], len(out), names[:3],
+        )
+        return []
+
     if out:
-        logger.info("[CONTACT-FIND] %s resolved to domains: %s", company[:40], out[:3])
+        logger.info("[CONTACT-FIND] %s resolved to domains: %s", company[:40], out[:1])
     else:
         logger.info("[CONTACT-FIND] no confident domain for %s — matching on name", company[:40])
-    return out[:3]
+    return out[:1]
 
 
 def find_hiring_contacts(
