@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -737,14 +738,55 @@ async def get_credits(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the user's current credit balance."""
+    """Return the user's credit balance, and what those credits are actually doing.
+
+    Credits are reserved in full the moment a campaign is created, not spent per
+    send. So a user whose campaign is midway through reports used == total and
+    available == 0, and the UI told them "You have 0 credits" next to a pricing
+    page. To them that reads as money disappearing, when in fact their emails are
+    queued and going out.
+
+    `available_credits` keeps its old meaning so nothing that depends on it
+    changes. The extra fields say where the reserved credits actually went, so the
+    UI can show "20 sent, 30 scheduled" instead of a bare zero.
+    """
+    from database.models import Campaign, Candidate, EmailSent
+
     credit = db.query(UserCredit).filter_by(user_id=current_user.id).first()
     if not credit:
-        return {"total_credits": 0, "used_credits": 0, "available_credits": 0}
+        return {"total_credits": 0, "used_credits": 0, "available_credits": 0,
+                "emails_delivered": 0, "emails_scheduled": 0, "reserved_credits": 0,
+                "has_active_campaign": False}
+
+    counts = (
+        db.query(EmailSent.status, func.count(EmailSent.id))
+        .join(Campaign, Campaign.id == EmailSent.campaign_id)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == current_user.id,
+                EmailSent.is_test.isnot(True),
+                EmailSent.followup_number == 0)
+        .group_by(EmailSent.status)
+        .all()
+    )
+    by = {st: n for st, n in counts}
+    delivered = by.get("sent", 0)
+    scheduled = by.get("pending_enrichment", 0) + by.get("queued", 0)
+    active = (
+        db.query(Campaign.id)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == current_user.id,
+                Campaign.status.in_(["running", "paused"]))
+        .first() is not None
+    )
     return {
         "total_credits": credit.total_credits,
         "used_credits": credit.used_credits,
         "available_credits": credit.total_credits - credit.used_credits,
+        # what the reserved credits are actually doing
+        "emails_delivered": delivered,
+        "emails_scheduled": scheduled,
+        "reserved_credits": max(0, credit.used_credits - delivered),
+        "has_active_campaign": active,
     }
 
 
