@@ -49,6 +49,7 @@ _sender_stop = threading.Event()
 POLL_INTERVAL = 30  # seconds between poll cycles
 DAILY_LIMIT_MIN = 5
 DAILY_LIMIT_MAX = 7
+DAILY_LIMIT_CEILING = 40  # hard cap: no campaign.daily_limit above this is honoured
 JIT_LOOKAHEAD_HOURS = 3  # enrich/generate leads this far ahead of send time
 MAX_ENRICH_PER_CYCLE = 3  # ~0.6s at 0.2s Apollo rate limit
 MAX_GENERATE_PER_CYCLE = 2  # ~2s for LLM calls
@@ -76,6 +77,45 @@ def _ensure_tracking_token(email) -> str:
 
 
 # ── Schedule Computation ─────────────────────────────────────────────────────
+
+def _daily_target(campaign) -> int:
+    """How many emails to schedule for one day.
+
+    Honours campaign.daily_limit, which this scheduler used to ignore outright:
+    whatever the user picked, they got random(5, 7). Someone who set 12 ran at
+    half the rate they chose and their campaign took twice as long as the number
+    on screen implied.
+
+    Jittered by one either way so the send pattern still looks human, and capped
+    so a silly value cannot burn down the sender's own domain reputation.
+    """
+    want = getattr(campaign, "daily_limit", None) or 0
+    if want <= 0:
+        return random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
+    want = min(int(want), DAILY_LIMIT_CEILING)
+    # Clamp AFTER the jitter, otherwise a capped value of 40 still comes out as
+    # 41 one time in three and the ceiling is not really a ceiling.
+    return max(1, min(want + random.randint(-1, 1), DAILY_LIMIT_CEILING))
+
+
+def _followup_exists(db, parent_email_id: int, followup_number: int) -> bool:
+    """Is there already a follow-up row for this parent at this touch number?
+
+    Both creation sites below run after a successful send, outside the lock that
+    protects the send itself. Without this check a retry, or a second pass over
+    the same row, quietly creates another copy, and the recipient gets the same
+    follow-up two, three or four times from the student's own mailbox.
+    """
+    return (
+        db.query(EmailSent.id)
+        .filter(
+            EmailSent.parent_email_id == parent_email_id,
+            EmailSent.followup_number == followup_number,
+        )
+        .first()
+        is not None
+    )
+
 
 def compute_campaign_schedule(db, campaign_id: int):
     """Pre-compute scheduled_at for all pending emails in a campaign.
@@ -133,24 +173,33 @@ def compute_campaign_schedule(db, campaign_id: int):
     # Walk forward from the first email's time, adding random gaps.
     # Roll to next day at 9 AM when we hit the daily limit or pass 5 PM.
     cursor_utc = emails[0].scheduled_at
+    start_of_day_hour = 9
     end_of_day_hour = 17  # 5 PM local — stop scheduling, roll to next day
+    send_window_minutes = (end_of_day_hour - start_of_day_hour) * 60
     daily_count = 1       # First email already counts for today
-    daily_limit = random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
+    daily_limit = _daily_target(campaign)
+
+    def _gap_for(limit: int) -> float:
+        # Spread the day's emails across the sending window instead of using a
+        # fixed 40-90 minute gap. A fixed gap silently caps the real rate: at 65
+        # minutes average you cannot fit more than about 8 into a working day,
+        # so a daily_limit of 12 could never be met however it was set.
+        base = send_window_minutes / max(1, limit)
+        return random.uniform(base * 0.7, base * 1.3)
 
     for email in remaining:
-        # Random gap: 40-90 minutes after the previous email
-        gap_minutes = random.uniform(40, 90)
+        gap_minutes = _gap_for(daily_limit)
         cursor_utc = cursor_utc + timedelta(minutes=gap_minutes)
 
         # Check if we've exceeded today's limit or gone past business hours
         cursor_local = cursor_utc.replace(tzinfo=pytz.utc).astimezone(tz)
         if daily_count >= daily_limit or cursor_local.hour >= end_of_day_hour:
             # Roll to next day at 9:00 AM + small random offset (0-30 min)
-            next_day = cursor_local.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            next_day = cursor_local.replace(hour=start_of_day_hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
             next_day = next_day + timedelta(minutes=random.uniform(0, 30))
             cursor_utc = next_day.astimezone(pytz.utc).replace(tzinfo=None)
             daily_count = 0
-            daily_limit = random.randint(DAILY_LIMIT_MIN, DAILY_LIMIT_MAX)
+            daily_limit = _daily_target(campaign)
 
         email.scheduled_at = cursor_utc
         daily_count += 1
@@ -597,7 +646,11 @@ def _send_ready(db) -> tuple:
                 logger.warning("[SENDER] Could not fetch Message-Id header for email %d: %s", email.id, e)
 
             # Schedule Touch 2 follow-up (Day 5 after send) for non-test initial emails
-            if email.followup_number == 0 and not email.is_test:
+            if (
+                email.followup_number == 0
+                and not email.is_test
+                and not _followup_exists(db, email.id, 1)
+            ):
                 followup = EmailSent(
                     campaign_id=email.campaign_id,
                     lead_id=email.lead_id,
@@ -732,20 +785,31 @@ def _process_followups(db) -> tuple:
             failed_count += 1
             continue
 
-        try:
-            body = generate_followup_email(lead, candidate, parent.body or "", fu.followup_number)
-        except PermanentAPIError as e:
-            # 4xx / content filter — retrying the same prompt will never succeed.
-            logger.warning("[FOLLOWUP] Permanent failure for %d: %s", fu.id, e)
-            fu.status = "failed"
-            fu.error_message = f"Generation failed (permanent): {str(e)[:300]}"
-            db.commit()
-            failed_count += 1
-            continue
-        except Exception as e:
-            # Transient (429 rate limit, 5xx, network) — leave pending so next cycle retries.
-            logger.warning("[FOLLOWUP] Transient failure for %d (will retry next cycle): %s", fu.id, e)
-            continue
+        # A follow-up that already carries a body was written for this lead on
+        # purpose, either by the author or by an earlier generation pass. Use it.
+        # This used to regenerate unconditionally, so a campaign whose first touch
+        # was hand-written in the user's own format got a generic AI follow-up on
+        # touch 2, with a different structure and a different sign-off from the
+        # email it was replying to.
+        if (fu.body or "").strip():
+            body = fu.body
+            logger.info("[FOLLOWUP] Using pre-written body for %d (touch %d)",
+                        fu.id, fu.followup_number)
+        else:
+            try:
+                body = generate_followup_email(lead, candidate, parent.body or "", fu.followup_number)
+            except PermanentAPIError as e:
+                # 4xx / content filter, retrying the same prompt will never succeed.
+                logger.warning("[FOLLOWUP] Permanent failure for %d: %s", fu.id, e)
+                fu.status = "failed"
+                fu.error_message = f"Generation failed (permanent): {str(e)[:300]}"
+                db.commit()
+                failed_count += 1
+                continue
+            except Exception as e:
+                # Transient (429 rate limit, 5xx, network), leave pending so next cycle retries.
+                logger.warning("[FOLLOWUP] Transient failure for %d (will retry next cycle): %s", fu.id, e)
+                continue
 
         # Refresh token
         acct_id = account.id
@@ -791,8 +855,11 @@ def _process_followups(db) -> tuple:
             except Exception as e:
                 logger.warning("[FOLLOWUP] Could not fetch Message-Id for follow-up %d: %s", fu.id, e)
 
-            # If this was Touch 2, schedule Touch 3 for 7 days later
-            if fu.followup_number == 1:
+            # If this was Touch 2, schedule Touch 3 for 7 days later.
+            # The existence check is the fix for 549 duplicate follow-up groups,
+            # 559 of which had already been delivered: this block ran more than
+            # once for the same parent and each pass added another Touch 3.
+            if fu.followup_number == 1 and not _followup_exists(db, parent.id, 2):
                 touch3 = EmailSent(
                     campaign_id=fu.campaign_id,
                     lead_id=fu.lead_id,
