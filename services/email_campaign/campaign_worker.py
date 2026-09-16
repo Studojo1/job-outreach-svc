@@ -638,6 +638,14 @@ def _send_ready(db) -> tuple:
             email.message_id = result.get("id")
             email.thread_id = result.get("threadId")
 
+            # Commit the moment Gmail confirms, before doing anything else that
+            # can throw. Everything below used to sit between the send and the
+            # only commit, so a failure in the header fetch, or the pod dying,
+            # left a delivered email still marked pending. Next cycle picked it
+            # up and sent it again, which is how recipients ended up with the
+            # same message twice with slightly different wording.
+            db.commit()
+
             # Fetch Message-ID header for follow-up In-Reply-To threading
             try:
                 from services.email_campaign.gmail_send_service import fetch_message_id_header
@@ -695,6 +703,65 @@ def _send_ready(db) -> tuple:
 
 # ── JIT Phase 4: Send Follow-up Emails (thread replies) ─────────────────────
 
+FOLLOWUP_MIN_GAP_SECONDS = 180  # never two follow-ups from one campaign closer than this
+
+
+def _pace_followups(db, pending: list, now) -> list:
+    """Drop follow-ups that would breach a campaign's daily rate or crowd together.
+
+    Returns the subset safe to send this cycle. Anything held back keeps its
+    pending status and is simply reconsidered next cycle, so nothing is lost.
+    """
+    from sqlalchemy import func as _func
+
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    allowed = []
+    per_campaign_today: dict = {}
+    last_sent_at: dict = {}
+
+    for fu in pending:
+        cid = fu.campaign_id
+        if cid not in per_campaign_today:
+            campaign = db.query(Campaign).filter_by(id=cid).first()
+            limit = _daily_target(campaign) if campaign else DAILY_LIMIT_MAX
+            # Count follow-ups only. Counting every send would mean a campaign
+            # that has used its daily limit on first touches never sends a
+            # follow-up at all, and the backlog would grow forever.
+            already = (
+                db.query(_func.count(EmailSent.id))
+                .filter(
+                    EmailSent.campaign_id == cid,
+                    EmailSent.sent_at.isnot(None),
+                    EmailSent.sent_at >= day_start,
+                    EmailSent.followup_number > 0,
+                )
+                .scalar()
+            ) or 0
+            per_campaign_today[cid] = [already, limit]
+            last_sent_at[cid] = (
+                db.query(_func.max(EmailSent.sent_at))
+                .filter(EmailSent.campaign_id == cid, EmailSent.sent_at.isnot(None))
+                .scalar()
+            )
+
+        count, limit = per_campaign_today[cid]
+        if count >= limit:
+            continue  # campaign has had its day's worth, try again tomorrow
+
+        last = last_sent_at.get(cid)
+        if last and (now - last).total_seconds() < FOLLOWUP_MIN_GAP_SECONDS:
+            continue  # too soon after the previous send on this campaign
+
+        allowed.append(fu)
+        per_campaign_today[cid][0] = count + 1
+        last_sent_at[cid] = now
+
+    if len(allowed) < len(pending):
+        logger.info("[FOLLOWUP] Paced %d of %d follow-ups to respect daily limits and spacing",
+                    len(pending) - len(allowed), len(pending))
+    return allowed
+
+
 def _process_followups(db) -> tuple:
     """Send due follow-up emails as Gmail thread replies.
 
@@ -727,6 +794,16 @@ def _process_followups(db) -> tuple:
         .with_for_update(skip_locked=True)
         .all()
     )
+
+    # Follow-ups never went through compute_campaign_schedule, so they had no
+    # pacing at all: any overdue backlog drained as fast as the poll loop would
+    # allow. On 15 Sep that put 58 follow-ups down one mailbox inside an hour,
+    # against a single first-touch email. Recipients saw a burst, which is
+    # exactly what outreach is not supposed to look like.
+    # Hold each campaign to its own daily limit, counting what it has already
+    # sent today, and space consecutive follow-ups on the same campaign.
+    if pending:
+        pending = _pace_followups(db, pending, now)
 
     if not pending:
         return sent_count, cancelled_count, failed_count
@@ -848,6 +925,10 @@ def _process_followups(db) -> tuple:
             fu.message_id = result.get("id")
             fu.thread_id = result.get("threadId")
             fu.subject = parent.subject
+            # Persist the body we actually sent, so a retry can never silently
+            # deliver different wording, and commit before anything else runs.
+            fu.body = body
+            db.commit()
 
             # Fetch Message-ID header for potential Touch 3
             try:
