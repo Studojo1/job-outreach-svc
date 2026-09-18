@@ -1,0 +1,33 @@
+# Mesa daily LinkedIn job scrape.
+#
+# Once a day, triggers the internal run-due endpoint, which scrapes every active
+# saved search (cookie-free, via the residential proxy) and stores new jobs.
+# Self-contained: just a curl to the in-cluster service; the scraping itself runs
+# inside job-outreach-svc (which holds the proxy creds + DB).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mesa-daily-scrape
+  namespace: studojo
+spec:
+  schedule: "0 6 * * *"          # daily 06:00 UTC (~11:30 IST)
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.10.1
+              command: ["sh", "-c"]
+              args:
+                - >
+                  curl -fsS -m 1500 -X POST
+                  http://job-outreach-svc.studojo.svc.cluster.local:8000/job-outreach/api/v1/mesa/worker/run-due
+                  && echo "mesa run-due triggered"
