@@ -194,6 +194,7 @@ class EmailSent(Base):
     to_email = Column(String(255))
     assigned_style = Column(String(50))  # Email style: warm_intro, value_prop, company_curiosity, peer_to_peer, direct_ask
     enrichment_status = Column(String(20), default="pending")  # pending, enriched, failed, skipped
+    send_position = Column(Integer)  # User-pinned send order; NULL falls back to lead score
     scheduled_at = Column(DateTime)  # When this email should be sent (timezone-aware scheduling)
     sent_at = Column(DateTime)
     status = Column(String(50), default="queued")
