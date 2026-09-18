@@ -101,6 +101,10 @@ def create_campaign(
 
     if use_ai_generation:
         # ── JIT Mode: Create placeholder rows for ALL leads, ordered by score ──
+        # Score order here decides *which* leads make the lead_limit cut, not the
+        # order they go out in. Send order is settled later, in campaign_worker's
+        # _compute_schedule, which reads EmailSent.send_position — a column that
+        # cannot exist yet, because the rows below are what create it.
         leads_query = (
             db.query(Lead)
             .filter(Lead.candidate_id == candidate_id)
