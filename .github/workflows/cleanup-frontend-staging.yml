@@ -1,0 +1,45 @@
+name: Cleanup job-outreach-frontend (Staging)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "latest"
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group rg-studojo \
+            --name studojo-aks \
+            --overwrite-existing
+
+      - name: Delete job-outreach-frontend resources from staging
+        run: |
+          echo "=== Ingresses before ==="
+          kubectl get ingress -n staging
+
+          kubectl delete deployment job-outreach-frontend -n staging --ignore-not-found
+          kubectl delete service job-outreach-frontend -n staging --ignore-not-found
+          kubectl delete ingress job-outreach-frontend-ingress -n staging --ignore-not-found
+
+          echo "=== Ingresses after ==="
+          kubectl get ingress -n staging
+          echo "=== Deployments after ==="
+          kubectl get deployments -n staging
