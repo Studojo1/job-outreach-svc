@@ -83,6 +83,13 @@ jobs:
             AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4o-mini \
             AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
             -n ${{ env.NAMESPACE }}
+          # Meta Conversions API — authoritative server-side Purchase. Guarded so an
+          # unset secret disables CAPI instead of blanking a working value.
+          if [ -n "${{ secrets.META_CAPI_TOKEN }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
+              -n ${{ env.NAMESPACE }}
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} \
             -n ${{ env.NAMESPACE }} --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."

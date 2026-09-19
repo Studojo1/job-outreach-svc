@@ -85,6 +85,13 @@ jobs:
           # Wire the residential proxy (LinkedIn discovery + sending) from app-secrets.
           kubectl set env deployment/${{ env.SERVICE_NAME }} -n studojo \
             --from=secret/app-secrets --keys=linkedin-proxy-url
+          # Meta Conversions API — authoritative server-side Purchase. Guarded so an
+          # unset secret disables CAPI instead of blanking a working value.
+          if [ -n "${{ secrets.META_CAPI_TOKEN }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
+              -n studojo
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n studojo --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."
             kubectl get pods -n studojo -l app=${{ env.SERVICE_NAME }} -o wide
