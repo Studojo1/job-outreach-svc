@@ -456,6 +456,10 @@ class CampaignRescheduleRequest(BaseModel):
     user_timezone: str
 
 
+class CampaignSendOrderRequest(BaseModel):
+    email_ids: List[int]  # desired send sequence, first to last
+
+
 @router.post("/{campaign_id}/reschedule")
 async def api_reschedule_campaign(
     campaign_id: int,
@@ -489,6 +493,69 @@ async def api_reschedule_campaign(
 
     compute_campaign_schedule(db, campaign_id)
     return {"status": "success", "user_timezone": request.user_timezone}
+
+
+@router.post("/{campaign_id}/send-order")
+async def api_set_send_order(
+    campaign_id: int,
+    request: CampaignSendOrderRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pin the order specific emails go out in, then recompute the schedule.
+
+    `email_ids` is the sequence the user wants, first to last. Only rows that
+    have not gone out yet can be pinned — an email already sent cannot be
+    unsent, and reordering it would silently rewrite history. Anything the user
+    leaves out keeps its lead-score position behind the pinned rows.
+    """
+    from database.models import Candidate, EmailSent
+    from services.email_campaign.campaign_worker import compute_campaign_schedule
+
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
+    if not candidate:
+        raise HTTPException(status_code=403, detail="Not your campaign")
+
+    if campaign.status not in ("running", "paused", "draft"):
+        raise HTTPException(status_code=400, detail="Can only reorder a running, paused or draft campaign")
+
+    requested = request.email_ids
+    if len(set(requested)) != len(requested):
+        raise HTTPException(status_code=400, detail="Duplicate email ids in send order")
+
+    # Only unsent rows of THIS campaign are eligible. Anything else in the list
+    # is rejected outright rather than silently dropped, so a stale UI can't
+    # half-apply an ordering the user thinks they saved.
+    reorderable = {
+        e.id: e
+        for e in db.query(EmailSent).filter(
+            EmailSent.campaign_id == campaign_id,
+            EmailSent.status.in_(["pending_enrichment", "queued"]),
+        )
+    }
+    unknown = [eid for eid in requested if eid not in reorderable]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Emails already sent or not in this campaign: {unknown}",
+        )
+
+    # Clear previous pins first, so removing a lead from the list actually
+    # unpins it instead of leaving a stale position behind.
+    for email in reorderable.values():
+        email.send_position = None
+    for position, email_id in enumerate(requested, start=1):
+        reorderable[email_id].send_position = position
+    db.commit()
+
+    compute_campaign_schedule(db, campaign_id)
+    logger.info("[SEND-ORDER] Campaign %d: pinned %d of %d unsent emails",
+                campaign_id, len(requested), len(reorderable))
+    return {"status": "success", "pinned": len(requested), "reorderable": len(reorderable)}
 
 
 @router.get("/user/latest")

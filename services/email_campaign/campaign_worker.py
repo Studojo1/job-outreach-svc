@@ -123,6 +123,9 @@ def compute_campaign_schedule(db, campaign_id: int):
     Called when campaign transitions to 'running'.
     Works with both 'pending_enrichment' (JIT) and 'queued' (legacy) statuses.
 
+    Order: rows the user pinned (send_position) lead, in their order; the rest
+    follow by lead score, as they always have.
+
     Algorithm:
       1. First email: 30-180s from now (ignores business hours — trust signal)
       2. All remaining emails are distributed across days:
@@ -149,7 +152,13 @@ def compute_campaign_schedule(db, campaign_id: int):
         )
         .outerjoin(Lead, EmailSent.lead_id == Lead.id)
         .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
-        .order_by(LeadScore.overall_score.desc().nullslast(), EmailSent.id.asc())
+        # Pinned rows first, in the order the user set them; everything they did
+        # not touch keeps falling back to lead score exactly as before.
+        .order_by(
+            EmailSent.send_position.asc().nullslast(),
+            LeadScore.overall_score.desc().nullslast(),
+            EmailSent.id.asc(),
+        )
         .all()
     )
 
