@@ -158,6 +158,73 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         raise ValueError(f"Could not parse DOCX file: {str(e)}")
 
 
+# Degree tokens, and the words that mean the line is NOT a degree the candidate
+# holds. Anish Chandra attended "MASTER'S UNION MBA Summer School" and the old
+# scan reported him as an MBA; he is a BCom graduate. A short programme names
+# the degree it imitates, so the token alone can never be the evidence.
+_DEGREE_TOKEN = re.compile(
+    r'(?i)\b(B\.?Tech|B\.?E|B\.?Sc|B\.?Com|B\.?A|BBA|BCA|M\.?Tech|M\.?E|M\.?Sc'
+    r'|M\.?Com|M\.?A|MBA|MCA|Ph\.?D|Diploma)\b'
+)
+
+# Spelled-out degrees. "Bachelor of Commerce" was invisible to the token scan,
+# so the one degree Anish actually holds never appeared at all.
+_DEGREE_SPELLED = [
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+technology\b'), 'BTech'),
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+engineering\b'), 'BE'),
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+science\b'), 'BSc'),
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+commerce\b'), 'BCom'),
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+arts\b'), 'BA'),
+    (re.compile(r'(?i)\bbachelor(?:\'?s)?\s+of\s+business\s+administration\b'), 'BBA'),
+    (re.compile(r'(?i)\bmaster(?:\'?s)?\s+of\s+technology\b'), 'MTech'),
+    (re.compile(r'(?i)\bmaster(?:\'?s)?\s+of\s+science\b'), 'MSc'),
+    (re.compile(r'(?i)\bmaster(?:\'?s)?\s+of\s+commerce\b'), 'MCom'),
+    (re.compile(r'(?i)\bmaster(?:\'?s)?\s+of\s+arts\b'), 'MA'),
+    (re.compile(r'(?i)\bmaster(?:\'?s)?\s+of\s+business\s+administration\b'), 'MBA'),
+    (re.compile(r'(?i)\bdoctor\s+of\s+philosophy\b'), 'PhD'),
+]
+
+# A line carrying any of these describes a short programme, a course or a club,
+# not a conferred degree.
+_NOT_A_DEGREE = re.compile(
+    r'(?i)\b(summer\s+school|summer\s+programme|summer\s+program|winter\s+school'
+    r'|bootcamp|boot\s+camp|workshop|webinar|masterclass|master\s+class'
+    r'|certification|certificate|certified|course|online\s+course|mooc'
+    r'|society|club|chapter|cell|fest|conclave|summit|seminar'
+    r'|aspirant|aspiring|preparation|entrance|coaching'
+    r'|intern(?:ship)?|trainee)\b'
+)
+
+
+def _extract_degrees(raw_text: str, limit: int = 3) -> list:
+    """Degrees the candidate actually holds, judged line by line.
+
+    The previous version scanned the whole document for degree tokens with no
+    regard for what the surrounding line said, so any mention of a degree —
+    a summer school, a certification, a club name — was reported as a
+    qualification. That is how a BCom graduate was shown as an MBA, and it does
+    not merely look wrong on screen: education feeds the outreach email
+    generator, so a fabricated degree gets written into mail sent in the
+    student's own name.
+    """
+    found = []
+
+    def _add(token):
+        if token not in found:
+            found.append(token)
+
+    for line in (raw_text or "").splitlines():
+        if not line.strip() or _NOT_A_DEGREE.search(line):
+            continue
+        for pattern, token in _DEGREE_SPELLED:
+            if pattern.search(line):
+                _add(token)
+        for token in _DEGREE_TOKEN.findall(line):
+            _add(token)
+
+    return found[:limit]
+
+
 def quick_extract_preview(raw_text: str) -> dict:
     """
     Fast regex-based extraction for the upload preview card.
@@ -248,17 +315,7 @@ def quick_extract_preview(raw_text: str) -> dict:
 
     preview["skills"] = preview["skills"][:15]  # Cap at 15
 
-    # Extract education from resume text
-    education = []
-    edu_patterns = [
-        r'(?i)\b(B\.?Tech|B\.?E|B\.?Sc|B\.?Com|B\.?A|BBA|BCA|M\.?Tech|M\.?E|M\.?Sc|M\.?Com|M\.?A|MBA|MCA|Ph\.?D|Diploma)\b',
-    ]
-    for pat in edu_patterns:
-        matches = re.findall(pat, raw_text)
-        for m in matches:
-            if m not in education:
-                education.append(m)
-    preview["education"] = education[:3]
+    preview["education"] = _extract_degrees(raw_text)
 
     # Extract years of experience from resume text
     exp_match = re.search(r'(\d+)\+?\s*(?:years?|yrs?)\s*(?:of)?\s*(?:experience|exp)', raw_text, re.IGNORECASE)
