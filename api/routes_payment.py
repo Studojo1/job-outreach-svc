@@ -23,6 +23,7 @@ from core.pricing import (
 from core.geo import detect_country, is_india
 from api.dependencies import get_current_user
 from core.analytics import capture
+from core import meta_capi
 import services.dodo_payments as dodo_svc
 
 logger = logging.getLogger(__name__)
@@ -534,6 +535,8 @@ async def verify_payment(
     from services.stage_tracking import safe_mark_stage
     safe_mark_stage(db, str(current_user.id), "payment_made")
 
+    await _report_purchase_to_meta(db, order)
+
     return {"status": "verified", "credits": order.credits_granted, "plan_type": _order_plan_type(order)}
 
 
@@ -590,6 +593,7 @@ async def verify_dodo_payment(
         })
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
+        await _report_purchase_to_meta(db, order)
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):
@@ -660,8 +664,21 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
         logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, plan=%s, user %s",
                     checkout_id, order.plan_id, order.user_id)
 
+        capture("payment_confirmed", str(order.user_id), {
+            "plan_id": order.plan_id,
+            "plan_type": _order_plan_type(order),
+            "credits_granted": order.credits_granted,
+            "provider": "dodo",
+            "amount_cents": order.amount_cents,
+            "currency": order.currency,
+            "country": order.geo_country,
+            "source": "webhook",
+        })
+
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
+
+        await _report_purchase_to_meta(db, order)
 
     elif event_type == "payment.failed":
         checkout_id = data.get("checkout_id", "")
@@ -714,8 +731,19 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                     db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
                 db.commit()
                 logger.info("[PAYMENT_WEBHOOK] Payment captured: %s, plan=%s", rz_order_id, order.plan_id)
+                capture("payment_confirmed", str(order.user_id), {
+                    "plan_id": order.plan_id,
+                    "plan_type": _order_plan_type(order),
+                    "credits_granted": order.credits_granted,
+                    "provider": "razorpay",
+                    "amount_cents": order.amount_cents,
+                    "currency": order.currency,
+                    "country": order.geo_country,
+                    "source": "webhook",
+                })
                 from services.stage_tracking import safe_mark_stage
                 safe_mark_stage(db, str(order.user_id), "payment_made")
+                await _report_purchase_to_meta(db, order)
 
     elif event == "payment.failed":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
@@ -813,6 +841,47 @@ def _set_plan_on_order(db: Session, outreach_order_id: int | None, plan) -> None
         oo.leads_target = plan.email_credits
     if plan.linkedin_credits:
         oo.linkedin_credits_reserved = plan.linkedin_credits
+
+
+async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
+    """Send the authoritative Purchase to Meta, once per order.
+
+    MUST be called AFTER db.commit(). Reporting before the commit risks telling
+    Meta about revenue that then fails to persist, which is the one thing worse
+    than missing the event.
+
+    event_id is the payment provider's own id, which is exactly what the browser
+    pixel sends, so Meta merges the two copies instead of counting the sale twice.
+    All four paid paths (Razorpay verify, Dodo verify, and both webhooks) route
+    through here, so a payment confirmed while the user's tab is closed is still
+    reported.
+    """
+    if not meta_capi.is_configured():
+        return
+    try:
+        event_id = order.razorpay_order_id or order.dodo_checkout_id
+        if not event_id:
+            logger.warning("[META_CAPI] Order %s has no provider id; skipping Purchase", order.id)
+            return
+
+        email = None
+        try:
+            user = db.query(User).filter_by(id=order.user_id).first()
+            email = user.email if user else None
+        except Exception:
+            pass  # match quality suffers, the event still counts
+
+        await meta_capi.send_purchase(
+            event_id=str(event_id),
+            # PaymentOrder stores minor units; Meta wants major.
+            value=(order.amount_cents or 0) / 100.0,
+            currency=order.currency or "INR",
+            email=email,
+            external_id=str(order.user_id) if order.user_id else None,
+        )
+    except Exception as e:
+        # A payment must never fail because an analytics call did.
+        logger.warning("[META_CAPI] Purchase reporting failed for order %s: %s", order.id, e)
 
 
 def _finalize_credits(db: Session, order: PaymentOrder) -> None:

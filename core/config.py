@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     DODO_PAYMENTS_API_KEY: str = ""
     DODO_TEST_MODE: bool = True
     DODO_WEBHOOK_SECRET: str = ""
+
+    # Meta Conversions API — authoritative server-side Purchase. Both blank by
+    # default, which disables it rather than failing a payment.
+    META_PIXEL_ID: str = "1402801611979819"
+    META_CAPI_TOKEN: str = ""
     DODO_PRODUCT_OUTREACH: str = ""  # Single product with pay_what_you_want enabled
 
     # REDIS

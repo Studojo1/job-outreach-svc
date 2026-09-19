@@ -85,6 +85,13 @@ jobs:
             -n ${{ env.NAMESPACE }}
           # Bob (Mesa) secrets — only set when configured in GitHub secrets,
           # so an empty secret never wipes a value already on the deployment.
+          # Meta Conversions API — authoritative server-side Purchase. Guarded so an
+          # unset secret disables CAPI instead of blanking a working value.
+          if [ -n "${{ secrets.META_CAPI_TOKEN }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
+              -n staging
+          fi
           if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
             kubectl set env deployment/${{ env.SERVICE_NAME }} \
               CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \
