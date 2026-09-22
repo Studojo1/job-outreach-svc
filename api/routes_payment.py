@@ -484,10 +484,18 @@ async def verify_payment(
     db: Session = Depends(get_db),
 ):
     """Verify Razorpay payment signature and grant credits."""
+    # Lock the order row for the rest of this transaction. Dodo and Razorpay each
+    # confirm a payment through TWO independent paths, the browser callback and the
+    # provider's webhook, and both call _finalize_credits, which does
+    # total_credits += amount. The `status == "paid"` guard below is not enough on
+    # its own: with two API replicas the two requests can read the row at the same
+    # instant, both see "created", and both grant. One customer ended up with
+    # exactly double the credits they paid for, which then let them start a second
+    # campaign. FOR UPDATE makes the second path wait and then see "paid".
     order = db.query(PaymentOrder).filter_by(
         razorpay_order_id=request.razorpay_order_id,
         user_id=current_user.id,
-    ).first()
+    ).with_for_update().first()
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -553,10 +561,18 @@ async def verify_dodo_payment(
     db: Session = Depends(get_db),
 ):
     """Check if a Dodo payment has been confirmed. Actively checks Dodo API if still pending."""
+    # Lock the order row for the rest of this transaction. Dodo and Razorpay each
+    # confirm a payment through TWO independent paths, the browser callback and the
+    # provider's webhook, and both call _finalize_credits, which does
+    # total_credits += amount. The `status == "paid"` guard below is not enough on
+    # its own: with two API replicas the two requests can read the row at the same
+    # instant, both see "created", and both grant. One customer ended up with
+    # exactly double the credits they paid for, which then let them start a second
+    # campaign. FOR UPDATE makes the second path wait and then see "paid".
     order = db.query(PaymentOrder).filter_by(
         dodo_checkout_id=request.session_id,
         user_id=current_user.id,
-    ).first()
+    ).with_for_update().first()
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -642,7 +658,8 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
             logger.warning("[DODO_WEBHOOK] payment.succeeded without checkout_id: %s", payload)
             return {"status": "ok"}
 
-        order = db.query(PaymentOrder).filter_by(dodo_checkout_id=checkout_id).first()
+        # Locked for the same reason as the browser path above.
+        order = db.query(PaymentOrder).filter_by(dodo_checkout_id=checkout_id).with_for_update().first()
         if not order:
             logger.warning("[DODO_WEBHOOK] No order found for checkout %s", checkout_id)
             return {"status": "ok"}
@@ -721,7 +738,8 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         rz_payment_id = payment_entity.get("id")
 
         if rz_order_id:
-            order = db.query(PaymentOrder).filter_by(razorpay_order_id=rz_order_id).first()
+            # Locked for the same reason as the browser path above.
+            order = db.query(PaymentOrder).filter_by(razorpay_order_id=rz_order_id).with_for_update().first()
             if order and order.status != "paid":
                 order.razorpay_payment_id = rz_payment_id
                 order.status = "paid"
