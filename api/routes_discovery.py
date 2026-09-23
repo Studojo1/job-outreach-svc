@@ -41,6 +41,10 @@ JUSTIFY_TOP_K = 100
 # everyone else uses the 90k-company cache + a free logo-domain fallback below.
 RESEARCH_TOP_N = 8
 
+# Marks the score-0 row stored for a lead the title filter dropped, so later
+# score adjustments leave it at 0.
+_FILTERED_EXPLANATION = "Filtered out: title is not a hiring decision-maker"
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
@@ -259,7 +263,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             industry_relevance=0,
             seniority_relevance=0,
             location_relevance=0,
-            explanation="Filtered out: title is not a hiring decision-maker",
+            explanation=_FILTERED_EXPLANATION,
         ))
     if filtered_ids:
         logger.info("[SCORE_BG] %d leads filtered by title; stored as score 0", len(filtered_ids))
@@ -538,13 +542,6 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             "company_description": l.company_description,
         } for l in leads]
 
-        score_rows = {
-            s.lead_id: s
-            for s in db.query(LeadScore).filter(
-                LeadScore.lead_id.in_([l.id for l in leads])
-            ).all()
-        }
-
         from services.lead_scoring.company_intelligence_service import evaluate_company_fit
         candidate_prefs_for_intel = {
             "company_stage": [prefs.get("company_stage", "any")],
@@ -553,8 +550,17 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
             "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
         }
+        # Releases the connection during its LLM calls (it commits the read
+        # transaction first), so the score rows are loaded after it returns.
         company_fit_scores = evaluate_company_fit(lead_dicts, candidate_prefs_for_intel, db)
         logger.info("[COMPANY_INTEL_BG] candidate %d: %d companies evaluated", candidate_id, len(company_fit_scores))
+
+        score_rows = {
+            s.lead_id: s
+            for s in db.query(LeadScore).filter(
+                LeadScore.lead_id.in_([ld["id"] for ld in lead_dicts])
+            ).order_by(LeadScore.id).all()
+        }
 
         for ld in lead_dicts:
             name_lower = (ld.get("company") or "").lower()
@@ -562,7 +568,7 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             if fit is None:
                 continue
             row = score_rows.get(ld["id"])
-            if row is None:
+            if row is None or row.explanation == _FILTERED_EXPLANATION:
                 continue
             fit_pts = round((fit - 1) / 9 * 15)
             current = row.overall_score or 0
