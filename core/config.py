@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     # serves /job-outreach/t/{token}.png (ingress), e.g. https://api.studojo.com
     PUBLIC_BASE_URL: str = "http://localhost:8000"
 
+    # SERVICE-TO-SERVICE AUTH
+    # Shared secret the frontend's server-side loaders send as `x-studojo-internal`
+    # next to X-User-Id (Studojo1/frontend app/lib/outreach/server-api.ts, same
+    # INTERNAL_API_SECRET name there). X-User-Id is only trusted when this matches.
+    # Optional: blank disables the X-User-Id path (requests fall back to the
+    # session cookie) instead of failing startup.
+    INTERNAL_API_SECRET: str = ""
+
     # OBSERVABILITY
     SENTRY_DSN: str = ""
     SERVICE_NAME: str = "job-outreach-svc"

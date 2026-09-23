@@ -1,7 +1,9 @@
 """API Dependencies — Shared FastAPI dependencies for route handlers."""
 
 import base64
+import hmac
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from urllib.parse import unquote
@@ -9,8 +11,11 @@ from urllib.parse import unquote
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from core.config import settings
 from database.session import get_db
 from database.models import BetterAuthSession, User
+
+logger = logging.getLogger(__name__)
 
 
 COOKIE_NAMES = [
@@ -18,21 +23,48 @@ COOKIE_NAMES = [
     "better-auth.session_token",
 ]
 
+INTERNAL_SECRET_HEADER = "x-studojo-internal"
+_warned_no_internal_secret = False
+
+
+def _trusted_internal_caller(request: Request) -> bool:
+    """True only when the request carries the shared service-to-service secret.
+
+    X-User-Id is a bare claim: anyone who can reach this service can set it.
+    It is honoured only next to a matching `x-studojo-internal` header, which
+    the frontend's server-side client sends and a browser never has.
+    """
+    global _warned_no_internal_secret
+    expected = settings.INTERNAL_API_SECRET
+    if not expected:
+        if not _warned_no_internal_secret:
+            logger.warning(
+                "[AUTH] INTERNAL_API_SECRET is not set; ignoring X-User-Id and "
+                "falling back to the session cookie. Server-side callers will 401."
+            )
+            _warned_no_internal_secret = True
+        return False
+    supplied = request.headers.get(INTERNAL_SECRET_HEADER) or ""
+    return hmac.compare_digest(supplied.encode(), expected.encode())
+
 
 async def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
     """Authenticate request via either:
-    1. X-User-Id header injected by the control-plane after JWT validation (extension / API clients)
+    1. X-User-Id header from a server-side caller, trusted only alongside a
+       matching x-studojo-internal secret (see _trusted_internal_caller)
     2. BetterAuth session cookie (browser-based clients)
 
     Raises:
         HTTPException 401 if no valid auth is found.
     """
-    # ── Path 1: X-User-Id from control-plane (JWT already validated upstream) ──
+    # ── Path 1: X-User-Id from a trusted server-side caller ─────────────────
+    # Without the shared secret the header is ignored, not rejected, so a
+    # browser that happens to send it still authenticates by cookie below.
     user_id = request.headers.get("X-User-Id")
-    if user_id:
+    if user_id and _trusted_internal_caller(request):
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
             raise HTTPException(

@@ -94,6 +94,15 @@ jobs:
               META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
               -n studojo
           fi
+          # Service-to-service secret: X-User-Id is only trusted next to a matching
+          # x-studojo-internal header. Must equal the frontend's INTERNAL_API_SECRET
+          # (same GitHub secret name). Unset = server-side loaders fall back to the
+          # cookie path and 401, so set it in this repo's secrets before relying on it.
+          if [ -n "${{ secrets.INTERNAL_API_SECRET }}" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              INTERNAL_API_SECRET="${{ secrets.INTERNAL_API_SECRET }}" \
+              -n studojo
+          fi
           if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
             kubectl set env deployment/${{ env.SERVICE_NAME }} \
               CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \
