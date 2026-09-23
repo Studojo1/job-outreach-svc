@@ -117,3 +117,42 @@ def test_numbers_alone_are_not_companies():
 
 def test_newline_separated_list():
     assert parse_dream_companies("Google\nStripe\nFigma") == ["Google", "Stripe", "Figma"]
+
+
+# ── work_mode: the mapping must survive a copy edit ─────────────────────────
+
+def test_every_live_work_mode_option_maps_to_its_declared_value():
+    """The mapping is derived from the option definitions, so it cannot drift.
+
+    This is the regression that mattered: "Fully in-office" mapped to
+    "flexible", which switches the location filter off in lead discovery, so
+    students who asked for office work were shown remote-friendly leads
+    anywhere. The old mapping substring-matched the wording and the test read
+    "in office" while the copy is hyphenated.
+    """
+    from services.candidate_intelligence.payload_builder import _map_work_mode
+    from services.candidate_intelligence.question_engine import _Q8_WORK_MODE
+
+    for opt in _Q8_WORK_MODE["mcq"]["options"]:
+        assert _map_work_mode(opt["text"]) == opt["value"], opt["text"]
+
+
+def test_a_copy_edit_cannot_break_the_mapping():
+    """Rewording an option must not change what it maps to."""
+    from services.candidate_intelligence import question_engine as qe
+    from services.candidate_intelligence.payload_builder import _map_work_mode
+
+    original = qe._Q8_WORK_MODE["mcq"]["options"]
+    edited = [dict(o) for o in original]
+    edited[2]["text"] = "On-site, five days a week"  # the onsite option, reworded
+    qe._Q8_WORK_MODE["mcq"]["options"] = edited
+    try:
+        assert _map_work_mode("On-site, five days a week") == "onsite"
+    finally:
+        qe._Q8_WORK_MODE["mcq"]["options"] = original
+
+
+def test_canonical_values_pass_through():
+    from services.candidate_intelligence.payload_builder import _map_work_mode
+    for v in ("remote", "hybrid", "onsite", "flexible"):
+        assert _map_work_mode(v) == v
