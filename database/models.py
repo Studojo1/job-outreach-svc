@@ -67,6 +67,8 @@ class Candidate(Base):
     target_roles = Column(JSONB)
     target_industries = Column(JSONB)
     flex_notes = Column(JSONB)  # post-payment: best_project + outcome answers for email personalisation
+    quiz_answers = Column(JSONB)  # server copy of quiz answers, keyed by question key, written every turn
+    quiz_answers_updated_at = Column(DateTime)  # last quiz answer write; an abandoned quiz stops short here
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="candidates")
