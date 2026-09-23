@@ -12,6 +12,7 @@ Returns individual component scores per lead for accurate DB storage.
 
 import json
 import os
+import re
 from typing import Dict, Any, List
 
 from core.logger import get_logger
@@ -75,6 +76,11 @@ REGION_TO_COUNTRY = {
 IRRELEVANT_KEYWORDS = [
     "freelancer", "contractor", "intern",
 ]
+# Whole words only. A substring test dropped "International", "Internal" and
+# "Internet" titles (they contain "intern") before they were ever scored.
+_IRRELEVANT_TITLE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in IRRELEVANT_KEYWORDS) + r")\b"
+)
 
 
 def _resolve_city(text: str) -> str:
@@ -245,7 +251,7 @@ def score_and_select_leads(
     filtered_leads = []
     for lead in leads:
         title = (lead.get("title") or "").lower()
-        if any(bad_kw in title for bad_kw in IRRELEVANT_KEYWORDS):
+        if _IRRELEVANT_TITLE_RE.search(title):
             continue
         filtered_leads.append(lead)
 
