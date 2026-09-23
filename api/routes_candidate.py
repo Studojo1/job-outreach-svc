@@ -105,16 +105,25 @@ async def upload_resume(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/{candidate_id}/chat")
+# DEPRECATED — superseded by /chat/stream, which is what the quiz actually uses.
+# No caller exists in the frontend, this service, or the extensions. It is left
+# mounted rather than deleted so an unknown client gets a logged warning instead
+# of a silent 404; once the log shows no hits for a release, delete it along with
+# /chat/v2 and the engine helpers only they reach.
+@router.post("/{candidate_id}/chat", deprecated=True)
 async def candidate_chat(
     candidate_id: int,
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a message to the profiling agent and get the next response."""
+    """DEPRECATED. Send a message to the profiling agent and get the next response."""
     t_start = time.perf_counter()
-    logger.info(f"[CHAT] POST /candidate/{candidate_id}/chat — message='{request.message[:50]}'")
+    logger.warning(
+        "[DEPRECATED] POST /candidate/%s/chat called by user %s — this endpoint has "
+        "no known caller and is scheduled for deletion; use /chat/stream",
+        candidate_id, current_user.id,
+    )
 
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
@@ -161,16 +170,22 @@ async def candidate_chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{candidate_id}/chat/v2")
+# DEPRECATED — see the note on /chat above. Same story: superseded by
+# /chat/stream, no known caller.
+@router.post("/{candidate_id}/chat/v2", deprecated=True)
 async def candidate_chat_fast(
     candidate_id: int,
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Fast profiling chat using pre-defined static questions — zero LLM calls per turn."""
+    """DEPRECATED. Fast profiling chat using pre-defined static questions."""
     t_start = time.perf_counter()
-    logger.info(f"[CHAT-V2] POST /candidate/{candidate_id}/chat/v2 — message='{request.message[:50]}'")
+    logger.warning(
+        "[DEPRECATED] POST /candidate/%s/chat/v2 called by user %s — this endpoint "
+        "has no known caller and is scheduled for deletion; use /chat/stream",
+        candidate_id, current_user.id,
+    )
 
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
