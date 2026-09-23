@@ -834,13 +834,24 @@ async def scoring_ready(
     # renders justifications as they stream in, so the user gets onto their leads in
     # ~seconds instead of staring at 96% for minutes. with_bullets stays in the response
     # as a progress signal for the results page.
-    ready = scored >= max(1, total * 0.9)
-    return {
+    #
+    # A zero-lead run never dispatches scoring (search_leads only does when
+    # count > 0), so scored stays 0 and the old max(1, ...) floor made ready
+    # permanently false: the user sat at 96% until the client's 6-minute
+    # timeout. Nothing is coming, so say so and let the client stop polling.
+    # This endpoint is only polled after POST /discovery/search has returned,
+    # so total == 0 here means the search itself found nobody.
+    zero_leads = total == 0
+    ready = zero_leads or scored >= total * 0.9
+    resp = {
         "ready": ready,
         "total": total,
         "scored": scored,
         "with_bullets": with_bullets,
     }
+    if zero_leads:
+        resp["zero_leads"] = True
+    return resp
 
 
 class ImportFromOutreachRequest(BaseModel):
