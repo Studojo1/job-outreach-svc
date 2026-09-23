@@ -17,9 +17,11 @@ Clarity-gated extras (asked based on the user's own clarity answer):
   Q10 niche_keywords       MCQ multi   asked unless clarity == "still figuring out"
   Q11 tech_stack           MCQ multi   asked when clarity == "exact" AND cluster is technical
 
-Email-personalization questions (always asked at the end of the quiz, role-adaptive):
-  Q12 flex_best_project    TEXT  always  → persisted to candidate.flex_notes
-  Q13 flex_outcome         TEXT  always  → persisted to candidate.flex_notes
+Email-personalization questions — NOT part of this sequence:
+  flex_best_project / flex_outcome are collected by the debrief form
+  (/outreach/connect/debrief), which writes through PUT /candidate/{id}/flex.
+  Their role-adaptive copy still lives here and is reused by that form; the
+  builders are _build_flex_project_question / _build_flex_outcome_question.
 
 State passed to get_next_question():
   {
@@ -876,7 +878,13 @@ def build_question_sequence(state: dict) -> list[dict]:
     if clarity in ("medium", "high"):
         sequence.append(_build_niche_question(resume_profile))
 
-    # Flex project + outcome moved to post-Gmail debrief form (/outreach/connect/debrief)
+    # Flex project + outcome are deliberately NOT asked here. They are collected
+    # by the debrief form (/outreach/connect/debrief), which as of 23 Sep 2026
+    # runs BEFORE the Gmail gate rather than after it — behind that gate they
+    # were effectively never collected, and coverage fell from 74% to 1.4%.
+    #
+    # _build_flex_project_question and _build_flex_outcome_question are kept
+    # because the debrief reuses their role-adaptive copy. They are not dead.
 
     return sequence
 
