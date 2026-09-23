@@ -457,6 +457,14 @@ async def candidate_chat_stream(
         })
 
         # Funnel: mark stage 3.
+        #
+        # This fires when the student finishes answering, which is genuinely
+        # what "quiz completed" means, and deliberately still does — the 138
+        # orders marked completed with no target_roles were caused by the
+        # profile write that follows being fire-and-forget, not by this line.
+        # generate-payload is now inline and returns a real status, so a failed
+        # build is surfaced to the student instead of leaving the funnel
+        # claiming a completion that produced no targeting.
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(current_user.id), "quiz_completed",
                         candidate_id=candidate_id)
@@ -530,6 +538,48 @@ async def candidate_chat_stream(
     )
 
 
+def _apply_payload(candidate: Candidate, payload_dict: dict) -> None:
+    """Write a built payload onto the candidate row."""
+    candidate.parsed_json = payload_dict
+    recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
+    if recommended:
+        candidate.target_roles = [r["title"] for r in recommended]
+
+    # No truthy gate on industries.
+    #
+    # `if industry_interests:` meant an empty result could never correct a
+    # previous one, which is what made the industries race permanent: the first
+    # build runs before background resume extraction has landed, derives nothing,
+    # and the write is skipped — but so is every later write that would have
+    # fixed it, because the value is only ever assigned when non-empty. Assigning
+    # unconditionally lets a re-run repair an earlier miss.
+    candidate.target_industries = (
+        payload_dict.get("preferences", {}).get("industry_interests", []) or []
+    )
+
+
+def _generate_payload_now(db: Session, candidate: Candidate, chat_history_dicts: list[dict]) -> dict:
+    """Build the profile payload and store it. Raises on failure."""
+    from services.candidate_intelligence.payload_builder import (
+        reconstruct_answers,
+        build_payload_from_answers,
+    )
+
+    answers = reconstruct_answers(chat_history_dicts, candidate)
+    logger.info(
+        "[PAYLOAD] Reconstructed %d answers: %s", len(answers), list(answers.keys())
+    )
+
+    payload_dict = build_payload_from_answers(
+        answers=answers,
+        candidate=candidate,
+        resume_uploaded=bool(candidate.resume_text),
+    )
+    _apply_payload(candidate, payload_dict)
+    db.commit()
+    return payload_dict
+
+
 def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
     """
     Background worker: generate final payload and store it.
@@ -562,13 +612,7 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
                 resume_uploaded=bool(candidate.resume_text),
             )
 
-            candidate.parsed_json = payload_dict
-            recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
-            if recommended:
-                candidate.target_roles = [r["title"] for r in recommended]
-            industry_interests = payload_dict.get("preferences", {}).get("industry_interests", [])
-            if industry_interests:
-                candidate.target_industries = industry_interests
+            _apply_payload(candidate, payload_dict)
             db.commit()
 
             logger.info(
@@ -586,25 +630,46 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
 async def generate_payload(
     candidate_id: int,
     request: ChatRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Kick off profile generation as a background task — returns immediately.
-    Frontend should poll GET /{candidate_id}/profile-status until ready=true.
+    Build the profile and store it, inline.
+
+    This used to queue a background task and return {"status": "processing"}
+    immediately, which meant the response said nothing about whether the write
+    succeeded: a failure in the worker was logged and swallowed, the funnel
+    still recorded a completed quiz, and the student reached a profile page with
+    no targeting behind it. 138 orders are marked quiz_completed with no
+    target_roles on their candidate.
+
+    There was never a latency reason for it to be deferred. The build is
+    deterministic with zero LLM calls and completes in under 50ms, so it runs
+    here and the status code reports what actually happened. profile-status
+    still exists for clients that poll.
     """
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    logger.info(f"[PAYLOAD] Starting background generation for candidate {candidate_id}")
-    background_tasks.add_task(
-        _run_generate_payload_background,
-        candidate_id=candidate_id,
-        chat_history_dicts=request.chat_history,
+    t_start = time.perf_counter()
+    try:
+        _generate_payload_now(db, candidate, request.chat_history)
+    except Exception as exc:
+        logger.exception(
+            "[PAYLOAD] FAILED for candidate %s: %s: %s",
+            candidate_id, type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build your profile. Please try again.",
+        )
+
+    logger.info(
+        "[PAYLOAD] Done for candidate %s in %.0fms (deterministic, no LLM)",
+        candidate_id, (time.perf_counter() - t_start) * 1000,
     )
-    return {"status": "processing"}
+    return {"status": "ready", "candidate_id": candidate_id}
 
 
 @router.get("/{candidate_id}/profile-status")
