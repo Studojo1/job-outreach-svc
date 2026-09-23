@@ -487,7 +487,6 @@ async def candidate_chat_stream(
             "text_input": False,
             "is_complete": True,
             "questions_asked_so_far": q_index,
-            "psychometric": None,
         }
         logger.info(f"[STREAM] Quiz complete for candidate {candidate_id} after {q_index} answers")
 
