@@ -6,6 +6,7 @@ Used by question_engine.py from Q3 onward to personalise question options.
 
 from __future__ import annotations
 import json
+import time
 import logging
 from typing import Any
 
@@ -244,10 +245,61 @@ def extract_and_store_resume_profile(candidate_id: int, db_session_factory: Any)
                 logger.info(f"[ResumeIntelligence] Candidate {candidate_id} already has v2 profile, skipping")
                 return
 
-            logger.info(f"[ResumeIntelligence] Extracting v2 profile for candidate {candidate_id}")
-            profile = extract_enhanced_resume_profile(
-                resume_text=candidate.resume_text or "",
-            )
+            resume_text = candidate.resume_text or ""
+            if not resume_text.strip():
+                logger.warning(
+                    "[ResumeIntelligence] Candidate %s has no resume text; nothing to extract",
+                    candidate_id,
+                )
+                return
+
+            # Retry the extraction rather than giving up after one attempt.
+            #
+            # This used to be a single call whose failure was logged and
+            # swallowed, which left the candidate with resume_profile = NULL
+            # forever: no adaptive role options in the quiz, no archetype, no
+            # derived industries, and nothing anywhere to say it had happened.
+            # The LLM fails transiently for ordinary reasons — a timeout, a rate
+            # limit, a reply that is not quite valid JSON — and every one of
+            # those was permanent for that student.
+            #
+            # Three attempts with a short backoff. The failures being retried
+            # here are transient by nature, so the second attempt usually works.
+            profile = None
+            last_exc = None
+            for attempt in range(1, 4):
+                try:
+                    logger.info(
+                        "[ResumeIntelligence] Extracting v2 profile for candidate %s (attempt %d/3)",
+                        candidate_id, attempt,
+                    )
+                    profile = extract_enhanced_resume_profile(resume_text=resume_text)
+                    if isinstance(profile, dict) and profile:
+                        break
+                    # A well-formed but empty profile is as useless as a failure.
+                    last_exc = ValueError(f"extraction returned {type(profile).__name__}")
+                    profile = None
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "[ResumeIntelligence] Attempt %d/3 failed for candidate %s: %s: %s",
+                        attempt, candidate_id, type(exc).__name__, exc,
+                    )
+                if attempt < 3:
+                    time.sleep(2 * attempt)
+
+            if not profile:
+                # Still nothing after three tries. Say so loudly — this is the
+                # state that used to be invisible, and it degrades every
+                # downstream step for this student.
+                logger.error(
+                    "[ResumeIntelligence] GAVE UP after 3 attempts for candidate %s "
+                    "(resume_text=%d chars); resume_profile stays NULL. Last error: %s: %s",
+                    candidate_id, len(resume_text),
+                    type(last_exc).__name__ if last_exc else "None", last_exc,
+                )
+                return
+
             candidate.resume_profile = profile
             db.commit()
             logger.info(
