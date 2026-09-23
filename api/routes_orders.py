@@ -9,7 +9,7 @@ from typing import Optional
 
 from database.session import get_db
 from database.models import (
-    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead,
+    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead, LinkedInCampaign,
 )
 from sqlalchemy import func
 from api.dependencies import get_current_user
@@ -62,6 +62,14 @@ async def create_order(
     db: Session = Depends(get_db),
 ):
     """Create a new outreach order for the current user."""
+    candidate = None
+    if request.candidate_id:
+        candidate = db.query(Candidate).filter(
+            Candidate.id == request.candidate_id, Candidate.user_id == current_user.id,
+        ).first()
+        if not candidate:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+
     order = OutreachOrder(
         user_id=current_user.id,
         candidate_id=request.candidate_id,
@@ -71,7 +79,6 @@ async def create_order(
 
     # Auto-advance status based on what the candidate has already completed
     if request.candidate_id:
-        candidate = db.query(Candidate).filter(Candidate.id == request.candidate_id).first()
         if candidate:
             lead_count = db.query(func.count()).select_from(Lead)\
                 .filter(Lead.candidate_id == request.candidate_id).scalar() or 0
@@ -149,6 +156,27 @@ async def get_order(
     return _serialize_order(order)
 
 
+def _require_owned_refs(db: Session, user_id: str, request: OrderUpdateRequest) -> None:
+    """404 unless every foreign id in an update request belongs to user_id."""
+    checks = []
+    if request.candidate_id is not None:
+        checks.append(("Candidate", db.query(Candidate.id).filter(
+            Candidate.id == request.candidate_id, Candidate.user_id == user_id)))
+    if request.campaign_id is not None:
+        checks.append(("Campaign", db.query(Campaign.id)
+                       .join(Candidate, Candidate.id == Campaign.candidate_id)
+                       .filter(Campaign.id == request.campaign_id, Candidate.user_id == user_id)))
+    if request.email_account_id is not None:
+        checks.append(("Email account", db.query(EmailAccount.id).filter(
+            EmailAccount.id == request.email_account_id, EmailAccount.user_id == user_id)))
+    if request.linkedin_campaign_id is not None:
+        checks.append(("LinkedIn campaign", db.query(LinkedInCampaign.id).filter(
+            LinkedInCampaign.id == request.linkedin_campaign_id, LinkedInCampaign.user_id == user_id)))
+    for label, query in checks:
+        if query.first() is None:
+            raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
 @router.post("/{order_id}/update")
 async def update_order(
     order_id: int,
@@ -160,6 +188,12 @@ async def update_order(
     order = db.query(OutreachOrder).filter_by(id=order_id, user_id=current_user.id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # The order is the caller's, but the ids written into it come from the
+    # request body. Each must belong to the caller too, or one request can bind
+    # a stranger's candidate (and trigger paid preview enrichment on it below),
+    # campaign or mailbox to this order.
+    _require_owned_refs(db, current_user.id, request)
 
     # Credit-covered checkout: a user who already holds credits skips payment
     # entirely, so neither _finalize_credits nor the coupon path runs and this
@@ -398,8 +432,9 @@ def _heal_candidate_binding(db: Session, order: OutreachOrder) -> None:
     if order.campaign_id:
         row = (
             db.query(Campaign.candidate_id, func.count(Lead.id))
+            .join(Candidate, Candidate.id == Campaign.candidate_id)
             .outerjoin(Lead, Lead.candidate_id == Campaign.candidate_id)
-            .filter(Campaign.id == order.campaign_id)
+            .filter(Campaign.id == order.campaign_id, Candidate.user_id == order.user_id)
             .group_by(Campaign.candidate_id)
             .first()
         )
