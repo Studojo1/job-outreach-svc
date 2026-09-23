@@ -726,8 +726,10 @@ async def get_candidate_profile(
     }
 
 
+# Plain `def`: this is the product's heaviest poll (hundreds of rows, all
+# blocking SQLAlchemy), so it runs in the threadpool, not on the event loop.
 @router.get("/{candidate_id}/leads")
-async def get_candidate_leads(
+def get_candidate_leads(
     candidate_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

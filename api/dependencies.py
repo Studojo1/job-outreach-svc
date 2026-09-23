@@ -48,7 +48,7 @@ def _trusted_internal_caller(request: Request) -> bool:
     return hmac.compare_digest(supplied.encode(), expected.encode())
 
 
-async def get_current_user(
+def get_current_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
@@ -56,6 +56,9 @@ async def get_current_user(
     1. X-User-Id header from a server-side caller, trusted only alongside a
        matching x-studojo-internal secret (see _trusted_internal_caller)
     2. BetterAuth session cookie (browser-based clients)
+
+    Plain `def` on purpose: every path here is blocking SQLAlchemy I/O, so
+    FastAPI runs it in the threadpool instead of stalling the event loop.
 
     Raises:
         HTTPException 401 if no valid auth is found.
