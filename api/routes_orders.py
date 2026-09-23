@@ -282,7 +282,8 @@ async def resume_order(
     """Return the redirect path for resuming an in-progress order.
 
     Maps order status to the appropriate frontend page:
-      created / leads_generating  → /onboarding/upload (or /leads/discovery if candidate exists)
+      created / profile_complete / leads_generating
+                                  → /onboarding/upload (or /leads/discovery if candidate exists)
       leads_ready                 → /leads/results
       campaign_setup              → /campaign/setup
       email_connected             → /campaign/setup
@@ -296,7 +297,10 @@ async def resume_order(
     status = order.status
     plan_type = getattr(order, "plan_type", "email") or "email"
 
-    if status in ("created", "leads_generating"):
+    # profile_complete (create_order on a candidate with no leads yet) is the
+    # same place: profile done, discovery not. Falling through to the else sent
+    # these users back to re-upload a resume they had already processed.
+    if status in ("created", "profile_complete", "leads_generating"):
         if order.candidate_id:
             redirect = "/leads/discovery"
         else:
