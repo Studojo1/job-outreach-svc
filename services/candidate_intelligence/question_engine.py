@@ -37,6 +37,58 @@ from .city_data import (
 )
 
 # ---------------------------------------------------------------------------
+# Defensive coercion for LLM-produced values
+# ---------------------------------------------------------------------------
+# resume_profile is written by an LLM extraction step, so its field types are a
+# promise rather than a guarantee: a field documented as a string can come back
+# as a number, a dict, or a list. The `or ""` idiom used throughout this module
+# guards None and empty, but NOT a wrong type — (123 or "").lower() raises
+# AttributeError, and that exception propagates out of the quiz stream endpoint
+# and dead-ends the student's quiz.
+#
+# Coercing once, where the profile enters, is cheaper and safer than auditing
+# every one of the several dozen .lower()/.split() calls downstream.
+
+
+def _as_text(value) -> str:
+    """A string, whatever the LLM actually produced."""
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return str(value)
+
+
+def _as_text_list(value) -> list[str]:
+    """A list of strings, whatever the LLM actually produced."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return [t for t in (_as_text(v) for v in value) if t]
+    return []
+
+
+# Fields this module treats as plain text / lists of text. Anything not named
+# here is left untouched, so richer nested structures keep working as they are.
+_PROFILE_TEXT_FIELDS = ("domain", "subdomain", "seniority", "archetype")
+_PROFILE_LIST_FIELDS = ("likely_roles", "top_skills", "target_industries",
+                        "company_type_best_fit")
+
+
+def _coerce_profile(profile) -> dict:
+    if not isinstance(profile, dict):
+        return {}
+    out = dict(profile)
+    for key in _PROFILE_TEXT_FIELDS:
+        if key in out:
+            out[key] = _as_text(out[key])
+    for key in _PROFILE_LIST_FIELDS:
+        if key in out:
+            out[key] = _as_text_list(out[key])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Static question definitions
 # ---------------------------------------------------------------------------
 
@@ -793,12 +845,19 @@ def build_question_sequence(state: dict) -> list[dict]:
     implicit score. Flex (project + outcome) questions are now part of
     the main quiz — no post-payment intercept.
     """
-    answers = state.get("answers", {})
-    resume_profile = state.get("resume_profile") or {}
+    # Answers arrive off the wire, so they are text by convention rather than by
+    # type. Coercing here covers every .lower()/.split() on an answer in the
+    # helpers below, instead of guarding each one.
+    _raw_answers = state.get("answers") or {}
+    answers = (
+        {k: _as_text(v) for k, v in _raw_answers.items()}
+        if isinstance(_raw_answers, dict) else {}
+    )
+    resume_profile = _coerce_profile(state.get("resume_profile"))
     resume_text = state.get("resume_text") or ""
     parsed_json = state.get("parsed_json") or {}
 
-    stage = answers.get("career_stage", "").lower()
+    stage = _as_text(answers.get("career_stage")).lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
 
     sequence = [_Q1_CAREER_STAGE, _Q_CLARITY]
