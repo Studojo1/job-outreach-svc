@@ -159,7 +159,9 @@ def evaluate_company_fit(
         leads: List of lead dicts (must have 'company', 'company_domain', 'industry',
                'company_size', 'company_description').
         candidate_prefs: Same format as quality_probe_loop candidate_prefs.
-        db: SQLAlchemy session.
+        db: SQLAlchemy session. Only read from, and its transaction is committed
+            before the LLM calls so the pooled connection is not held for the
+            ~40s they take. The caller must not have uncommitted writes on it.
 
     Returns:
         Dict mapping company_name_lower → fit_score (1-10).
@@ -211,6 +213,10 @@ def evaluate_company_fit(
         "[CompanyIntel] %d unique companies: %d cached, %d to evaluate via LLM",
         len(unique), len(company_fit_scores), len(to_evaluate),
     )
+
+    # End the read transaction before the slow part. Otherwise the session keeps
+    # its pooled connection checked out through every LLM batch below.
+    db.commit()
 
     # Parallel batch LLM calls — 5 concurrent workers (was sequential, ~190s → ~42s)
     batches = [to_evaluate[i: i + _BATCH_SIZE] for i in range(0, len(to_evaluate), _BATCH_SIZE)]
