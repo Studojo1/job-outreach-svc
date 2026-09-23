@@ -151,6 +151,18 @@ _Q2_JOB_TYPE = {
 # _build_company_stage_question() and _build_career_goal_question()
 # to inject resume and answer-aware suggestions into the messages.
 
+# Each option carries an explicit `value` alongside its display text.
+#
+# work_mode is the one answer whose mapping silently changes behaviour: it
+# decides whether lead discovery applies a location filter at all. That mapping
+# used to substring-match the display copy, and "Fully in-office" never matched
+# the test for "in office" (the copy is hyphenated), so it fell through to
+# "flexible" and switched the city filter off for students who asked for office
+# work. An edit to the wording could re-break it just as quietly.
+#
+# The value is what payload_builder maps on when present, so the copy can now be
+# rewritten freely. Text matching stays as the fallback for answers stored
+# before this existed, and for clients that only send the display text.
 _Q8_WORK_MODE = {
     "key": "work_mode",
     "ack": None,
@@ -158,10 +170,10 @@ _Q8_WORK_MODE = {
     "mcq": {
         "question": "What work setup are you targeting?",
         "options": [
-            {"label": "A", "text": "Fully remote"},
-            {"label": "B", "text": "Hybrid (mix of office + remote)"},
-            {"label": "C", "text": "Fully in-office"},
-            {"label": "D", "text": "Open to all"},
+            {"label": "A", "text": "Fully remote", "value": "remote"},
+            {"label": "B", "text": "Hybrid (mix of office + remote)", "value": "hybrid"},
+            {"label": "C", "text": "Fully in-office", "value": "onsite"},
+            {"label": "D", "text": "Open to all", "value": "flexible"},
         ],
         "allow_multiple": False,
     },

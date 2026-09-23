@@ -141,21 +141,52 @@ def _map_seniority(career_stage: str) -> str:
     return "entry"
 
 
-# NOTE: the answer that arrives here is the option *text*, not its A-D label —
-# MCQSelector.tsx sends `opt.text` (see the `answers.push(opt.text)` path). So
-# this has to keep substring-matching the copy in question_engine._Q8_WORK_MODE.
-# Keying off an explicit value on the option dict would be the durable fix, but
-# it takes a matching frontend change to send it, and the frontend ships from a
-# separate repo.
+def _work_mode_by_option_text() -> dict[str, str]:
+    """Map each work_mode option's exact display text to its declared value.
+
+    Built from question_engine._Q8_WORK_MODE, which is the single place the
+    options are defined, so editing the copy there carries the mapping with it
+    automatically. That is the whole point: the previous mapping substring-
+    matched the wording and broke silently when the wording and the test
+    disagreed ("Fully in-office" vs a test for "in office").
+
+    The value is resolved here rather than sent by the client, because the
+    answer a student picks is also the text of their chat bubble — sending
+    "onsite" instead of "Fully in-office" would show them raw jargon.
+    """
+    try:
+        from .question_engine import _Q8_WORK_MODE
+        return {
+            o["text"].strip().lower(): o["value"]
+            for o in _Q8_WORK_MODE["mcq"]["options"]
+            if o.get("value")
+        }
+    except Exception:  # pragma: no cover - never let a mapping lookup break the build
+        return {}
+
+
+_WORK_MODE_VALUES = {"remote", "hybrid", "onsite", "flexible"}
+
+
 def _map_work_mode(work_style: str) -> str:
     s = work_style.strip().lower()
+
+    # Already a canonical value (a client that sends one, or a stored value).
+    if s in _WORK_MODE_VALUES:
+        return s
+
+    # Exact option text -> its declared value. Immune to copy edits, because
+    # both sides of this come from the same definition.
+    exact = _work_mode_by_option_text().get(s)
+    if exact:
+        return exact
 
     # "Fully in-office" used to fall through every test below and land on
     # "flexible", which switches the location filter off in lead discovery: a
     # user who asked for office work got remote-friendly leads anywhere. The
     # onsite test read "in office" with a space and the option text is
-    # hyphenated, so it never matched. Normalising the separators is what fixes
-    # that; the label map above is what stops the next copy edit re-breaking it.
+    # hyphenated, so it never matched. Normalising the separators fixes the
+    # stored answers; the explicit values above stop a copy edit re-breaking it.
     s = s.replace("-", " ").replace("/", " ")
 
     if "fully remote" in s or ("remote" in s and "hybrid" not in s):
