@@ -39,6 +39,30 @@ async def upload_resume(
     try:
         raw_text, preview = parse_resume(contents, file.filename)
 
+        # Refuse a resume we could not read, instead of reporting success.
+        #
+        # parse_resume returns empty text for a scanned image PDF, a corrupt
+        # file, or a format it cannot handle. That used to create a candidate
+        # anyway and return "success", so the student walked into the quiz with
+        # no resume behind it: the background profile extraction had nothing to
+        # work with (3.6% of uploads never get a resume_profile), the adaptive
+        # role options fell back to generic ones, and nothing ever told them.
+        # Failing here lets them upload a readable file while they are still on
+        # the upload screen and expecting to deal with it.
+        if not raw_text or not raw_text.strip():
+            logger.warning(
+                "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
+                current_user.id, file.filename, len(contents),
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "We could not read any text from that file. If it is a "
+                    "scanned copy or an image, please upload a text-based PDF "
+                    "or a Word document instead."
+                ),
+            )
+
         new_candidate = Candidate(
             user_id=current_user.id,
             resume_text=raw_text,
@@ -73,6 +97,10 @@ async def upload_resume(
             "candidate_id": new_candidate.id,
             "preview": preview,
         }
+    except HTTPException:
+        # Already a deliberate, user-facing failure with its own status code —
+        # re-raise it rather than flattening it into a generic 400.
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
