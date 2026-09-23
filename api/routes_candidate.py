@@ -744,7 +744,9 @@ def get_candidate_leads(
         logger.warning(f"[LeadSearch] Candidate {candidate_id} not found for user {current_user.id}")
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    leads = db.query(Lead).filter_by(candidate_id=candidate_id).all()
+    # Ordered, so identical polls return identical lists. Heap order moves as
+    # the justification pass rewrites company_domain on rows mid-poll.
+    leads = db.query(Lead).filter_by(candidate_id=candidate_id).order_by(Lead.id).all()
     logger.info(f"[LeadSearch] Leads retrieved from DB: {len(leads)}")
 
     # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads))
@@ -793,8 +795,8 @@ def get_candidate_leads(
             } if score else None,
         })
 
-    # Sort by score descending
-    results.sort(key=lambda x: (x["score"]["overall"] if x["score"] else 0), reverse=True)
+    # Sort by score descending, lead id ascending as a total-order tiebreak
+    results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] else 0), x["id"]))
 
     if hidden_count:
         logger.info(
