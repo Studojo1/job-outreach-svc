@@ -1,0 +1,22 @@
+-- 047_leads_viewed_stage.sql
+-- Add a funnel stage between leads_generated and payment_page_reached.
+--
+-- leads_generated_at is stamped server-side as soon as background scoring
+-- finishes, whether or not the browser is still open. The next stage,
+-- payment_page_reached, is pinged from the pricing page. So the funnel's
+-- "Leads Generated -> Payment Page Reached" drop-off merged two different
+-- groups: users who closed the tab during the discovery animation and never
+-- saw a lead, and users who saw their leads and chose not to pay.
+--
+-- leads_viewed_at is set by the results page (POST /orders/funnel/mark with
+-- {"stage": "leads_viewed"}) after its first successful lead fetch. One-shot
+-- like every other stage column: the first view is kept. NULL on every
+-- existing row; there is nothing to backfill it from.
+--
+-- ORDER MATTERS. Apply this BEFORE deploying the code that maps the column
+-- (OutreachOrder.leads_viewed_at). SQLAlchemy selects every mapped column, so
+-- a pod running the new code against a database without this column raises
+-- UndefinedColumn on every outreach_orders read, which is most of the app.
+-- ADD COLUMN IF NOT EXISTS with no default is metadata-only and instant.
+
+ALTER TABLE outreach_orders ADD COLUMN IF NOT EXISTS leads_viewed_at TIMESTAMP;

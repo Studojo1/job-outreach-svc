@@ -1,6 +1,6 @@
 """Stage tracking — funnel timestamp helpers for OutreachOrder.
 
-Every user touching the outreach product passes through up to 12 stages.
+Every user touching the outreach product passes through up to 13 stages.
 We record a timestamp on the user's OutreachOrder the first time they reach
 each stage, which lets the admin dashboard compute drop-off across the
 *entire* journey rather than only seeing the user's current state.
@@ -22,12 +22,13 @@ from database.models import OutreachOrder
 logger = logging.getLogger(__name__)
 
 
-# Ordered list of all 12 funnel stages (used by the admin endpoint).
+# Ordered list of all 13 funnel stages (used by the admin endpoint).
 STAGES = [
     "resume_uploaded",
     "quiz_started",
     "quiz_completed",
     "leads_generated",
+    "leads_viewed",          # results page actually rendered leads (frontend ping)
     "payment_page_reached",
     "payment_made",
     "gmail_connected",
