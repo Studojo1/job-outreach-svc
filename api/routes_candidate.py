@@ -239,10 +239,43 @@ async def candidate_chat_stream(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     # Reconstruct answer map by replaying chat history against question sequence
-    raw_user_msgs = [
-        m["content"] for m in request.chat_history
-        if m["role"] == "user" and m["content"] != "__start__"
-    ]
+    # Drop a user message that repeats the one before it with no question in
+    # between.
+    #
+    # Answers are assigned by position during this replay, so a single duplicate
+    # shifts every later answer onto the wrong question key: the student's city
+    # is stored as their company stage, and nothing errors. A failed-and-retried
+    # turn used to leave exactly such a duplicate behind (the frontend now
+    # removes the optimistic message, but older clients are still out there),
+    # and the stream fetch's new automatic retry is a second way to produce one.
+    #
+    # The assistant's question is what separates two answers. Two identical
+    # answers to *different* questions are legitimate and common — "Skip" to one
+    # question and "Skip" to the next — and those have a question between them,
+    # so they are kept. Only a repeat with nothing in between is a duplicate of
+    # one answer, which is the bug.
+    _SENTINELS = ("__start__", "__resume__", "__generate__")
+    raw_user_msgs: list[str] = []
+    saw_question_since_last_answer = True
+    for m in request.chat_history:
+        if m["role"] != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m["content"]
+        if content in _SENTINELS:
+            continue
+        if (
+            raw_user_msgs
+            and content == raw_user_msgs[-1]
+            and not saw_question_since_last_answer
+        ):
+            logger.info(
+                "[STREAM] Dropping duplicate answer (no question between) for "
+                "candidate %s: %.40r", candidate_id, content,
+            )
+            continue
+        raw_user_msgs.append(content)
+        saw_question_since_last_answer = False
 
     # Build answers dict incrementally (needed because sequence depends on answers)
     answers: dict[str, str] = {}
