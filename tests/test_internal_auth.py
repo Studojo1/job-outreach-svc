@@ -5,23 +5,15 @@ with no proof the header came from our own server-side caller. The frontend's
 server-api.ts already sends `x-studojo-internal: <INTERNAL_API_SECRET>` beside it;
 the backend just never checked it.
 """
-import os
 import pathlib
 import sys
-import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-# core.config exits on missing required vars; give it inert values.
-for _k in ("DATABASE_URL", "APOLLO_API_KEY", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET",
-           "GMAIL_REDIRECT_URI", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_KEY"):
-    os.environ.setdefault(
-        _k, f"sqlite:///{tempfile.gettempdir()}/auth_test.db" if _k == "DATABASE_URL" else "x"
-    )
+# Required config values are stubbed in conftest.py.
+from starlette.requests import Request
 
-from starlette.requests import Request  # noqa: E402
-
-from api import dependencies  # noqa: E402
+from api import dependencies
 
 
 def _request(headers: dict) -> Request:
