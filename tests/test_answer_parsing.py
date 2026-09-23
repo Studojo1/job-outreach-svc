@@ -1,0 +1,119 @@
+"""Turning a student's typed answer into values, without inventing any.
+
+Two parsers, one shared failure: both used to split on "," and trust whatever
+came out.
+
+_parse_multi handles multi-select MCQ answers. The frontend joins the chosen
+option texts with ", ", and six of the live options contain a comma of their
+own ("Student, not graduating soon"), so a naive split tore one answer into two
+values that match nothing downstream.
+
+parse_dream_companies handles a free-text question. 19.6% of candidates had
+prose stored as company names, because "I'm not sure, maybe Google" was split
+and both halves kept. Those names go to lead discovery, so a bad parse does not
+just store junk: it decides who the student gets emailed to. Storing nothing is
+the better failure, and most of these tests are about refusing rather than
+extracting.
+"""
+import pathlib
+import sys
+
+import pytest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from services.candidate_intelligence.payload_builder import (
+    _parse_multi,
+    parse_dream_companies,
+)
+
+
+# ── _parse_multi ────────────────────────────────────────────────────────────
+
+def test_option_containing_a_comma_survives_when_options_are_known():
+    """Passing the option list is the only unambiguous way to split this.
+
+    "Student, not graduating soon" is genuinely ambiguous on its own: ", " is
+    both the separator the frontend joins with and punctuation inside the
+    option, so one answer and two answers look identical. With the option list
+    the real text is recovered; without it, the caller gets the two-value split
+    and that is the honest result rather than a guess.
+
+    In practice the every call site is a multi-select whose options carry no
+    commas (location, niche keywords, tech stack), and the comma-carrying
+    options all belong to single-select questions that never come through here.
+    """
+    opts = ["Student, not graduating soon", "Recent graduate (0-2 years exp.)"]
+    assert _parse_multi("Student, not graduating soon", opts) == ["Student, not graduating soon"]
+
+
+def test_two_options_each_containing_a_comma():
+    answer = "Student, not graduating soon, I know exactly, give me precise controls"
+    options = [
+        "Student, not graduating soon",
+        "I know exactly, give me precise controls",
+    ]
+    assert _parse_multi(answer, options) == options
+
+
+def test_plain_multi_select_still_splits():
+    assert _parse_multi("Fintech / Payments, SaaS / B2B") == ["Fintech / Payments", "SaaS / B2B"]
+
+
+def test_empty_is_empty():
+    assert _parse_multi("") == []
+    assert _parse_multi("   ") == []
+
+
+def test_known_options_are_matched_in_answer_order():
+    options = ["Python", "Go", "TypeScript"]
+    assert _parse_multi("TypeScript, Python", options) == ["TypeScript", "Python"]
+
+
+# ── parse_dream_companies ───────────────────────────────────────────────────
+
+def test_plain_company_list():
+    assert parse_dream_companies("Google, Stripe, Figma") == ["Google", "Stripe", "Figma"]
+
+
+def test_prose_around_a_real_name_drops_the_prose():
+    """The exact shape that filled the column with sentence fragments."""
+    assert parse_dream_companies("I'm not sure, maybe Google") == []
+
+
+def test_a_sentence_is_not_a_company():
+    assert parse_dream_companies(
+        "honestly I would love to work at a place that treats people well"
+    ) == []
+
+
+@pytest.mark.parametrize("answer", ["skip", "none", "N/A", "idk", "no preference", "-", "  "])
+def test_non_answers_store_nothing(answer):
+    assert parse_dream_companies(answer) == []
+
+
+def test_and_separated_names():
+    assert parse_dream_companies("Zerodha and Razorpay") == ["Zerodha", "Razorpay"]
+
+
+def test_long_real_company_names_are_kept():
+    assert parse_dream_companies("Tata Consultancy Services, JP Morgan Chase") == [
+        "Tata Consultancy Services",
+        "JP Morgan Chase",
+    ]
+
+
+def test_duplicates_collapse():
+    assert parse_dream_companies("Google, Google, Stripe") == ["Google", "Stripe"]
+
+
+def test_cap_is_respected():
+    assert len(parse_dream_companies(", ".join(f"Co{i}" for i in range(30)))) == 10
+
+
+def test_numbers_alone_are_not_companies():
+    assert parse_dream_companies("123, ...") == []
+
+
+def test_newline_separated_list():
+    assert parse_dream_companies("Google\nStripe\nFigma") == ["Google", "Stripe", "Figma"]

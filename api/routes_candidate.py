@@ -385,13 +385,14 @@ async def candidate_chat_stream(
     # ── Quiz complete ──────────────────────────────────────────────────
     if q_index >= len(sequence):
         # Persist dream companies from quiz answers
-        raw_dream = answers.get("dream_companies", "")
-        if raw_dream and raw_dream.strip().lower() not in ("skip", "none", "n/a", "na", ""):
-            dream_list = [c.strip() for c in raw_dream.split(",") if c.strip() and c.strip().lower() not in ("skip", "none")]
-            candidate.dream_companies = dream_list[:10]  # cap at 10
+        # Free text, so it is validated rather than just comma-split. The old
+        # split turned "I'm not sure, maybe Google" into two target employers
+        # and sent both to lead discovery; 19.6% of candidates had prose stored
+        # as company names.
+        from services.candidate_intelligence.payload_builder import parse_dream_companies
+        candidate.dream_companies = parse_dream_companies(answers.get("dream_companies", ""))
+        if candidate.dream_companies:
             logger.info(f"[STREAM] Stored dream_companies={candidate.dream_companies} for candidate {candidate_id}")
-        else:
-            candidate.dream_companies = []
 
         # Persist flex notes from quiz answers — these now ride inside the main
         # quiz instead of post-payment so the email pipeline has signal as soon
@@ -468,6 +469,11 @@ async def candidate_chat_stream(
         "input_placeholder": q_def.get("input_placeholder") or None,
         "is_complete": False,
         "questions_asked_so_far": q_index + 1,
+        # The sequence length is already known here and was only ever logged.
+        # Sending it lets the quiz show "3 of 9" instead of a progress bar
+        # against a hardcoded guess of 10, which is wrong for most students
+        # because the sequence is clarity-gated and runs 8 to 11 questions.
+        "questions_total": len(sequence),
     }
     logger.info(f"[STREAM] Q{q_index + 1}/{len(sequence)} ({q_def['key']}) served instantly for candidate {candidate_id}")
 
@@ -588,6 +594,13 @@ async def get_candidate_profile(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     from services.candidate_intelligence.payload_builder import compute_hiring_manager_titles
+    # DEAD: candidates.psychometric_profile has had no writer anywhere in the
+    # codebase since May 2026, so this is None for every candidate created since
+    # and always will be. 1,831 historical rows still hold data. The column, the
+    # services/candidate_intelligence/psychometric/ package, and the frontend
+    # plumbing that carries the key should be removed together in one pass —
+    # dropping the column is destructive, so it needs a deliberate decision
+    # rather than being folded into an unrelated fix.
     psych = candidate.psychometric_profile or {}
     resume_profile = candidate.resume_profile or {}
     target_roles = candidate.target_roles or []

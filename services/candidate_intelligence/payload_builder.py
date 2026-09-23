@@ -22,11 +22,110 @@ logger = logging.getLogger(__name__)
 
 # ── Answer helpers ─────────────────────────────────────────────────────────
 
-def _parse_multi(answer: str) -> list[str]:
-    """Split a comma-separated MCQ answer into clean values."""
+def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[str]:
+    """Split a multi-select MCQ answer back into the options that were chosen.
+
+    The frontend joins the selected option texts with ", " (MCQSelector pushes
+    opt.text, chat.tsx joins with a comma and a space). Splitting naively on ","
+    therefore tears apart any option whose own text contains one, and six of the
+    live options do:
+
+        "Student, not graduating soon"      -> "Student" + "not graduating soon"
+        "I know exactly, give me precise controls"
+        "Early-stage startup (seed, under 50 people)"
+
+    Both halves are then treated as answers, which is how prose ends up in
+    dream_companies and how an ordinary career-stage answer turns into two
+    values that match nothing downstream.
+
+    Splitting on ", " rather than "," is what makes the common case correct,
+    since the join used exactly that separator. Where the caller knows the
+    option list, we do better still and match the real option texts first, so
+    even an option containing ", " survives.
+    """
     if not answer:
         return []
-    return [p.strip() for p in answer.split(",") if p.strip()]
+
+    text = answer.strip()
+
+    # Prefer exact matches against the known options: unambiguous regardless of
+    # what punctuation the option copy contains.
+    if known_options:
+        remaining = text
+        found: list[str] = []
+        # Longest first, so "Student, graduating within 6 months" is matched
+        # before a shorter option that is a prefix of it.
+        for opt in sorted(known_options, key=len, reverse=True):
+            if opt and opt in remaining:
+                found.append(opt)
+                remaining = remaining.replace(opt, "", 1)
+        leftovers = [p.strip(" ,") for p in remaining.split(",")]
+        found.extend(p for p in leftovers if p)
+        if found:
+            # Preserve the order they appear in the original answer.
+            return sorted(found, key=lambda v: text.find(v) if v in text else len(text))
+
+    return [p.strip() for p in text.split(", ") if p.strip()]
+
+
+# Words that mean "I don't have an answer", in the shapes students actually type.
+_NON_ANSWERS = {
+    "skip", "none", "n/a", "na", "no", "nope", "nothing", "not sure", "unsure",
+    "idk", "i don't know", "i dont know", "any", "anything", "no preference",
+    "not really", "-", "--",
+}
+
+
+def parse_dream_companies(raw: str, limit: int = 10) -> list[str]:
+    """Pull real company names out of a free-text answer, or return nothing.
+
+    dream_companies is a free-text question whose answer was comma-split with no
+    validation, so prose became companies: 19.6% of candidates had sentence
+    fragments stored as company names. "I'm not sure, maybe Google" became
+    ["I'm not sure", "maybe Google"], and both were sent to lead discovery.
+
+    The rule here is deliberately conservative. A fragment is kept only if it
+    plausibly names a company: short, not a sentence, not a stock non-answer.
+    Storing nothing is much better than storing "I'm not sure" as a target
+    employer, because downstream this steers who the student gets emailed to.
+    """
+    if not raw:
+        return []
+
+    text = raw.strip()
+    if text.lower() in _NON_ANSWERS:
+        return []
+
+    out: list[str] = []
+    for part in re.split(r"[,\n;/]| and ", text):
+        name = part.strip().strip(".!?\"'")
+        if not name:
+            continue
+
+        low = name.lower()
+        if low in _NON_ANSWERS:
+            continue
+        # A company name is not a sentence. Five words is generous for the
+        # longest real ones ("Tata Consultancy Services", "JP Morgan Chase").
+        if len(name.split()) > 5:
+            continue
+        # Nor is it a paragraph.
+        if len(name) > 60:
+            continue
+        # Leading verbs and pronouns mean prose, not a name.
+        if re.match(r"^(i|im|i'm|my|we|maybe|probably|something|anywhere|any\b|"
+                    r"would|want|looking|hoping|ideally|prefer|like|love)\b", low):
+            continue
+        # Needs at least one letter; "123" or "..." is not a company.
+        if not re.search(r"[a-z]", low):
+            continue
+
+        if name not in out:
+            out.append(name)
+        if len(out) >= limit:
+            break
+
+    return out
 
 
 def _map_seniority(career_stage: str) -> str:
