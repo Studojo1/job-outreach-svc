@@ -38,8 +38,8 @@ def db():
         Candidate(id=2, user_id="them", resume_text="."),
         Campaign(id=10, candidate_id=1, name="mine"),
         Campaign(id=20, candidate_id=2, name="theirs"),
-        EmailAccount(id=100, user_id="me", email_address="me@x", access_token="t"),
-        EmailAccount(id=200, user_id="them", email_address="them@x", access_token="t"),
+        EmailAccount(id=100, user_id="me", email_address="me@x", access_token="t"),  # noqa: S106
+        EmailAccount(id=200, user_id="them", email_address="them@x", access_token="t"),  # noqa: S106
     ])
     session.commit()
     yield session

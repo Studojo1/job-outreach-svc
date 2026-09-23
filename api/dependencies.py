@@ -23,7 +23,7 @@ COOKIE_NAMES = [
     "better-auth.session_token",
 ]
 
-INTERNAL_SECRET_HEADER = "x-studojo-internal"
+INTERNAL_SECRET_HEADER = "x-studojo-internal"  # noqa: S105 - a header name, not a secret
 _warned_no_internal_secret = False
 
 
