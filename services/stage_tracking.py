@@ -125,6 +125,89 @@ def get_or_create_active_order(
     return order
 
 
+# Statuses an order holds before its leads exist. Discovery only ever moves an
+# order forward out of one of these; an order already past them is left alone.
+_PRE_LEADS_STATUSES = ("created", "profile_complete", "leads_generating")
+
+
+def advance_discovery_status(
+    db: Session,
+    user_id: str,
+    candidate_id: int,
+    status: str,
+) -> Optional[OutreachOrder]:
+    """Move the user's active order to `leads_generating` or `leads_ready`.
+
+    Called when discovery starts and when its leads are stored. Without it
+    nothing ever wrote either status: the order created at resume upload sat at
+    'created', so the later leads_ready -> campaign_setup update was rejected
+    and My Orders showed 'Created' for a user holding a full lead set.
+
+    Forward only: an order already past discovery (paid, campaign running) is
+    never moved back. An order pinned to a different candidate's leads is not
+    this run's order, so it is left alone too.
+    """
+    if status not in ("leads_generating", "leads_ready"):
+        raise ValueError(f"not a discovery status: {status}")
+
+    order = get_or_create_active_order(db, user_id, candidate_id=candidate_id)
+    if not order.candidate_id:
+        order.candidate_id = candidate_id
+    if order.candidate_id == candidate_id and order.status in _PRE_LEADS_STATUSES \
+            and order.status != status:
+        prev = order.status
+        order.status = status
+        order.updated_at = datetime.utcnow()
+        log = list(order.action_log or [])
+        log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Status: {prev} → {status} (discovery)"})
+        order.action_log = log
+        logger.info("[STAGE] order=%s user=%s status %s -> %s", order.id, user_id, prev, status)
+    db.commit()
+    return order
+
+
+def safe_advance_discovery_status(db: Session, user_id: str, candidate_id: int, status: str) -> None:
+    """Fire-and-forget advance_discovery_status: order bookkeeping must never
+    fail a discovery run."""
+    try:
+        advance_discovery_status(db, user_id, candidate_id, status)
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception("[STAGE] advance_discovery_status failed (swallowed) status=%s user=%s", status, user_id)
+
+
+# Every status before campaign_setup. A user who has paid must never be left
+# at one of these.
+FROZEN_BEHIND_PAYMENT = ("created", "leads_generating", "leads_ready", "enriching", "enrichment_complete")
+
+
+def promote_paid_order(order: Optional[OutreachOrder], reason: str) -> bool:
+    """Safety net: move an order a paid-for user owns out of a pre-payment status.
+
+    The frontend normally advances order.status after payment, but if that call
+    is missed or rejected the user is stuck at an early stage and the app
+    re-shows "pay" (support ticket #19: paid + credited but order frozen at
+    'created'). Promote any early-stage order to campaign_setup so they can
+    build their campaign. Returns True when the order moved. Does not commit.
+    """
+    if order is None or order.status not in FROZEN_BEHIND_PAYMENT:
+        return False
+    prev = order.status
+    order.status = "campaign_setup"
+    log = list(order.action_log or [])
+    log.append({
+        "ts": datetime.utcnow().isoformat(),
+        "msg": f"Auto-advanced {prev} -> campaign_setup on payment ({reason})",
+    })
+    order.action_log = log
+    order.updated_at = datetime.utcnow()
+    logger.info("[STAGE] Advanced outreach_order %s (%s -> campaign_setup): %s", order.id, prev, reason)
+    return True
+
+
 def mark_stage(
     db: Session,
     user_id: str,
