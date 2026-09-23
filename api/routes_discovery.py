@@ -347,8 +347,10 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             # ── Domain-affinity adjustment (round-2) ─────────────────────────
             # Now that fact extraction has run during enrichment, compare each
             # company's `extracted_facts` to the candidate's resume_profile
-            # subdomain + target_industries. Hard mismatches push leads below
-            # the score floor so they're hidden from /candidate/{id}/leads.
+            # subdomain + target_industries. Hard mismatches are pushed down the
+            # ranking, not hidden: the score is clamped at 0 below and the
+            # SCORE_FLOOR in /candidate/{id}/leads is 0, so every lead is still
+            # returned, just sorted lower.
             from services.lead_scoring.lead_scoring_service import apply_domain_affinity_to_top_leads
             resume_prof = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
             facts_by_domain = {d: (p.extracted_facts or {}) for d, p in profiles.items()}
