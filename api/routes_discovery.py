@@ -244,6 +244,26 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         score_rows[lead_id] = ls
         count += 1
 
+    # Leads the scorer filtered out (title blocklist) get a 0 row rather than
+    # none. With no row they counted toward scoring-ready's total but never
+    # toward scored, so enough of them held the discovery screen at 96%, and
+    # every rescore retried them. 0 ranks them last, which is what the filter
+    # means. They are not in score_rows, so they are never justified.
+    filtered_ids = sorted(lead_id_map.keys() - score_rows.keys())
+    for lead_id in filtered_ids:
+        db.add(LeadScore(
+            lead_id=lead_id,
+            overall_score=0,
+            title_relevance=0,
+            department_relevance=0,
+            industry_relevance=0,
+            seniority_relevance=0,
+            location_relevance=0,
+            explanation="Filtered out: title is not a hiring decision-maker",
+        ))
+    if filtered_ids:
+        logger.info("[SCORE_BG] %d leads filtered by title; stored as score 0", len(filtered_ids))
+
     # Commit heuristic scores immediately — durable regardless of what LLM phases do.
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
