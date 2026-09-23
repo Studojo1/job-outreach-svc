@@ -1,0 +1,21 @@
+-- 046_lead_score_one_decimal.sql
+-- Keep the decimal the scorer computes for lead_scores.overall_score.
+--
+-- lead_scoring_service rounds every score to one decimal place
+-- (lead["score"] = round(normalized_score, 1)) so near-identical leads still
+-- rank in a stable order. The column was INTEGER, so Postgres assignment-cast
+-- and rounded that decimal away, collapsing leads into integer ties that then
+-- came back in whatever order the heap returned them.
+--
+-- NUMERIC(4,1) holds 0.0-100.0 exactly. Existing integer values convert
+-- losslessly (72 -> 72.0); nothing needs backfilling.
+--
+-- ORDER DOES NOT MATTER for this one. The model change ships as
+-- Numeric(4, 1, asdecimal=False): against the old INTEGER column Postgres just
+-- keeps rounding on write and reads come back as floats, so code can deploy
+-- before or after this runs.
+--
+-- Cost: changing a column type rewrites lead_scores and holds an ACCESS
+-- EXCLUSIVE lock for the duration. Run it off-peak.
+
+ALTER TABLE lead_scores ALTER COLUMN overall_score TYPE NUMERIC(4,1);
