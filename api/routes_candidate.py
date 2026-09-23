@@ -437,14 +437,24 @@ async def candidate_chat_stream(
         if candidate.dream_companies:
             logger.info(f"[STREAM] Stored dream_companies={candidate.dream_companies} for candidate {candidate_id}")
 
-        # Persist flex notes from quiz answers — these now ride inside the main
-        # quiz instead of post-payment so the email pipeline has signal as soon
-        # as the user converts. PUT /candidate/{id}/flex still works as a
-        # manual override.
+        # Flex notes are NOT collected here. build_question_sequence does not
+        # add flex_best_project or flex_outcome, so `answers` can never contain
+        # them and this branch is unreachable from the quiz.
+        #
+        # They are collected by the debrief form (/outreach/connect/debrief),
+        # which now runs BEFORE the Gmail gate rather than after it. It sat
+        # behind that gate, and only 151 of 4,791 orders ever reached
+        # gmail_connected, which is why flex_notes coverage fell from 74% to
+        # 1.4%. The debrief writes through PUT /candidate/{id}/flex.
+        #
+        # The read is kept only so a client that still sends these keys is
+        # honoured; the comment that used to sit here claimed the quiz collected
+        # them, which read as live code and was not.
         best_project = (answers.get("flex_best_project") or "").strip()
         outcome = (answers.get("flex_outcome") or "").strip()
         if best_project or outcome:
-            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
+            candidate.flex_notes = {**(candidate.flex_notes or {}),
+                                    "best_project": best_project, "outcome": outcome}
             logger.info(f"[STREAM] Stored flex_notes from quiz for candidate {candidate_id}")
 
         db.commit()
