@@ -1370,7 +1370,6 @@ async def paid_funnel(
                 "target_industries": candidate.target_industries or [],
                 "dream_companies": candidate.dream_companies or [],
                 "resume_profile": candidate.resume_profile or {},
-                "psychometric_profile": candidate.psychometric_profile or {},
                 "flex_notes": candidate.flex_notes or {},
             }
             total_leads = (
