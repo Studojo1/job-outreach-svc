@@ -33,6 +33,7 @@ MAIN_FLOW_STAGES = [
     ("resume_uploaded",       "Resume Uploaded",       "resume_uploaded_at"),
     ("quiz_completed",        "Quiz Completed",        "quiz_completed_at"),
     ("leads_generated",       "Leads Generated",       "leads_generated_at"),
+    ("leads_viewed",          "Leads Viewed",          "leads_viewed_at"),
     ("payment_page_reached",  "Payment Page Reached",  "payment_page_reached_at"),
     ("payment_made",          "Payment Made",          "payment_made_at"),
     ("gmail_connected",       "Gmail Connected",       "gmail_connected_at"),
@@ -46,7 +47,8 @@ SIDE_STAGES = [
     ("campaign_paused",       "Campaign Paused",       "campaign_paused_at"),
 ]
 # Combined list (display order) — used for the per-user dot strip.
-FUNNEL_STAGES = MAIN_FLOW_STAGES[:9] + SIDE_STAGES + MAIN_FLOW_STAGES[9:]
+# Paused sits just before campaign_completed, the last main-flow stage.
+FUNNEL_STAGES = MAIN_FLOW_STAGES[:-1] + SIDE_STAGES + MAIN_FLOW_STAGES[-1:]
 
 
 @router.get("/recent-signups")

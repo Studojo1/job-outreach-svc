@@ -267,6 +267,7 @@ class OutreachOrder(Base):
     quiz_started_at         = Column(DateTime, nullable=True)
     quiz_completed_at       = Column(DateTime, nullable=True)
     leads_generated_at      = Column(DateTime, nullable=True)
+    leads_viewed_at         = Column(DateTime, nullable=True)  # migration 047
     payment_page_reached_at = Column(DateTime, nullable=True)
     payment_made_at         = Column(DateTime, nullable=True)
     gmail_connected_at      = Column(DateTime, nullable=True)

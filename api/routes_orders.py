@@ -324,7 +324,10 @@ class FunnelStageRequest(BaseModel):
 # Whitelist of stages the frontend is allowed to ping. Other stages are
 # authoritatively set by the backend (leads_generated, payment_made, etc.)
 # and shouldn't be settable from the client.
-_FRONTEND_SETTABLE_STAGES = {"payment_page_reached"}
+# leads_viewed: the results page pings it once its first lead fetch succeeds,
+# which separates "left during the discovery animation" from "saw leads and
+# did not pay" — leads_generated fires server-side either way.
+_FRONTEND_SETTABLE_STAGES = {"leads_viewed", "payment_page_reached"}
 
 
 @router.post("/funnel/mark")
