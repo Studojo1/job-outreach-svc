@@ -42,13 +42,28 @@ def _map_seniority(career_stage: str) -> str:
     return "entry"
 
 
+# NOTE: the answer that arrives here is the option *text*, not its A-D label —
+# MCQSelector.tsx sends `opt.text` (see the `answers.push(opt.text)` path). So
+# this has to keep substring-matching the copy in question_engine._Q8_WORK_MODE.
+# Keying off an explicit value on the option dict would be the durable fix, but
+# it takes a matching frontend change to send it, and the frontend ships from a
+# separate repo.
 def _map_work_mode(work_style: str) -> str:
-    s = work_style.lower()
+    s = work_style.strip().lower()
+
+    # "Fully in-office" used to fall through every test below and land on
+    # "flexible", which switches the location filter off in lead discovery: a
+    # user who asked for office work got remote-friendly leads anywhere. The
+    # onsite test read "in office" with a space and the option text is
+    # hyphenated, so it never matched. Normalising the separators is what fixes
+    # that; the label map above is what stops the next copy edit re-breaking it.
+    s = s.replace("-", " ").replace("/", " ")
+
     if "fully remote" in s or ("remote" in s and "hybrid" not in s):
         return "remote"
     if "hybrid" in s:
         return "hybrid"
-    if "on-site" in s or "in office" in s or "onsite" in s:
+    if "on site" in s or "in office" in s or "onsite" in s or "in person" in s:
         return "onsite"
     return "flexible"
 

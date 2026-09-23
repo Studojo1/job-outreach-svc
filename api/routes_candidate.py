@@ -16,6 +16,7 @@ from core.analytics import capture, identify
 
 import logging
 import time
+from datetime import datetime
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/candidate", tags=["Candidate"])
@@ -301,9 +302,49 @@ async def candidate_chat_stream(
     sequence = build_question_sequence(state)
     q_index = len(answers)  # index of next question to serve
 
-    # Funnel: first turn of the quiz (no answers yet, plus the __start__
-    # bootstrap message) marks "quiz_started" on the user's order.
-    if q_index == 0 and (request.message == "__start__" or len(raw_user_msgs) == 0):
+    # Persist the answers we just replayed, keyed by question key, before we
+    # serve anything. Until this existed the only write was in the completion
+    # branch below, so a user who abandoned at Q5 left nothing behind: 1,559
+    # abandoned quizzes stored zero answers and per-question drop-off was not
+    # measurable. Writing every turn also gives the server an authoritative copy
+    # to resume from, instead of trusting the client's replay to be the only one.
+    #
+    # Merge rather than replace: a shorter replay (a client that lost history,
+    # or a retry that dropped a turn) must not erase keys the server already
+    # holds. The replay is still the source of truth for keys it does carry.
+    is_first_answer = False
+    if answers:
+        try:
+            stored = candidate.quiz_answers if isinstance(candidate.quiz_answers, dict) else {}
+            merged = {**stored, **answers}
+            if merged != stored:
+                is_first_answer = not stored
+                candidate.quiz_answers = merged
+                candidate.quiz_answers_updated_at = datetime.utcnow()
+                db.commit()
+        except Exception as persist_err:
+            # A failed answer write must never cost the user their quiz turn —
+            # the replay path still works without it, exactly as it did before.
+            logger.warning(
+                "[STREAM] Could not persist quiz_answers for candidate %s: %s",
+                candidate_id, persist_err,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # Funnel: mark "quiz_started" on the user's order the first time an answer
+    # is actually stored.
+    #
+    # This used to fire on `q_index == 0 and (message == "__start__" or no user
+    # messages)`, which is unreachable: the frontend serves Q1 from a local
+    # constant (Q1_STATIC) and only calls this endpoint once the user has
+    # answered it, so the first request always arrives carrying one user message
+    # and no client anywhere sends "__start__". Hence quiz_started_at was set on
+    # 1 of 4,791 orders. Keying off the first persisted answer measures the same
+    # intent ("this user began answering") and needs no frontend change.
+    if is_first_answer:
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(current_user.id), "quiz_started",
                         candidate_id=candidate_id)
@@ -365,11 +406,24 @@ async def candidate_chat_stream(
         )
 
     # ── Serve next question instantly ─────────────────────────────────
+    # build_message renders LLM-derived copy out of resume_profile, so it is the
+    # one part of this endpoint that can raise on unexpected data. This route is
+    # the only candidate route with no exception handler; without one, a raise
+    # here returns a bare 500 with no SSE frame at all, and the frontend — which
+    # has no timeout and no retry on this fetch — sits on a spinner forever.
+    # Falling back to the unadorned question keeps the quiz moving.
     q_def = sequence[q_index]
     prev_key = sequence[q_index - 1]["key"] if q_index > 0 else None
     is_first = (request.message == "__start__" or q_index == 0)
     prev_answer = answers.get(prev_key) if prev_key else None
-    msg_text = build_message(q_def, prev_key, is_first, prev_answer=prev_answer, resume_profile=resume_profile)
+    try:
+        msg_text = build_message(q_def, prev_key, is_first, prev_answer=prev_answer, resume_profile=resume_profile)
+    except Exception as msg_err:
+        logger.exception(
+            "[STREAM] build_message failed for candidate %s at q_index=%s (%s): %s",
+            candidate_id, q_index, q_def.get("key"), msg_err,
+        )
+        msg_text = q_def.get("message") or ""
     mcq = q_def.get("mcq")
 
     payload = {
