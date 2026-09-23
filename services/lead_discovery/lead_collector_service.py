@@ -14,7 +14,7 @@ collector automatically loosens filters in priority order:
   6. Nuclear — fallback titles, no constraints at all
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -140,8 +140,27 @@ def _fallback_titles_for_filter(filters) -> list:
 FALLBACK_BROAD_TITLES = _FUNCTION_FALLBACK_TITLES["engineering"]
 
 
+def _usable_email(raw: Any) -> Optional[str]:
+    """Apollo's email, or None when it is a locked-email placeholder.
+
+    Apollo returns sentinels such as "email_not_unlocked@domain.com" for
+    contacts whose address has not been revealed. Stored as-is, that string
+    set email_verified=True, which lights the "Verified email" badge and
+    makes the lead pass the campaign send gate with an address that bounces.
+    """
+    email = (raw or "").strip() if isinstance(raw, str) else ""
+    if "@" not in email or "not_unlocked" in email.lower():
+        return None
+    return email
+
+
 def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse a raw person dictionary from Apollo into internal schema."""
+    """Parse a raw person dictionary from Apollo into internal schema.
+
+    name, company and title are None when Apollo has no value for them, never
+    an "Unknown ..." placeholder: a placeholder is truthy, so it passed every
+    downstream check and was stored and shown as a real lead.
+    """
 
     first_name = person.get("first_name") or ""
     last_name = person.get("last_name") or ""
@@ -150,18 +169,15 @@ def parse_apollo_person(person: Dict[str, Any]) -> Dict[str, Any]:
         if "*" not in obfuscated:
             last_name = obfuscated
 
-    name = f"{first_name} {last_name}".strip()
-
-    if not name:
-        name = "Unknown Contact"
+    name = f"{first_name} {last_name}".strip() or None
 
     organization = person.get("organization") or {}
-    company = organization.get("name") or person.get("organization_name") or "Unknown Company"
+    company = organization.get("name") or person.get("organization_name") or None
 
-    title = person.get("title") or "Unknown Title"
+    title = person.get("title") or None
     linkedin_url = person.get("linkedin_url")
     apollo_person_id = person.get("id")
-    email = person.get("email")
+    email = _usable_email(person.get("email"))
 
     # Extract location — mixed_people endpoint may only have has_city booleans
     city = person.get("city") or ""
@@ -588,7 +604,8 @@ def _store_people(
             break
 
         parsed_data = parse_apollo_person(person)
-        if not parsed_data["name"]:
+        # A lead nobody can identify (no name, or no employer) is not a lead.
+        if not parsed_data["name"] or not parsed_data["company"]:
             continue
 
         apollo_id = parsed_data.get("apollo_person_id")
@@ -597,7 +614,7 @@ def _store_people(
             continue
 
         # Per-company cap — skip if this company already has enough leads
-        company = parsed_data.get("company") or "Unknown Company"
+        company = parsed_data["company"]
         company_key = company.lower()
         if company_counts.get(company_key, 0) >= MAX_LEADS_PER_COMPANY:
             continue
