@@ -711,14 +711,6 @@ async def get_candidate_profile(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     from services.candidate_intelligence.payload_builder import compute_hiring_manager_titles
-    # DEAD: candidates.psychometric_profile has had no writer anywhere in the
-    # codebase since May 2026, so this is None for every candidate created since
-    # and always will be. 1,831 historical rows still hold data. The column, the
-    # services/candidate_intelligence/psychometric/ package, and the frontend
-    # plumbing that carries the key should be removed together in one pass —
-    # dropping the column is destructive, so it needs a deliberate decision
-    # rather than being folded into an unrelated fix.
-    psych = candidate.psychometric_profile or {}
     resume_profile = candidate.resume_profile or {}
     target_roles = candidate.target_roles or []
     hiring_manager_titles = compute_hiring_manager_titles(target_roles, resume_profile)
@@ -729,7 +721,6 @@ async def get_candidate_profile(
         "target_roles": target_roles,
         "target_industries": candidate.target_industries,
         "dream_companies": candidate.dream_companies,
-        "psychometric": psych.get("result") if psych else None,
         "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
         "hiring_manager_titles": hiring_manager_titles,
     }
