@@ -2,10 +2,10 @@
 
 import asyncio
 import json as _json
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
@@ -731,10 +731,20 @@ async def get_candidate_profile(
 @router.get("/{candidate_id}/leads")
 def get_candidate_leads(
     candidate_id: int,
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    fields: Optional[Literal["justification"]] = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get all leads for a candidate with their scores."""
+    """Get a candidate's leads with their scores, best first.
+
+    With no query params this returns every lead, as it always has. `limit` /
+    `offset` page through the same ranked list, and `total` is always the full
+    count before paging. `fields=justification` is the cheap poll: each item is
+    just {id, score: {overall, justification}} so a client that already holds
+    the lead cards can pick up bullets as they stream in.
+    """
     logger.info(f"[LeadSearch] GET /candidate/{candidate_id}/leads — user_id={current_user.id}")
 
     candidate = db.query(Candidate).filter_by(
@@ -744,16 +754,24 @@ def get_candidate_leads(
         logger.warning(f"[LeadSearch] Candidate {candidate_id} not found for user {current_user.id}")
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    light = fields == "justification"
+
     # Ordered, so identical polls return identical lists. Heap order moves as
     # the justification pass rewrites company_domain on rows mid-poll.
-    leads = db.query(Lead).filter_by(candidate_id=candidate_id).order_by(Lead.id).all()
+    lead_query = db.query(Lead.id) if light else db.query(Lead)
+    leads = lead_query.filter(Lead.candidate_id == candidate_id).order_by(Lead.id).all()
     logger.info(f"[LeadSearch] Leads retrieved from DB: {len(leads)}")
 
-    # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads))
+    # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads)).
+    # Ordered by id so that if a lead ever has two score rows, the newest wins every time.
     lead_ids = [l.id for l in leads]
     scores_by_lead: dict[int, LeadScore] = {}
     if lead_ids:
-        for s in db.query(LeadScore).filter(LeadScore.lead_id.in_(lead_ids)).all():
+        score_query = (
+            db.query(LeadScore.lead_id, LeadScore.overall_score, LeadScore.justification_json)
+            if light else db.query(LeadScore)
+        )
+        for s in score_query.filter(LeadScore.lead_id.in_(lead_ids)).order_by(LeadScore.id).all():
             scores_by_lead[s.lead_id] = s
 
     # Score-floor cutoff disabled. Users pay for ~500 emails so they need
@@ -770,6 +788,18 @@ def get_candidate_leads(
         if score is not None and score.overall_score is not None and score.overall_score < SCORE_FLOOR:
             hidden_count += 1
             continue
+        if light:
+            results.append({
+                "id": lead.id,
+                "score": {
+                    "overall": score.overall_score,
+                    "justification": score.justification_json,
+                } if score else None,
+            })
+            continue
+        # `explanation` and the five *_relevance ints are no longer sent: no
+        # client reads them (frontend, admin panel and extension all checked),
+        # and explanation was one per-run string repeated on every lead.
         results.append({
             "id": lead.id,
             "name": lead.name,
@@ -785,12 +815,6 @@ def get_candidate_leads(
             "status": lead.status,
             "score": {
                 "overall": score.overall_score,
-                "title_relevance": score.title_relevance,
-                "department_relevance": score.department_relevance,
-                "industry_relevance": score.industry_relevance,
-                "seniority_relevance": score.seniority_relevance,
-                "location_relevance": score.location_relevance,
-                "explanation": score.explanation,
                 "justification": score.justification_json,
             } if score else None,
         })
@@ -804,8 +828,12 @@ def get_candidate_leads(
             hidden_count, len(leads), SCORE_FLOOR,
         )
 
-    logger.info(f"[LeadSearch] Returning {len(results)} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
-    return {"leads": results, "total": len(results)}
+    total = len(results)
+    if offset or limit is not None:
+        results = results[offset: offset + limit if limit is not None else None]
+
+    logger.info(f"[LeadSearch] Returning {len(results)}/{total} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
+    return {"leads": results, "total": total}
 
 
 class FlexNotesRequest(BaseModel):
