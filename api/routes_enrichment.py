@@ -43,7 +43,11 @@ def _run_enrichment_in_background(
     user_id: str,
     order_id: Optional[int],
 ):
-    """Background thread: enrich leads one at a time, committing each to DB."""
+    """Background thread: enrich leads one at a time, committing each to DB.
+
+    order_id comes straight from the request body, so every order lookup here
+    is scoped to user_id: a caller must not be able to move someone else's order.
+    """
     from services.enrichment.enrichment_service import _enrich_single_lead
 
     db = SessionLocal()
@@ -52,7 +56,7 @@ def _run_enrichment_in_background(
     try:
         # Update order status to enriching
         if order_id:
-            order = db.query(OutreachOrder).filter_by(id=order_id).first()
+            order = db.query(OutreachOrder).filter_by(id=order_id, user_id=user_id).first()
             if order and order.status == "leads_ready":
                 order.status = "enriching"
                 log = list(order.action_log or [])
@@ -73,7 +77,7 @@ def _run_enrichment_in_background(
         if not all_unenriched:
             # All leads already enriched — still update order status
             if order_id:
-                order = db.query(OutreachOrder).filter_by(id=order_id).first()
+                order = db.query(OutreachOrder).filter_by(id=order_id, user_id=user_id).first()
                 if order and order.status in ("leads_ready", "enriching"):
                     order.status = "enrichment_complete"
                     log = list(order.action_log or [])
@@ -131,7 +135,7 @@ def _run_enrichment_in_background(
 
         # Update order
         if order_id:
-            order = db.query(OutreachOrder).filter_by(id=order_id).first()
+            order = db.query(OutreachOrder).filter_by(id=order_id, user_id=user_id).first()
             if order:
                 order.status = "enrichment_complete"
                 order.leads_collected = enriched_count
@@ -173,7 +177,7 @@ def _run_enrichment_in_background(
         # Update order on failure
         if order_id:
             try:
-                order = db.query(OutreachOrder).filter_by(id=order_id).first()
+                order = db.query(OutreachOrder).filter_by(id=order_id, user_id=user_id).first()
                 if order:
                     order.status = "leads_ready"  # Allow retry
                     log = list(order.action_log or [])
