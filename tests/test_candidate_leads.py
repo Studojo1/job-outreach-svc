@@ -4,6 +4,7 @@ The endpoint used to return every lead with no ORDER BY and a sort on score
 alone, so tied leads came back in heap order and moved between polls. It also
 had no way to ask for less than the whole ~800-row set.
 """
+import json
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from database.models import Base, Candidate, Lead, LeadScore
-from api.routes_candidate import get_candidate_leads
+from api.routes_candidate import get_candidate_leads, get_latest_candidate
 
 
 @compiles(JSONB, "sqlite")
@@ -51,11 +52,16 @@ def db():
 USER = SimpleNamespace(id="u1")
 
 
-def _call(db, **kw):
+def _raw(db, headers=None, **kw):
     kw.setdefault("limit", None)
     kw.setdefault("offset", 0)
     kw.setdefault("fields", None)
-    return get_candidate_leads(1, current_user=USER, db=db, **kw)
+    request = SimpleNamespace(headers={k.lower(): v for k, v in (headers or {}).items()})
+    return get_candidate_leads(request, 1, current_user=USER, db=db, **kw)
+
+
+def _call(db, **kw):
+    return json.loads(_raw(db, **kw).body)
 
 
 def test_default_returns_everything_ranked_with_id_tiebreak(db):
@@ -89,6 +95,32 @@ def test_justification_mode_is_id_and_score_only(db):
 def test_someone_elses_candidate_is_404(db):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
-        get_candidate_leads(1, limit=None, offset=0, fields=None,
+        get_candidate_leads(SimpleNamespace(headers={}), 1, limit=None, offset=0, fields=None,
                             current_user=SimpleNamespace(id="other"), db=db)
     assert exc.value.status_code == 404
+
+
+
+def test_unchanged_poll_gets_304_with_no_body(db):
+    first = _raw(db)
+    etag = first.headers["etag"]
+    again = _raw(db, headers={"If-None-Match": etag})
+    assert again.status_code == 304
+    assert again.body == b""
+    # A different view of the data has a different tag.
+    assert _raw(db, headers={"If-None-Match": etag}, fields="justification").status_code == 200
+
+
+def test_changed_data_gets_a_new_etag(db):
+    etag = _raw(db).headers["etag"]
+    db.query(LeadScore).filter_by(lead_id=1).update({"justification_json": {"bullets": ["new"]}})
+    db.commit()
+    assert _raw(db, headers={"If-None-Match": etag}).status_code == 200
+
+
+def test_latest_candidate_is_the_callers_newest(db):
+    db.add(Candidate(id=7, user_id="u1", resume_text="newer"))
+    db.add(Candidate(id=9, user_id="someone-else", resume_text="not theirs"))
+    db.commit()
+    assert get_latest_candidate(current_user=USER, db=db) == {"candidate_id": 7}
+    assert get_latest_candidate(current_user=SimpleNamespace(id="nobody"), db=db) == {"candidate_id": None}

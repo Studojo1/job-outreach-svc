@@ -2,8 +2,9 @@
 
 import asyncio
 import json as _json
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
 from core.analytics import capture, identify
 
+import hashlib
 import logging
 import time
 from datetime import datetime
@@ -728,8 +730,29 @@ async def get_candidate_profile(
 
 # Plain `def`: this is the product's heaviest poll (hundreds of rows, all
 # blocking SQLAlchemy), so it runs in the threadpool, not on the event loop.
+@router.get("/latest")
+def get_latest_candidate(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The caller's most recent candidate, for pages that lost the id client-side.
+
+    candidateId otherwise lives only in the browser's localStorage, so a cleared
+    store or a new device sent the user back to resume upload even though their
+    leads were already here.
+    """
+    candidate = (
+        db.query(Candidate.id)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Candidate.id.desc())
+        .first()
+    )
+    return {"candidate_id": candidate.id if candidate else None}
+
+
 @router.get("/{candidate_id}/leads")
 def get_candidate_leads(
+    request: Request,
     candidate_id: int,
     limit: Optional[int] = Query(None, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -774,20 +797,12 @@ def get_candidate_leads(
         for s in score_query.filter(LeadScore.lead_id.in_(lead_ids)).order_by(LeadScore.id).all():
             scores_by_lead[s.lead_id] = s
 
-    # Score-floor cutoff disabled. Users pay for ~500 emails so they need
-    # to see ~500 leads — even the noisier ones. Quality is preserved by
-    # the sort order (high-score leads at the top, garbage at the bottom).
-    # Set to a value > 0 to re-enable hiding the very-clearly-off ones.
-    SCORE_FLOOR = 0
+    # No score floor: users pay for ~500 emails so they see every lead, and
+    # quality comes from the sort order. Unscored leads (discovery may still be
+    # running for them) are included too.
     results = []
-    hidden_count = 0
     for lead in leads:
         score = scores_by_lead.get(lead.id)
-        # Hide clearly bad leads. Unscored leads (score is None) are NOT hidden —
-        # discovery may still be running for them and we want them to surface.
-        if score is not None and score.overall_score is not None and score.overall_score < SCORE_FLOOR:
-            hidden_count += 1
-            continue
         if light:
             results.append({
                 "id": lead.id,
@@ -822,18 +837,22 @@ def get_candidate_leads(
     # Sort by score descending, lead id ascending as a total-order tiebreak
     results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] else 0), x["id"]))
 
-    if hidden_count:
-        logger.info(
-            "[LeadSearch] Hidden %d/%d leads scoring below %d (clear mismatches)",
-            hidden_count, len(leads), SCORE_FLOOR,
-        )
-
     total = len(results)
     if offset or limit is not None:
         results = results[offset: offset + limit if limit is not None else None]
 
     logger.info(f"[LeadSearch] Returning {len(results)}/{total} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
-    return {"leads": results, "total": total}
+
+    # ETag over the exact body. The results page polls this every 15s while
+    # bullets stream in; once nothing has changed, a poll costs a 304 and no
+    # payload instead of the full list again.
+    body = jsonable_encoder({"leads": results, "total": total})
+    etag = '"' + hashlib.sha256(_json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32] + '"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if_none_match = request.headers.get("if-none-match", "")
+    if etag in [t.strip() for t in if_none_match.split(",")]:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(body, headers=headers)
 
 
 class FlexNotesRequest(BaseModel):
