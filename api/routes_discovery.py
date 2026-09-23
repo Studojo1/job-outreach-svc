@@ -601,6 +601,11 @@ async def search_leads(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    # Record discovery on the user's order (creating it if the user has none),
+    # so a user on the leads pages has a row that says where they are.
+    from services.stage_tracking import safe_advance_discovery_status
+    safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_generating")
+
     # ── Idempotency guard ──────────────────────────────────────────────
     # If this candidate already has a substantial scored lead set from the
     # last 5 minutes, treat the call as a duplicate (e.g. browser retry,
@@ -626,6 +631,7 @@ async def search_leads(
             "returning early without re-running pipeline",
             candidate.id, recent_lead_count,
         )
+        safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
         return {
             "status": "success",
             "leads_collected": total_count,
@@ -782,6 +788,8 @@ async def search_leads(
         # exceeds ingress/browser limits). Frontend loading screen polls
         # /discovery/scoring-ready/{candidate_id} until bullets are ready.
         if count > 0:
+            # Leads are stored; the order is ready for the results page.
+            safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
             background_tasks.add_task(
                 _score_candidate_leads_sync, candidate.id, str(current_user.id)
             )

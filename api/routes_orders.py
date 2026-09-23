@@ -161,6 +161,15 @@ async def update_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    # Credit-covered checkout: a user who already holds credits skips payment
+    # entirely, so neither _finalize_credits nor the coupon path runs and this
+    # update is the only backend call. Apply the same paid-order safety net
+    # here, or an order still at 'created' 400s on created -> campaign_setup.
+    if request.status == "campaign_setup" and order.status != "campaign_setup" \
+            and _has_paid_credits(db, order.user_id):
+        from services.stage_tracking import promote_paid_order
+        promote_paid_order(order, "covered by existing credits")
+
     if request.status and request.status != order.status:
         allowed = VALID_TRANSITIONS.get(order.status, [])
         if request.status not in allowed:

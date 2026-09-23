@@ -282,11 +282,12 @@ async def create_order(
     if amount <= 0:
         # Fully discounted — grant credits directly
         idem_key = str(uuid.uuid4())
-        from services.stage_tracking import safe_mark_stage, get_or_create_active_order
+        from services.stage_tracking import safe_mark_stage, get_or_create_active_order, promote_paid_order
         try:
             outreach_order = get_or_create_active_order(db, str(current_user.id))
             outreach_order_id = outreach_order.id
         except Exception:
+            outreach_order = None
             outreach_order_id = None
         order = PaymentOrder(
             user_id=current_user.id,
@@ -308,6 +309,9 @@ async def create_order(
         if coupon_id:
             db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
         _set_plan_on_order(db, outreach_order_id, plan)
+        # Same safety net as a paid order (_finalize_credits): this path never
+        # goes through it, so a coupon user was left frozen at 'created'.
+        promote_paid_order(outreach_order, "100% coupon")
         db.commit()
         logger.info("[PAYMENT] Free order (100%% coupon) for user %s, plan %s", current_user.id, resolved_plan_id)
         capture("payment_confirmed", str(current_user.id), {
@@ -915,24 +919,10 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
             oo.plan_type = plan_type
 
     # Safety net: a paid order must never stay frozen behind the payment step.
-    # The frontend normally advances order.status, but if that call is missed the
-    # user is stuck at an early stage and the app re-shows "pay" (support ticket #19,
-    # Ayesha: paid + credited but order frozen at 'created'). Always promote an
-    # early-stage order to campaign_setup on payment so they can build their campaign.
     if order.outreach_order_id:
+        from services.stage_tracking import promote_paid_order
         oo2 = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
-        _FROZEN = ("created", "leads_generating", "leads_ready", "enriching", "enrichment_complete")
-        if oo2 and oo2.status in _FROZEN:
-            _prev = oo2.status
-            oo2.status = "campaign_setup"
-            log = list(oo2.action_log or [])
-            log.append({
-                "ts": datetime.utcnow().isoformat(),
-                "msg": f"Auto-advanced {_prev} -> campaign_setup on payment (status was frozen behind payment)",
-            })
-            oo2.action_log = log
-            oo2.updated_at = datetime.utcnow()
-            logger.info("[PAYMENT] Advanced outreach_order %s (%s -> campaign_setup) on payment finalize", oo2.id, _prev)
+        promote_paid_order(oo2, "status was frozen behind payment")
 
 
 def _order_plan_type(order: PaymentOrder) -> str:
