@@ -17,9 +17,11 @@ Clarity-gated extras (asked based on the user's own clarity answer):
   Q10 niche_keywords       MCQ multi   asked unless clarity == "still figuring out"
   Q11 tech_stack           MCQ multi   asked when clarity == "exact" AND cluster is technical
 
-Email-personalization questions (always asked at the end of the quiz, role-adaptive):
-  Q12 flex_best_project    TEXT  always  → persisted to candidate.flex_notes
-  Q13 flex_outcome         TEXT  always  → persisted to candidate.flex_notes
+Email-personalization questions — NOT part of this sequence:
+  flex_best_project / flex_outcome are collected by the debrief form
+  (/outreach/connect/debrief), which writes through PUT /candidate/{id}/flex.
+  Their role-adaptive copy still lives here and is reused by that form; the
+  builders are _build_flex_project_question / _build_flex_outcome_question.
 
 State passed to get_next_question():
   {
@@ -35,6 +37,58 @@ from .city_data import (
     detect_country_from_text,
     detect_country_from_parsed_json,
 )
+
+# ---------------------------------------------------------------------------
+# Defensive coercion for LLM-produced values
+# ---------------------------------------------------------------------------
+# resume_profile is written by an LLM extraction step, so its field types are a
+# promise rather than a guarantee: a field documented as a string can come back
+# as a number, a dict, or a list. The `or ""` idiom used throughout this module
+# guards None and empty, but NOT a wrong type — (123 or "").lower() raises
+# AttributeError, and that exception propagates out of the quiz stream endpoint
+# and dead-ends the student's quiz.
+#
+# Coercing once, where the profile enters, is cheaper and safer than auditing
+# every one of the several dozen .lower()/.split() calls downstream.
+
+
+def _as_text(value) -> str:
+    """A string, whatever the LLM actually produced."""
+    if isinstance(value, str):
+        return value
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return str(value)
+
+
+def _as_text_list(value) -> list[str]:
+    """A list of strings, whatever the LLM actually produced."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return [t for t in (_as_text(v) for v in value) if t]
+    return []
+
+
+# Fields this module treats as plain text / lists of text. Anything not named
+# here is left untouched, so richer nested structures keep working as they are.
+_PROFILE_TEXT_FIELDS = ("domain", "subdomain", "seniority", "archetype")
+_PROFILE_LIST_FIELDS = ("likely_roles", "top_skills", "target_industries",
+                        "company_type_best_fit")
+
+
+def _coerce_profile(profile) -> dict:
+    if not isinstance(profile, dict):
+        return {}
+    out = dict(profile)
+    for key in _PROFILE_TEXT_FIELDS:
+        if key in out:
+            out[key] = _as_text(out[key])
+    for key in _PROFILE_LIST_FIELDS:
+        if key in out:
+            out[key] = _as_text_list(out[key])
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Static question definitions
@@ -97,6 +151,18 @@ _Q2_JOB_TYPE = {
 # _build_company_stage_question() and _build_career_goal_question()
 # to inject resume and answer-aware suggestions into the messages.
 
+# Each option carries an explicit `value` alongside its display text.
+#
+# work_mode is the one answer whose mapping silently changes behaviour: it
+# decides whether lead discovery applies a location filter at all. That mapping
+# used to substring-match the display copy, and "Fully in-office" never matched
+# the test for "in office" (the copy is hyphenated), so it fell through to
+# "flexible" and switched the city filter off for students who asked for office
+# work. An edit to the wording could re-break it just as quietly.
+#
+# The value is what payload_builder maps on when present, so the copy can now be
+# rewritten freely. Text matching stays as the fallback for answers stored
+# before this existed, and for clients that only send the display text.
 _Q8_WORK_MODE = {
     "key": "work_mode",
     "ack": None,
@@ -104,10 +170,10 @@ _Q8_WORK_MODE = {
     "mcq": {
         "question": "What work setup are you targeting?",
         "options": [
-            {"label": "A", "text": "Fully remote"},
-            {"label": "B", "text": "Hybrid (mix of office + remote)"},
-            {"label": "C", "text": "Fully in-office"},
-            {"label": "D", "text": "Open to all"},
+            {"label": "A", "text": "Fully remote", "value": "remote"},
+            {"label": "B", "text": "Hybrid (mix of office + remote)", "value": "hybrid"},
+            {"label": "C", "text": "Fully in-office", "value": "onsite"},
+            {"label": "D", "text": "Open to all", "value": "flexible"},
         ],
         "allow_multiple": False,
     },
@@ -793,12 +859,19 @@ def build_question_sequence(state: dict) -> list[dict]:
     implicit score. Flex (project + outcome) questions are now part of
     the main quiz — no post-payment intercept.
     """
-    answers = state.get("answers", {})
-    resume_profile = state.get("resume_profile") or {}
+    # Answers arrive off the wire, so they are text by convention rather than by
+    # type. Coercing here covers every .lower()/.split() on an answer in the
+    # helpers below, instead of guarding each one.
+    _raw_answers = state.get("answers") or {}
+    answers = (
+        {k: _as_text(v) for k, v in _raw_answers.items()}
+        if isinstance(_raw_answers, dict) else {}
+    )
+    resume_profile = _coerce_profile(state.get("resume_profile"))
     resume_text = state.get("resume_text") or ""
     parsed_json = state.get("parsed_json") or {}
 
-    stage = answers.get("career_stage", "").lower()
+    stage = _as_text(answers.get("career_stage")).lower()
     skip_job_type = any(kw in stage for kw in ("experienced", "3+", "switching"))
 
     sequence = [_Q1_CAREER_STAGE, _Q_CLARITY]
@@ -817,7 +890,13 @@ def build_question_sequence(state: dict) -> list[dict]:
     if clarity in ("medium", "high"):
         sequence.append(_build_niche_question(resume_profile))
 
-    # Flex project + outcome moved to post-Gmail debrief form (/outreach/connect/debrief)
+    # Flex project + outcome are deliberately NOT asked here. They are collected
+    # by the debrief form (/outreach/connect/debrief), which as of 23 Sep 2026
+    # runs BEFORE the Gmail gate rather than after it — behind that gate they
+    # were effectively never collected, and coverage fell from 74% to 1.4%.
+    #
+    # _build_flex_project_question and _build_flex_outcome_question are kept
+    # because the debrief reuses their role-adaptive copy. They are not dead.
 
     return sequence
 

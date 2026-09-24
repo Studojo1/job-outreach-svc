@@ -88,8 +88,30 @@ def get_or_create_active_order(
 
     if order:
         if candidate_id and order.candidate_id != candidate_id:
-            order.candidate_id = candidate_id
-            order.updated_at = datetime.utcnow()
+            # Once an order has generated leads, its candidate_id is frozen.
+            #
+            # Re-pointing it unconditionally is how 88 orders ended up owning a
+            # candidate row that holds no leads while the same user's leads sat
+            # on a sibling row — 5 of those users had paid. The sequence: user
+            # uploads a resume (candidate A), generates leads against A, then
+            # uploads again (candidate B). This method moved the order to B, and
+            # every downstream reader that goes order -> candidate -> leads
+            # found nothing, because the leads are still on A.
+            #
+            # Before leads exist, re-pointing is correct and expected: a user
+            # who re-uploads before generating should have the new resume used.
+            # An order with no candidate yet has nothing to strand, so it stays
+            # linkable: stage 1 can create the order before the candidate row
+            # exists, and that link must still be able to land.
+            if order.candidate_id is not None and order.leads_generated_at is not None:
+                logger.info(
+                    "[STAGE] order=%s keeps candidate=%s (leads already "
+                    "generated); refusing to re-point at candidate=%s",
+                    order.id, order.candidate_id, candidate_id,
+                )
+            else:
+                order.candidate_id = candidate_id
+                order.updated_at = datetime.utcnow()
         return order
 
     order = OutreachOrder(

@@ -22,11 +22,110 @@ logger = logging.getLogger(__name__)
 
 # ── Answer helpers ─────────────────────────────────────────────────────────
 
-def _parse_multi(answer: str) -> list[str]:
-    """Split a comma-separated MCQ answer into clean values."""
+def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[str]:
+    """Split a multi-select MCQ answer back into the options that were chosen.
+
+    The frontend joins the selected option texts with ", " (MCQSelector pushes
+    opt.text, chat.tsx joins with a comma and a space). Splitting naively on ","
+    therefore tears apart any option whose own text contains one, and six of the
+    live options do:
+
+        "Student, not graduating soon"      -> "Student" + "not graduating soon"
+        "I know exactly, give me precise controls"
+        "Early-stage startup (seed, under 50 people)"
+
+    Both halves are then treated as answers, which is how prose ends up in
+    dream_companies and how an ordinary career-stage answer turns into two
+    values that match nothing downstream.
+
+    Splitting on ", " rather than "," is what makes the common case correct,
+    since the join used exactly that separator. Where the caller knows the
+    option list, we do better still and match the real option texts first, so
+    even an option containing ", " survives.
+    """
     if not answer:
         return []
-    return [p.strip() for p in answer.split(",") if p.strip()]
+
+    text = answer.strip()
+
+    # Prefer exact matches against the known options: unambiguous regardless of
+    # what punctuation the option copy contains.
+    if known_options:
+        remaining = text
+        found: list[str] = []
+        # Longest first, so "Student, graduating within 6 months" is matched
+        # before a shorter option that is a prefix of it.
+        for opt in sorted(known_options, key=len, reverse=True):
+            if opt and opt in remaining:
+                found.append(opt)
+                remaining = remaining.replace(opt, "", 1)
+        leftovers = [p.strip(" ,") for p in remaining.split(",")]
+        found.extend(p for p in leftovers if p)
+        if found:
+            # Preserve the order they appear in the original answer.
+            return sorted(found, key=lambda v: text.find(v) if v in text else len(text))
+
+    return [p.strip() for p in text.split(", ") if p.strip()]
+
+
+# Words that mean "I don't have an answer", in the shapes students actually type.
+_NON_ANSWERS = {
+    "skip", "none", "n/a", "na", "no", "nope", "nothing", "not sure", "unsure",
+    "idk", "i don't know", "i dont know", "any", "anything", "no preference",
+    "not really", "-", "--",
+}
+
+
+def parse_dream_companies(raw: str, limit: int = 10) -> list[str]:
+    """Pull real company names out of a free-text answer, or return nothing.
+
+    dream_companies is a free-text question whose answer was comma-split with no
+    validation, so prose became companies: 19.6% of candidates had sentence
+    fragments stored as company names. "I'm not sure, maybe Google" became
+    ["I'm not sure", "maybe Google"], and both were sent to lead discovery.
+
+    The rule here is deliberately conservative. A fragment is kept only if it
+    plausibly names a company: short, not a sentence, not a stock non-answer.
+    Storing nothing is much better than storing "I'm not sure" as a target
+    employer, because downstream this steers who the student gets emailed to.
+    """
+    if not raw:
+        return []
+
+    text = raw.strip()
+    if text.lower() in _NON_ANSWERS:
+        return []
+
+    out: list[str] = []
+    for part in re.split(r"[,\n;/]| and ", text):
+        name = part.strip().strip(".!?\"'")
+        if not name:
+            continue
+
+        low = name.lower()
+        if low in _NON_ANSWERS:
+            continue
+        # A company name is not a sentence. Five words is generous for the
+        # longest real ones ("Tata Consultancy Services", "JP Morgan Chase").
+        if len(name.split()) > 5:
+            continue
+        # Nor is it a paragraph.
+        if len(name) > 60:
+            continue
+        # Leading verbs and pronouns mean prose, not a name.
+        if re.match(r"^(i|im|i'm|my|we|maybe|probably|something|anywhere|any\b|"
+                    r"would|want|looking|hoping|ideally|prefer|like|love)\b", low):
+            continue
+        # Needs at least one letter; "123" or "..." is not a company.
+        if not re.search(r"[a-z]", low):
+            continue
+
+        if name not in out:
+            out.append(name)
+        if len(out) >= limit:
+            break
+
+    return out
 
 
 def _map_seniority(career_stage: str) -> str:
@@ -42,13 +141,59 @@ def _map_seniority(career_stage: str) -> str:
     return "entry"
 
 
+def _work_mode_by_option_text() -> dict[str, str]:
+    """Map each work_mode option's exact display text to its declared value.
+
+    Built from question_engine._Q8_WORK_MODE, which is the single place the
+    options are defined, so editing the copy there carries the mapping with it
+    automatically. That is the whole point: the previous mapping substring-
+    matched the wording and broke silently when the wording and the test
+    disagreed ("Fully in-office" vs a test for "in office").
+
+    The value is resolved here rather than sent by the client, because the
+    answer a student picks is also the text of their chat bubble — sending
+    "onsite" instead of "Fully in-office" would show them raw jargon.
+    """
+    try:
+        from .question_engine import _Q8_WORK_MODE
+        return {
+            o["text"].strip().lower(): o["value"]
+            for o in _Q8_WORK_MODE["mcq"]["options"]
+            if o.get("value")
+        }
+    except Exception:  # pragma: no cover - never let a mapping lookup break the build
+        return {}
+
+
+_WORK_MODE_VALUES = {"remote", "hybrid", "onsite", "flexible"}
+
+
 def _map_work_mode(work_style: str) -> str:
-    s = work_style.lower()
+    s = work_style.strip().lower()
+
+    # Already a canonical value (a client that sends one, or a stored value).
+    if s in _WORK_MODE_VALUES:
+        return s
+
+    # Exact option text -> its declared value. Immune to copy edits, because
+    # both sides of this come from the same definition.
+    exact = _work_mode_by_option_text().get(s)
+    if exact:
+        return exact
+
+    # "Fully in-office" used to fall through every test below and land on
+    # "flexible", which switches the location filter off in lead discovery: a
+    # user who asked for office work got remote-friendly leads anywhere. The
+    # onsite test read "in office" with a space and the option text is
+    # hyphenated, so it never matched. Normalising the separators fixes the
+    # stored answers; the explicit values above stop a copy edit re-breaking it.
+    s = s.replace("-", " ").replace("/", " ")
+
     if "fully remote" in s or ("remote" in s and "hybrid" not in s):
         return "remote"
     if "hybrid" in s:
         return "hybrid"
-    if "on-site" in s or "in office" in s or "onsite" in s:
+    if "on site" in s or "in office" in s or "onsite" in s or "in person" in s:
         return "onsite"
     return "flexible"
 

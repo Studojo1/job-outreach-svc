@@ -16,6 +16,7 @@ from core.analytics import capture, identify
 
 import logging
 import time
+from datetime import datetime
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/candidate", tags=["Candidate"])
@@ -37,6 +38,30 @@ async def upload_resume(
     contents = await file.read()
     try:
         raw_text, preview = parse_resume(contents, file.filename)
+
+        # Refuse a resume we could not read, instead of reporting success.
+        #
+        # parse_resume returns empty text for a scanned image PDF, a corrupt
+        # file, or a format it cannot handle. That used to create a candidate
+        # anyway and return "success", so the student walked into the quiz with
+        # no resume behind it: the background profile extraction had nothing to
+        # work with (3.6% of uploads never get a resume_profile), the adaptive
+        # role options fell back to generic ones, and nothing ever told them.
+        # Failing here lets them upload a readable file while they are still on
+        # the upload screen and expecting to deal with it.
+        if not raw_text or not raw_text.strip():
+            logger.warning(
+                "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
+                current_user.id, file.filename, len(contents),
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "We could not read any text from that file. If it is a "
+                    "scanned copy or an image, please upload a text-based PDF "
+                    "or a Word document instead."
+                ),
+            )
 
         new_candidate = Candidate(
             user_id=current_user.id,
@@ -72,20 +97,33 @@ async def upload_resume(
             "candidate_id": new_candidate.id,
             "preview": preview,
         }
+    except HTTPException:
+        # Already a deliberate, user-facing failure with its own status code —
+        # re-raise it rather than flattening it into a generic 400.
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/{candidate_id}/chat")
+# DEPRECATED — superseded by /chat/stream, which is what the quiz actually uses.
+# No caller exists in the frontend, this service, or the extensions. It is left
+# mounted rather than deleted so an unknown client gets a logged warning instead
+# of a silent 404; once the log shows no hits for a release, delete it along with
+# /chat/v2 and the engine helpers only they reach.
+@router.post("/{candidate_id}/chat", deprecated=True)
 async def candidate_chat(
     candidate_id: int,
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a message to the profiling agent and get the next response."""
+    """DEPRECATED. Send a message to the profiling agent and get the next response."""
     t_start = time.perf_counter()
-    logger.info(f"[CHAT] POST /candidate/{candidate_id}/chat — message='{request.message[:50]}'")
+    logger.warning(
+        "[DEPRECATED] POST /candidate/%s/chat called by user %s — this endpoint has "
+        "no known caller and is scheduled for deletion; use /chat/stream",
+        candidate_id, current_user.id,
+    )
 
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
@@ -132,16 +170,22 @@ async def candidate_chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{candidate_id}/chat/v2")
+# DEPRECATED — see the note on /chat above. Same story: superseded by
+# /chat/stream, no known caller.
+@router.post("/{candidate_id}/chat/v2", deprecated=True)
 async def candidate_chat_fast(
     candidate_id: int,
     request: ChatRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Fast profiling chat using pre-defined static questions — zero LLM calls per turn."""
+    """DEPRECATED. Fast profiling chat using pre-defined static questions."""
     t_start = time.perf_counter()
-    logger.info(f"[CHAT-V2] POST /candidate/{candidate_id}/chat/v2 — message='{request.message[:50]}'")
+    logger.warning(
+        "[DEPRECATED] POST /candidate/%s/chat/v2 called by user %s — this endpoint "
+        "has no known caller and is scheduled for deletion; use /chat/stream",
+        candidate_id, current_user.id,
+    )
 
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
@@ -238,10 +282,43 @@ async def candidate_chat_stream(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     # Reconstruct answer map by replaying chat history against question sequence
-    raw_user_msgs = [
-        m["content"] for m in request.chat_history
-        if m["role"] == "user" and m["content"] != "__start__"
-    ]
+    # Drop a user message that repeats the one before it with no question in
+    # between.
+    #
+    # Answers are assigned by position during this replay, so a single duplicate
+    # shifts every later answer onto the wrong question key: the student's city
+    # is stored as their company stage, and nothing errors. A failed-and-retried
+    # turn used to leave exactly such a duplicate behind (the frontend now
+    # removes the optimistic message, but older clients are still out there),
+    # and the stream fetch's new automatic retry is a second way to produce one.
+    #
+    # The assistant's question is what separates two answers. Two identical
+    # answers to *different* questions are legitimate and common — "Skip" to one
+    # question and "Skip" to the next — and those have a question between them,
+    # so they are kept. Only a repeat with nothing in between is a duplicate of
+    # one answer, which is the bug.
+    _SENTINELS = ("__start__", "__resume__", "__generate__")
+    raw_user_msgs: list[str] = []
+    saw_question_since_last_answer = True
+    for m in request.chat_history:
+        if m["role"] != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m["content"]
+        if content in _SENTINELS:
+            continue
+        if (
+            raw_user_msgs
+            and content == raw_user_msgs[-1]
+            and not saw_question_since_last_answer
+        ):
+            logger.info(
+                "[STREAM] Dropping duplicate answer (no question between) for "
+                "candidate %s: %.40r", candidate_id, content,
+            )
+            continue
+        raw_user_msgs.append(content)
+        saw_question_since_last_answer = False
 
     # Build answers dict incrementally (needed because sequence depends on answers)
     answers: dict[str, str] = {}
@@ -301,9 +378,49 @@ async def candidate_chat_stream(
     sequence = build_question_sequence(state)
     q_index = len(answers)  # index of next question to serve
 
-    # Funnel: first turn of the quiz (no answers yet, plus the __start__
-    # bootstrap message) marks "quiz_started" on the user's order.
-    if q_index == 0 and (request.message == "__start__" or len(raw_user_msgs) == 0):
+    # Persist the answers we just replayed, keyed by question key, before we
+    # serve anything. Until this existed the only write was in the completion
+    # branch below, so a user who abandoned at Q5 left nothing behind: 1,559
+    # abandoned quizzes stored zero answers and per-question drop-off was not
+    # measurable. Writing every turn also gives the server an authoritative copy
+    # to resume from, instead of trusting the client's replay to be the only one.
+    #
+    # Merge rather than replace: a shorter replay (a client that lost history,
+    # or a retry that dropped a turn) must not erase keys the server already
+    # holds. The replay is still the source of truth for keys it does carry.
+    is_first_answer = False
+    if answers:
+        try:
+            stored = candidate.quiz_answers if isinstance(candidate.quiz_answers, dict) else {}
+            merged = {**stored, **answers}
+            if merged != stored:
+                is_first_answer = not stored
+                candidate.quiz_answers = merged
+                candidate.quiz_answers_updated_at = datetime.utcnow()
+                db.commit()
+        except Exception as persist_err:
+            # A failed answer write must never cost the user their quiz turn —
+            # the replay path still works without it, exactly as it did before.
+            logger.warning(
+                "[STREAM] Could not persist quiz_answers for candidate %s: %s",
+                candidate_id, persist_err,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # Funnel: mark "quiz_started" on the user's order the first time an answer
+    # is actually stored.
+    #
+    # This used to fire on `q_index == 0 and (message == "__start__" or no user
+    # messages)`, which is unreachable: the frontend serves Q1 from a local
+    # constant (Q1_STATIC) and only calls this endpoint once the user has
+    # answered it, so the first request always arrives carrying one user message
+    # and no client anywhere sends "__start__". Hence quiz_started_at was set on
+    # 1 of 4,791 orders. Keying off the first persisted answer measures the same
+    # intent ("this user began answering") and needs no frontend change.
+    if is_first_answer:
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(current_user.id), "quiz_started",
                         candidate_id=candidate_id)
@@ -311,22 +428,33 @@ async def candidate_chat_stream(
     # ── Quiz complete ──────────────────────────────────────────────────
     if q_index >= len(sequence):
         # Persist dream companies from quiz answers
-        raw_dream = answers.get("dream_companies", "")
-        if raw_dream and raw_dream.strip().lower() not in ("skip", "none", "n/a", "na", ""):
-            dream_list = [c.strip() for c in raw_dream.split(",") if c.strip() and c.strip().lower() not in ("skip", "none")]
-            candidate.dream_companies = dream_list[:10]  # cap at 10
+        # Free text, so it is validated rather than just comma-split. The old
+        # split turned "I'm not sure, maybe Google" into two target employers
+        # and sent both to lead discovery; 19.6% of candidates had prose stored
+        # as company names.
+        from services.candidate_intelligence.payload_builder import parse_dream_companies
+        candidate.dream_companies = parse_dream_companies(answers.get("dream_companies", ""))
+        if candidate.dream_companies:
             logger.info(f"[STREAM] Stored dream_companies={candidate.dream_companies} for candidate {candidate_id}")
-        else:
-            candidate.dream_companies = []
 
-        # Persist flex notes from quiz answers — these now ride inside the main
-        # quiz instead of post-payment so the email pipeline has signal as soon
-        # as the user converts. PUT /candidate/{id}/flex still works as a
-        # manual override.
+        # Flex notes are NOT collected here. build_question_sequence does not
+        # add flex_best_project or flex_outcome, so `answers` can never contain
+        # them and this branch is unreachable from the quiz.
+        #
+        # They are collected by the debrief form (/outreach/connect/debrief),
+        # which now runs BEFORE the Gmail gate rather than after it. It sat
+        # behind that gate, and only 151 of 4,791 orders ever reached
+        # gmail_connected, which is why flex_notes coverage fell from 74% to
+        # 1.4%. The debrief writes through PUT /candidate/{id}/flex.
+        #
+        # The read is kept only so a client that still sends these keys is
+        # honoured; the comment that used to sit here claimed the quiz collected
+        # them, which read as live code and was not.
         best_project = (answers.get("flex_best_project") or "").strip()
         outcome = (answers.get("flex_outcome") or "").strip()
         if best_project or outcome:
-            candidate.flex_notes = {"best_project": best_project, "outcome": outcome}
+            candidate.flex_notes = {**(candidate.flex_notes or {}),
+                                    "best_project": best_project, "outcome": outcome}
             logger.info(f"[STREAM] Stored flex_notes from quiz for candidate {candidate_id}")
 
         db.commit()
@@ -339,6 +467,14 @@ async def candidate_chat_stream(
         })
 
         # Funnel: mark stage 3.
+        #
+        # This fires when the student finishes answering, which is genuinely
+        # what "quiz completed" means, and deliberately still does — the 138
+        # orders marked completed with no target_roles were caused by the
+        # profile write that follows being fire-and-forget, not by this line.
+        # generate-payload is now inline and returns a real status, so a failed
+        # build is surfaced to the student instead of leaving the funnel
+        # claiming a completion that produced no targeting.
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(current_user.id), "quiz_completed",
                         candidate_id=candidate_id)
@@ -351,7 +487,6 @@ async def candidate_chat_stream(
             "text_input": False,
             "is_complete": True,
             "questions_asked_so_far": q_index,
-            "psychometric": None,
         }
         logger.info(f"[STREAM] Quiz complete for candidate {candidate_id} after {q_index} answers")
 
@@ -365,11 +500,24 @@ async def candidate_chat_stream(
         )
 
     # ── Serve next question instantly ─────────────────────────────────
+    # build_message renders LLM-derived copy out of resume_profile, so it is the
+    # one part of this endpoint that can raise on unexpected data. This route is
+    # the only candidate route with no exception handler; without one, a raise
+    # here returns a bare 500 with no SSE frame at all, and the frontend — which
+    # has no timeout and no retry on this fetch — sits on a spinner forever.
+    # Falling back to the unadorned question keeps the quiz moving.
     q_def = sequence[q_index]
     prev_key = sequence[q_index - 1]["key"] if q_index > 0 else None
     is_first = (request.message == "__start__" or q_index == 0)
     prev_answer = answers.get(prev_key) if prev_key else None
-    msg_text = build_message(q_def, prev_key, is_first, prev_answer=prev_answer, resume_profile=resume_profile)
+    try:
+        msg_text = build_message(q_def, prev_key, is_first, prev_answer=prev_answer, resume_profile=resume_profile)
+    except Exception as msg_err:
+        logger.exception(
+            "[STREAM] build_message failed for candidate %s at q_index=%s (%s): %s",
+            candidate_id, q_index, q_def.get("key"), msg_err,
+        )
+        msg_text = q_def.get("message") or ""
     mcq = q_def.get("mcq")
 
     payload = {
@@ -381,6 +529,11 @@ async def candidate_chat_stream(
         "input_placeholder": q_def.get("input_placeholder") or None,
         "is_complete": False,
         "questions_asked_so_far": q_index + 1,
+        # The sequence length is already known here and was only ever logged.
+        # Sending it lets the quiz show "3 of 9" instead of a progress bar
+        # against a hardcoded guess of 10, which is wrong for most students
+        # because the sequence is clarity-gated and runs 8 to 11 questions.
+        "questions_total": len(sequence),
     }
     logger.info(f"[STREAM] Q{q_index + 1}/{len(sequence)} ({q_def['key']}) served instantly for candidate {candidate_id}")
 
@@ -392,6 +545,48 @@ async def candidate_chat_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _apply_payload(candidate: Candidate, payload_dict: dict) -> None:
+    """Write a built payload onto the candidate row."""
+    candidate.parsed_json = payload_dict
+    recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
+    if recommended:
+        candidate.target_roles = [r["title"] for r in recommended]
+
+    # No truthy gate on industries.
+    #
+    # `if industry_interests:` meant an empty result could never correct a
+    # previous one, which is what made the industries race permanent: the first
+    # build runs before background resume extraction has landed, derives nothing,
+    # and the write is skipped — but so is every later write that would have
+    # fixed it, because the value is only ever assigned when non-empty. Assigning
+    # unconditionally lets a re-run repair an earlier miss.
+    candidate.target_industries = (
+        payload_dict.get("preferences", {}).get("industry_interests", []) or []
+    )
+
+
+def _generate_payload_now(db: Session, candidate: Candidate, chat_history_dicts: list[dict]) -> dict:
+    """Build the profile payload and store it. Raises on failure."""
+    from services.candidate_intelligence.payload_builder import (
+        reconstruct_answers,
+        build_payload_from_answers,
+    )
+
+    answers = reconstruct_answers(chat_history_dicts, candidate)
+    logger.info(
+        "[PAYLOAD] Reconstructed %d answers: %s", len(answers), list(answers.keys())
+    )
+
+    payload_dict = build_payload_from_answers(
+        answers=answers,
+        candidate=candidate,
+        resume_uploaded=bool(candidate.resume_text),
+    )
+    _apply_payload(candidate, payload_dict)
+    db.commit()
+    return payload_dict
 
 
 def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
@@ -426,13 +621,7 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
                 resume_uploaded=bool(candidate.resume_text),
             )
 
-            candidate.parsed_json = payload_dict
-            recommended = payload_dict.get("career_analysis", {}).get("recommended_roles", [])
-            if recommended:
-                candidate.target_roles = [r["title"] for r in recommended]
-            industry_interests = payload_dict.get("preferences", {}).get("industry_interests", [])
-            if industry_interests:
-                candidate.target_industries = industry_interests
+            _apply_payload(candidate, payload_dict)
             db.commit()
 
             logger.info(
@@ -450,25 +639,46 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
 async def generate_payload(
     candidate_id: int,
     request: ChatRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Kick off profile generation as a background task — returns immediately.
-    Frontend should poll GET /{candidate_id}/profile-status until ready=true.
+    Build the profile and store it, inline.
+
+    This used to queue a background task and return {"status": "processing"}
+    immediately, which meant the response said nothing about whether the write
+    succeeded: a failure in the worker was logged and swallowed, the funnel
+    still recorded a completed quiz, and the student reached a profile page with
+    no targeting behind it. 138 orders are marked quiz_completed with no
+    target_roles on their candidate.
+
+    There was never a latency reason for it to be deferred. The build is
+    deterministic with zero LLM calls and completes in under 50ms, so it runs
+    here and the status code reports what actually happened. profile-status
+    still exists for clients that poll.
     """
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    logger.info(f"[PAYLOAD] Starting background generation for candidate {candidate_id}")
-    background_tasks.add_task(
-        _run_generate_payload_background,
-        candidate_id=candidate_id,
-        chat_history_dicts=request.chat_history,
+    t_start = time.perf_counter()
+    try:
+        _generate_payload_now(db, candidate, request.chat_history)
+    except Exception as exc:
+        logger.exception(
+            "[PAYLOAD] FAILED for candidate %s: %s: %s",
+            candidate_id, type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not build your profile. Please try again.",
+        )
+
+    logger.info(
+        "[PAYLOAD] Done for candidate %s in %.0fms (deterministic, no LLM)",
+        candidate_id, (time.perf_counter() - t_start) * 1000,
     )
-    return {"status": "processing"}
+    return {"status": "ready", "candidate_id": candidate_id}
 
 
 @router.get("/{candidate_id}/profile-status")
@@ -501,7 +711,6 @@ async def get_candidate_profile(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     from services.candidate_intelligence.payload_builder import compute_hiring_manager_titles
-    psych = candidate.psychometric_profile or {}
     resume_profile = candidate.resume_profile or {}
     target_roles = candidate.target_roles or []
     hiring_manager_titles = compute_hiring_manager_titles(target_roles, resume_profile)
@@ -512,7 +721,6 @@ async def get_candidate_profile(
         "target_roles": target_roles,
         "target_industries": candidate.target_industries,
         "dream_companies": candidate.dream_companies,
-        "psychometric": psych.get("result") if psych else None,
         "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
         "hiring_manager_titles": hiring_manager_titles,
     }
