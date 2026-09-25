@@ -175,5 +175,42 @@ def test_niche_options_are_passed_so_a_comma_edit_cannot_split_one_answer():
         "Logistics, warehousing and supply chain",
         "AI / ML",
     ]
-    # Without the options the same string is ambiguous and splits on ", ".
-    assert len(_parse_multi(answer)) == 3
+    # Without the options the heuristic still recovers it, because
+    # "warehousing and supply chain" reads as a continuation rather than an
+    # option label. Passing the options makes it certain rather than likely.
+    assert _parse_multi(answer) == [
+        "Logistics, warehousing and supply chain",
+        "AI / ML",
+    ]
+
+
+# ── typed free text containing a comma ──────────────────────────────────────
+
+def test_typed_prose_with_a_comma_stays_one_answer():
+    """The "Other" box is free text, and students use commas in it.
+
+    "I want fintech, healthtech" was split into two pseudo-answers, and both
+    went to lead discovery as separate interests.
+    """
+    assert _parse_multi("I want fintech, healthtech roles") == [
+        "I want fintech, healthtech roles"
+    ]
+
+
+def test_ordinary_option_labels_still_split():
+    """The common case must not regress: short labels are separate answers."""
+    assert _parse_multi("Fintech / Payments, SaaS / B2B, AI / ML") == [
+        "Fintech / Payments",
+        "SaaS / B2B",
+        "AI / ML",
+    ]
+
+
+def test_a_long_clause_is_treated_as_a_continuation():
+    assert _parse_multi(
+        "Remote, anywhere in the country as long as the team is distributed"
+    ) == ["Remote, anywhere in the country as long as the team is distributed"]
+
+
+def test_two_capitalised_labels_are_not_merged():
+    assert _parse_multi("Bengaluru, Mumbai") == ["Bengaluru", "Mumbai"]
