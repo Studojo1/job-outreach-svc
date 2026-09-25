@@ -581,12 +581,51 @@ def reconstruct_answers(chat_history_dicts: list[dict], candidate) -> dict:
     """
     from services.candidate_intelligence.question_engine import build_question_sequence
 
-    raw_user_msgs = [
-        m["content"] for m in chat_history_dicts
-        if m.get("role") == "user" and m.get("content") != "__start__"
-    ]
+    # Same three rules as the stream endpoint, because the two replays must
+    # agree: they reconstruct the same answers from the same history, and a
+    # divergence means the profile is built from a different set of answers
+    # than the quiz collected.
+    #
+    # 1. Skip every sentinel, not just __start__.
+    # 2. Drop an answer that repeats the one before it with no question in
+    #    between — a retried turn leaves exactly that, and assigning it by
+    #    position shifts every later answer onto the wrong question key.
+    # 3. Tolerate a malformed message rather than raising out of the caller.
+    _SENTINELS = ("__start__", "__resume__", "__generate__")
+    raw_user_msgs: list[str] = []
+    saw_question_since_last_answer = True
+    for m in chat_history_dicts:
+        if not isinstance(m, dict):
+            saw_question_since_last_answer = True
+            continue
+        if m.get("role") != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m.get("content") or ""
+        if content in _SENTINELS:
+            continue
+        if (
+            raw_user_msgs
+            and content == raw_user_msgs[-1]
+            and not saw_question_since_last_answer
+        ):
+            continue
+        raw_user_msgs.append(content)
+        saw_question_since_last_answer = False
 
-    resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+    # Prefer the profile snapshot the quiz was actually served from.
+    #
+    # The stream endpoint freezes resume_profile into parsed_json["_qps"] on the
+    # first turn that has real data, so the question sequence cannot change
+    # underneath a student mid-quiz. Reading the live column here meant this
+    # replay could build a DIFFERENT sequence than the one the student answered,
+    # and then file their answers against it.
+    _parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+    _snapshot = _parsed.get("_qps")
+    if isinstance(_snapshot, dict) and (_snapshot.get("likely_roles") or _snapshot.get("domain")):
+        resume_profile = _snapshot
+    else:
+        resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
     resume_text = candidate.resume_text or ""
     parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
 
