@@ -162,7 +162,11 @@ def backfill_existing_orders(db: Session, apply_changes: bool) -> dict:
             earliest_resume = min((c.created_at for c in user_candidates if c.created_at), default=None)
             if earliest_resume and _set_if_empty(order, "resume_uploaded_at", earliest_resume):
                 counts["candidate:resume_uploaded_at"] += 1
-            quiz_dates = [c.created_at for c in user_candidates if c.psychometric_profile and c.created_at]
+            # psychometric_profile was the old completion signal; that column was
+            # dropped (migration 045) and reading it here raised UndefinedColumn.
+            # quiz_answers is written every turn now, so a row that has any is a
+            # student who actually answered something.
+            quiz_dates = [c.created_at for c in user_candidates if c.quiz_answers and c.created_at]
             if quiz_dates and _set_if_empty(order, "quiz_completed_at", min(quiz_dates)):
                 counts["candidate:quiz_completed_at"] += 1
 
@@ -289,8 +293,9 @@ def create_missing_orders_for_orphan_candidates(db: Session, apply_changes: bool
             continue
         seen_users.add(cand.user_id)
 
-        # Quiz completion implied if psychometric_profile is non-null.
-        quiz_done_at = cand.created_at if cand.psychometric_profile else None
+        # Quiz completion implied if quiz_answers is non-null. This used to read
+        # psychometric_profile, which no longer exists (migration 045).
+        quiz_done_at = cand.created_at if cand.quiz_answers else None
 
         order = OutreachOrder(
             user_id=cand.user_id,
