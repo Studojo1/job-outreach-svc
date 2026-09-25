@@ -5,6 +5,7 @@ import json as _json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from sqlalchemy import or_, cast, Text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ from core.analytics import capture, identify
 import hashlib
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/candidate", tags=["Candidate"])
@@ -65,12 +66,61 @@ async def upload_resume(
                 ),
             )
 
-        new_candidate = Candidate(
-            user_id=current_user.id,
-            resume_text=raw_text,
-            parsed_json=preview,
+        # Reuse a recent candidate row rather than always inserting a new one.
+        #
+        # This endpoint used to insert unconditionally, so a double-tapped
+        # upload button, a retried request, or a student re-uploading to fix a
+        # typo each produced another candidate row. 939 users have more than one
+        # and the worst has 190. Those extras are not harmless: the quiz answers
+        # land on whichever row the client happens to hold while the order points
+        # at another, which is the same split that stranded 88 orders' leads.
+        #
+        # "Recent and unused" is the safe window to reuse: created in the last
+        # 30 minutes, nothing generated from it yet (no target_roles, no leads).
+        # Once a candidate has produced targeting or leads it is a real, distinct
+        # attempt and must never be overwritten — that would destroy the work the
+        # student already did.
+        # `target_roles.is_(None)` is NOT enough on its own: a JSONB column
+        # stores Python None as the JSON value `null`, which is not SQL NULL, so
+        # an IS NULL test silently matches nothing and reuse never happens. The
+        # empty-list case matters too — 74 rows have `[]` rather than NULL.
+        reuse_cutoff = datetime.utcnow() - timedelta(minutes=30)
+        _no_targeting = or_(
+            Candidate.target_roles.is_(None),
+            cast(Candidate.target_roles, Text) == "null",
+            cast(Candidate.target_roles, Text) == "[]",
         )
-        db.add(new_candidate)
+        new_candidate = (
+            db.query(Candidate)
+            .outerjoin(Lead, Lead.candidate_id == Candidate.id)
+            .filter(
+                Candidate.user_id == current_user.id,
+                Candidate.created_at >= reuse_cutoff,
+                _no_targeting,
+                Lead.id.is_(None),
+            )
+            .order_by(Candidate.created_at.desc())
+            .first()
+        )
+
+        if new_candidate is not None:
+            logger.info(
+                "[UPLOAD] Reusing candidate %s for user %s (created %s, no targeting or leads yet)",
+                new_candidate.id, current_user.id, new_candidate.created_at,
+            )
+            new_candidate.resume_text = raw_text
+            new_candidate.parsed_json = preview
+            # The previous resume's derived intelligence does not describe this
+            # one, so clear it and let the background extraction run again.
+            new_candidate.resume_profile = None
+        else:
+            new_candidate = Candidate(
+                user_id=current_user.id,
+                resume_text=raw_text,
+                parsed_json=preview,
+            )
+            db.add(new_candidate)
+
         db.commit()
         db.refresh(new_candidate)
 
