@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
+
+from services.lead_discovery.domain_utils import clean_domain as _clean_domain
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
@@ -128,6 +130,7 @@ def _fill_logo_domains_free(top_leads: list, lead_id_to_obj: dict) -> int:
 
     filled = 0
     for (name, objs), dom in zip(items, domains):
+        dom = _clean_domain(dom)
         if not dom:
             continue
         for lo in objs:
@@ -347,13 +350,16 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                     continue
                 if profile.domain == (lead_obj.company or "").lower():
                     continue  # company-name fallback / negative-cache sentinel — not a real domain
+                domain = _clean_domain(profile.domain)
+                if not domain:
+                    continue
                 if not lead_obj.company_domain:
-                    lead_obj.company_domain = profile.domain
+                    lead_obj.company_domain = domain
                     backfilled += 1
-                elif lead_obj.company_domain != profile.domain:
+                elif lead_obj.company_domain != domain:
                     logger.info("[ENRICH] corrected lead %d domain %s → %s",
-                                lead_obj.id, lead_obj.company_domain, profile.domain)
-                    lead_obj.company_domain = profile.domain
+                                lead_obj.id, lead_obj.company_domain, domain)
+                    lead_obj.company_domain = domain
                     corrected += 1
             if backfilled or corrected:
                 logger.info("[ENRICH] domain writeback: backfilled %d, corrected %d leads",

@@ -47,7 +47,7 @@ INPUT: structured company facts (what_they_build, core_tech, recent_momentum, hi
 RULES:
 1. Real facts only — cite what_they_build, core_tech, hiring_signal, or candidate skills/project verbatim. Never invent.
 2. One candidate-signal × one company-signal per bullet. Strongest link first, then 2nd, then soft link (location/size/market).
-3. Headline ≤80 chars, each bullet ≤80 chars. No filler.
+3. Headline ≤80 chars: the single strongest reason THIS candidate should contact THIS person, naming the company. It is shown under "Why contact them", so it must be a reason, never a company tagline or product description (not "Acme - Cloud ERP for SMBs", but "Your FastAPI billing project maps to Acme's invoicing API"). Each bullet ≤80 chars. No filler.
 4. FORBIDDEN phrases: "strong fit", "great match", "good fit", "perfect alignment", "reach out promptly", "ideal candidate", "perfect match", "excellent opportunity", "amazing", "exciting", any generic "X aligns with your Y". No em dashes (—) — use hyphen (-).
 5. signal_strength: "high" = direct tech/niche/project overlap; "medium" = sensible role/location fit; "low" = title-only guess. If data is thin, mark "low".
 
@@ -195,7 +195,7 @@ def _build_batch_prompt(candidate: dict, leads: List[dict], companies: Dict[str,
 === LEADS ===
 {chr(10).join(lead_blocks)}
 
-Return a JSON object keyed by lead_id (string). Each value: headline (≤80 chars, name the company), bullets (3 items ≤80 chars each), signal_strength (high/medium/low).
+Return a JSON object keyed by lead_id (string). Each value: headline (≤80 chars, the top reason to contact this person, naming the company, not a tagline), bullets (3 items ≤80 chars each), signal_strength (high/medium/low).
 """
 
 
