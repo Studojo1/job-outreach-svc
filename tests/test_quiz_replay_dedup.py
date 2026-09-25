@@ -116,3 +116,62 @@ def test_triplicate_collapses_to_one():
 
 def test_empty_history_is_empty():
     assert _replay([]) == []
+
+
+# ── malformed history must not kill the turn ────────────────────────────────
+
+def _replay_hardened(chat_history):
+    """The replay from routes_candidate, including the defensive reads.
+
+    The history arrives from the client, so a message is not guaranteed to be
+    a dict carrying both keys. Bracket indexing raised KeyError on anything
+    malformed and the student got a bare 500 with no SSE frame, on the one
+    request in the app that has no retry.
+    """
+    raw_user_msgs = []
+    saw_question_since_last_answer = True
+    for m in chat_history:
+        if not isinstance(m, dict):
+            saw_question_since_last_answer = True
+            continue
+        if m.get("role") != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m.get("content") or ""
+        if content in _SENTINELS:
+            continue
+        if (
+            raw_user_msgs
+            and content == raw_user_msgs[-1]
+            and not saw_question_since_last_answer
+        ):
+            continue
+        raw_user_msgs.append(content)
+        saw_question_since_last_answer = False
+    return raw_user_msgs
+
+
+def test_a_message_missing_content_does_not_raise():
+    history = [_a("Q1"), {"role": "user"}, _a("Q2"), _u("Internship")]
+    assert _replay_hardened(history) == ["", "Internship"]
+
+
+def test_a_message_missing_role_is_not_treated_as_an_answer():
+    """Safe reading: an unlabelled message cannot invent an answer."""
+    history = [_a("Q1"), {"content": "Student"}, _a("Q2"), _u("Internship")]
+    assert _replay_hardened(history) == ["Internship"]
+
+
+def test_a_non_dict_entry_is_skipped():
+    history = [_a("Q1"), "not a dict", None, 42, _u("Student")]
+    assert _replay_hardened(history) == ["Student"]
+
+
+def test_an_empty_dict_is_skipped():
+    history = [_a("Q1"), {}, _u("Student")]
+    assert _replay_hardened(history) == ["Student"]
+
+
+def test_a_null_content_becomes_empty_not_a_crash():
+    history = [_a("Q1"), {"role": "user", "content": None}]
+    assert _replay_hardened(history) == [""]

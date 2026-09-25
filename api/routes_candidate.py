@@ -248,8 +248,9 @@ async def candidate_chat_fast(
 
         # Collect user answers from chat history (frontend includes current msg in chat_history)
         user_answers = [
-            m["content"] for m in request.chat_history
-            if m["role"] == "user" and m["content"] != "__start__"
+            m.get("content") or "" for m in request.chat_history
+            if isinstance(m, dict) and m.get("role") == "user"
+            and (m.get("content") or "") != "__start__"
         ]
 
         # Build session by replaying answers to determine conditional question branching
@@ -353,10 +354,19 @@ async def candidate_chat_stream(
     raw_user_msgs: list[str] = []
     saw_question_since_last_answer = True
     for m in request.chat_history:
-        if m["role"] != "user":
+        # The history comes straight off the wire, so a message is not
+        # guaranteed to be a dict with both keys. Bracket indexing raised
+        # KeyError on anything malformed and killed the whole turn: the student
+        # got a bare 500 with no SSE frame, on the one request that has no
+        # retry. A missing role is treated as "not a user message", which is
+        # the safe reading — it cannot invent an answer.
+        if not isinstance(m, dict):
             saw_question_since_last_answer = True
             continue
-        content = m["content"]
+        if m.get("role") != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m.get("content") or ""
         if content in _SENTINELS:
             continue
         if (
