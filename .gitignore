@@ -4,3 +4,6 @@ __pycache__/
 logs/
 node_modules/
 !logs/__init__.py
+
+# macOS Finder metadata. Appears in any directory you browse, never source.
+.DS_Store
