@@ -3,8 +3,7 @@
 import asyncio
 import json as _json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import or_, cast, Text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Literal, Optional
@@ -750,13 +749,20 @@ def get_candidate_leads(
     # ETag over the exact body. The results page polls this every 15s while
     # bullets stream in; once nothing has changed, a poll costs a 304 and no
     # payload instead of the full list again.
-    body = jsonable_encoder({"leads": results, "total": total})
-    etag = '"' + hashlib.sha256(_json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32] + '"'
+    #
+    # Serialised exactly once: the same bytes are hashed and sent. This handler
+    # is CPU-bound on a single-worker pod (800 leads per call), so encoding the
+    # body twice, once for the tag and once for the response, doubled the time
+    # every other request on the pod spent waiting.
+    content = _json.dumps(
+        {"leads": results, "total": total}, separators=(",", ":"), default=str,
+    ).encode()
+    etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
     headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
     if_none_match = request.headers.get("if-none-match", "")
     if etag in [t.strip() for t in if_none_match.split(",")]:
         return Response(status_code=304, headers=headers)
-    return JSONResponse(body, headers=headers)
+    return Response(content, media_type="application/json", headers=headers)
 
 
 class FlexNotesRequest(BaseModel):
