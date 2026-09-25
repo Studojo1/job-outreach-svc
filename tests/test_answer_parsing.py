@@ -156,3 +156,24 @@ def test_canonical_values_pass_through():
     from services.candidate_intelligence.payload_builder import _map_work_mode
     for v in ("remote", "hybrid", "onsite", "flexible"):
         assert _map_work_mode(v) == v
+
+
+def test_niche_options_are_passed_so_a_comma_edit_cannot_split_one_answer():
+    """The known_options path must be live, not dead.
+
+    None of the niche options contains a comma today, so the ", " split
+    happens to give the right answer. That is a property of the current copy,
+    not of the code. build_payload_from_answers now passes the real option
+    list, so an edit that adds a comma to an option cannot quietly start
+    tearing one answer into two.
+    """
+    from services.candidate_intelligence.payload_builder import _parse_multi
+
+    options = ["Fintech / Payments", "Logistics, warehousing and supply chain", "AI / ML"]
+    answer = "Logistics, warehousing and supply chain, AI / ML"
+    assert _parse_multi(answer, options) == [
+        "Logistics, warehousing and supply chain",
+        "AI / ML",
+    ]
+    # Without the options the same string is ambiguous and splits on ", ".
+    assert len(_parse_multi(answer)) == 3

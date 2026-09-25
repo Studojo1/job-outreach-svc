@@ -644,7 +644,18 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     industry_interests = resume_profile.get("target_industries", []) or []
 
     # New quiz fields (post Phase A audit)
-    niche_keywords = _parse_multi(answers.get("niche_keywords", ""))
+    #
+    # Pass the real option list so the exact-match path is live rather than
+    # dead: none of these options contains a comma today, so the ", " split
+    # happens to work, but that is a property of the current copy and not of
+    # the code. With the options in hand an edit that adds a comma cannot
+    # quietly start splitting one answer into two.
+    try:
+        from .question_engine import _NICHE_OPTIONS_BASE
+        _niche_options = list(_NICHE_OPTIONS_BASE)
+    except Exception:  # pragma: no cover - never let an import break the build
+        _niche_options = None
+    niche_keywords = _parse_multi(answers.get("niche_keywords", ""), _niche_options)
     niche_keywords = [
         n.split(" / ")[0].strip() for n in niche_keywords
         if n and n.lower() not in ("none", "no strong preference", "skip")
