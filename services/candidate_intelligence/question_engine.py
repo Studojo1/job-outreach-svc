@@ -74,7 +74,7 @@ def _as_text_list(value) -> list[str]:
 # here is left untouched, so richer nested structures keep working as they are.
 _PROFILE_TEXT_FIELDS = ("domain", "subdomain", "seniority", "archetype")
 _PROFILE_LIST_FIELDS = ("likely_roles", "top_skills", "target_industries",
-                        "company_type_best_fit")
+                        "company_type_best_fit", "vertical_exposure")
 
 
 def _coerce_profile(profile) -> dict:

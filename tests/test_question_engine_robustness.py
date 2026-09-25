@@ -103,3 +103,28 @@ def test_non_string_answer_does_not_crash():
         "parsed_json": {},
     })
     assert isinstance(seq, list) and seq
+
+
+@pytest.mark.parametrize("vertical_exposure", [
+    ["fintech", 7],          # a numeric item among strings
+    [1, 2, 3],               # all numbers
+    "fintech",               # a bare string where a list was expected
+    {"a": 1},                # an object
+    [None, "saas"],
+])
+def test_vertical_exposure_of_any_shape_does_not_crash(vertical_exposure):
+    """The niche question front-ranks options using resume_profile.vertical_exposure.
+
+    The list itself was guarded with isinstance, but each ITEM was passed
+    straight to v.lower(). An LLM returning a number inside that list raised
+    AttributeError out of build_question_sequence, which dead-ends the quiz —
+    and only for students whose clarity answer makes the niche question appear,
+    so it would look intermittent.
+    """
+    seq = build_question_sequence({
+        "answers": {"clarity": "I know exactly, give me precise controls"},
+        "resume_profile": {"vertical_exposure": vertical_exposure},
+        "resume_text": "Some resume text",
+        "parsed_json": {},
+    })
+    assert isinstance(seq, list) and seq
