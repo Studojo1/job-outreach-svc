@@ -65,7 +65,32 @@ def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[st
             # Preserve the order they appear in the original answer.
             return sorted(found, key=lambda v: text.find(v) if v in text else len(text))
 
-    return [p.strip() for p in text.split(", ") if p.strip()]
+    # Free text the student typed into an "Other" box can itself contain ", ".
+    # Splitting on it blindly turned "I want fintech, healthtech" into two
+    # pseudo-answers, both then sent to lead discovery as separate interests.
+    #
+    # A fragment that looks like prose rather than an option is re-joined with
+    # the one before it: an option label is short and rarely starts with a
+    # lowercase connective, while the tail of a split sentence usually does.
+    parts = [p.strip() for p in text.split(", ") if p.strip()]
+    if not known_options:
+        merged: list[str] = []
+        for part in parts:
+            looks_like_a_continuation = (
+                merged
+                and (
+                    # starts lowercase and is not a known-style option label
+                    (part[:1].islower() and " " in part)
+                    # or is long enough to be a clause rather than a label
+                    or len(part.split()) > 6
+                )
+            )
+            if looks_like_a_continuation:
+                merged[-1] = f"{merged[-1]}, {part}"
+            else:
+                merged.append(part)
+        return merged
+    return parts
 
 
 # Words that mean "I don't have an answer", in the shapes students actually type.
