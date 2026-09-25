@@ -175,3 +175,59 @@ def test_an_empty_dict_is_skipped():
 def test_a_null_content_becomes_empty_not_a_crash():
     history = [_a("Q1"), {"role": "user", "content": None}]
     assert _replay_hardened(history) == [""]
+
+
+# ── the two replays must agree ──────────────────────────────────────────────
+
+def test_reconstruct_answers_matches_the_stream_replay():
+    """payload_builder.reconstruct_answers and the stream endpoint replay the
+    same history, so they must produce the same answers.
+
+    They did not. reconstruct_answers filtered only __start__ (so a __resume__
+    became a phantom answer), had no duplicate-answer dedupe (so a retried turn
+    shifted every later answer by one), and read the LIVE resume_profile rather
+    than the frozen _qps snapshot the quiz was served from — which could build a
+    different question sequence than the student actually answered, and then
+    file their answers against it.
+
+    A divergence here is invisible: the quiz looks right, the profile is built
+    from a different set of answers.
+    """
+    from services.candidate_intelligence.payload_builder import reconstruct_answers
+
+    history = [
+        _a("Q1"), _u("Student, not graduating soon"),
+        _u("__resume__"),
+        _a("Q2"), _u("Internship"), _u("Internship"),   # retried turn
+        _a("Q3"), _u("Bengaluru"),
+    ]
+
+    class _Candidate:
+        resume_text = "Some resume text"
+        resume_profile = {"domain": "engineering", "likely_roles": ["Backend Engineer"]}
+        parsed_json = {}
+
+    got = reconstruct_answers(history, _Candidate())
+    # The sentinel and the duplicate are both dropped, so three answers remain
+    # and each lands on its own question key.
+    assert list(got.values()) == [
+        "Student, not graduating soon",
+        "Internship",
+        "Bengaluru",
+    ], got
+    assert len(got) == 3
+
+
+def test_reconstruct_answers_prefers_the_frozen_snapshot():
+    """The quiz freezes the profile into parsed_json["_qps"]; the replay must
+    use the same one or it can build a different sequence."""
+    from services.candidate_intelligence.payload_builder import reconstruct_answers
+
+    class _Candidate:
+        resume_text = "Some resume text"
+        # Live column has drifted since the quiz was served.
+        resume_profile = {"domain": "marketing", "likely_roles": ["Growth Marketer"]}
+        parsed_json = {"_qps": {"domain": "engineering", "likely_roles": ["Backend Engineer"]}}
+
+    got = reconstruct_answers([_a("Q1"), _u("Student, not graduating soon")], _Candidate())
+    assert len(got) == 1
