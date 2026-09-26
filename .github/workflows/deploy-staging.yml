@@ -73,6 +73,21 @@ jobs:
             --name studojo-aks \
             --overwrite-existing
 
+      - name: Refuse to run staging against production data
+        run: |
+          # Staging has its own DB (studojo_staging) and RabbitMQ vhost (staging)
+          # since 2026-09-26. Before that it shared production's, and the staging
+          # emailer sent real emails to production users. Fail loudly if a
+          # hand-edited secret ever points back at production.
+          for k in database-url rabbitmq-url; do
+            v=$(kubectl get secret app-secrets -n staging -o jsonpath="{.data.$k}" | base64 -d)
+            case "$v" in
+              *postgres.studojo.svc*|*rabbitmq.studojo.svc.cluster.local:5672|*rabbitmq.studojo.svc.cluster.local:5672/)
+                echo "::error::staging app-secrets/$k points at PRODUCTION. Refusing to deploy."; exit 1;;
+            esac
+          done
+          echo "staging secrets point at staging data"
+
       - name: Deploy to Kubernetes (staging)
         run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} \
