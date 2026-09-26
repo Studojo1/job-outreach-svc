@@ -684,20 +684,34 @@ def get_candidate_leads(
 
     # Ordered, so identical polls return identical lists. Heap order moves as
     # the justification pass rewrites company_domain on rows mid-poll.
-    lead_query = db.query(Lead.id) if light else db.query(Lead)
-    leads = lead_query.filter(Lead.candidate_id == candidate_id).order_by(Lead.id).all()
+    # Plain column tuples, not ORM objects: building 1,600 mapped instances
+    # (lead + score) was ~70% of this handler's CPU, and it is CPU-bound on a
+    # single-worker pod. Only the columns the response carries are selected.
+    lead_cols = (Lead.id,) if light else (
+        Lead.id, Lead.name, Lead.title, Lead.company, Lead.company_domain,
+        Lead.industry, Lead.location, Lead.linkedin_url, Lead.email,
+        Lead.email_verified, Lead.company_size, Lead.status,
+    )
+    leads = (
+        db.query(*lead_cols)
+        .filter(Lead.candidate_id == candidate_id)
+        .order_by(Lead.id)
+        .all()
+    )
     logger.info(f"[LeadSearch] Leads retrieved from DB: {len(leads)}")
 
-    # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads)).
-    # Ordered by id so that if a lead ever has two score rows, the newest wins every time.
-    lead_ids = [l.id for l in leads]
-    scores_by_lead: dict[int, LeadScore] = {}
-    if lead_ids:
-        score_query = (
+    # One joined query for the scores. Ordered by id so that if a lead ever has
+    # two score rows, the newest wins every time.
+    scores_by_lead = {}
+    if leads:
+        score_rows = (
             db.query(LeadScore.lead_id, LeadScore.overall_score, LeadScore.justification_json)
-            if light else db.query(LeadScore)
+            .join(Lead, Lead.id == LeadScore.lead_id)
+            .filter(Lead.candidate_id == candidate_id)
+            .order_by(LeadScore.id)
+            .all()
         )
-        for s in score_query.filter(LeadScore.lead_id.in_(lead_ids)).order_by(LeadScore.id).all():
+        for s in score_rows:
             scores_by_lead[s.lead_id] = s
 
     # No score floor: users pay for ~500 emails so they see every lead, and
