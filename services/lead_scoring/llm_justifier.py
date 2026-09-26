@@ -13,6 +13,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
+from jsonschema import Draft7Validator
+
 from core.config import settings
 from services.shared.ai.azure_openai_client import generate_json
 
@@ -70,6 +72,22 @@ _LEAD_SCHEMA = {
 }
 
 
+_LEAD_VALIDATOR = Draft7Validator(_LEAD_SCHEMA)
+
+# What the batch call is validated against: shapes only, no length limits.
+# The strict _LEAD_SCHEMA is applied per lead afterwards, so one short field
+# drops that one lead instead of failing the whole batch. It used to fail all
+# 12 (e.g. "'oorja' is too short"), and the retries hit the same field again.
+_LOOSE_LEAD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string"},
+        "bullets": {"type": "array", "items": {"type": "string"}},
+        "signal_strength": {"type": "string"},
+    },
+}
+
+
 def _build_batch_schema(lead_ids: List[int]) -> dict:
     # NOTE: we do NOT mark per-lead keys as required. If the LLM omits one
     # we accept the partial result (caller drops missing leads gracefully).
@@ -78,7 +96,7 @@ def _build_batch_schema(lead_ids: List[int]) -> dict:
     # because the LLM keeps hitting the same context limit.
     return {
         "type": "object",
-        "properties": {str(lid): _LEAD_SCHEMA for lid in lead_ids},
+        "properties": {str(lid): _LOOSE_LEAD_SCHEMA for lid in lead_ids},
         "additionalProperties": False,
     }
 
@@ -195,7 +213,7 @@ def _build_batch_prompt(candidate: dict, leads: List[dict], companies: Dict[str,
 === LEADS ===
 {chr(10).join(lead_blocks)}
 
-Return a JSON object keyed by lead_id (string). Each value: headline (≤80 chars, the top reason to contact this person, naming the company, not a tagline), bullets (3 items ≤80 chars each), signal_strength (high/medium/low).
+Return a JSON object keyed by lead_id (string). Each value: headline (10-80 chars, the top reason to contact this person, naming the company, not a tagline), bullets (exactly 3 items, 8-80 chars each), signal_strength (high/medium/low).
 """
 
 
@@ -245,6 +263,10 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
         if lid not in result:
             continue
         item = result[lid]
+        problem = next(_LEAD_VALIDATOR.iter_errors(item), None)
+        if problem is not None:
+            logger.info("[JUSTIFY] dropped lead %s: %s", lid, problem.message)
+            continue
         if _has_banned_phrase(item):
             logger.info("[JUSTIFY] dropped lead %s — banned phrase in output", lid)
             continue
