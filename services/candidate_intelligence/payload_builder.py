@@ -65,7 +65,32 @@ def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[st
             # Preserve the order they appear in the original answer.
             return sorted(found, key=lambda v: text.find(v) if v in text else len(text))
 
-    return [p.strip() for p in text.split(", ") if p.strip()]
+    # Free text the student typed into an "Other" box can itself contain ", ".
+    # Splitting on it blindly turned "I want fintech, healthtech" into two
+    # pseudo-answers, both then sent to lead discovery as separate interests.
+    #
+    # A fragment that looks like prose rather than an option is re-joined with
+    # the one before it: an option label is short and rarely starts with a
+    # lowercase connective, while the tail of a split sentence usually does.
+    parts = [p.strip() for p in text.split(", ") if p.strip()]
+    if not known_options:
+        merged: list[str] = []
+        for part in parts:
+            looks_like_a_continuation = (
+                merged
+                and (
+                    # starts lowercase and is not a known-style option label
+                    (part[:1].islower() and " " in part)
+                    # or is long enough to be a clause rather than a label
+                    or len(part.split()) > 6
+                )
+            )
+            if looks_like_a_continuation:
+                merged[-1] = f"{merged[-1]}, {part}"
+            else:
+                merged.append(part)
+        return merged
+    return parts
 
 
 # Words that mean "I don't have an answer", in the shapes students actually type.
@@ -556,12 +581,51 @@ def reconstruct_answers(chat_history_dicts: list[dict], candidate) -> dict:
     """
     from services.candidate_intelligence.question_engine import build_question_sequence
 
-    raw_user_msgs = [
-        m["content"] for m in chat_history_dicts
-        if m.get("role") == "user" and m.get("content") != "__start__"
-    ]
+    # Same three rules as the stream endpoint, because the two replays must
+    # agree: they reconstruct the same answers from the same history, and a
+    # divergence means the profile is built from a different set of answers
+    # than the quiz collected.
+    #
+    # 1. Skip every sentinel, not just __start__.
+    # 2. Drop an answer that repeats the one before it with no question in
+    #    between — a retried turn leaves exactly that, and assigning it by
+    #    position shifts every later answer onto the wrong question key.
+    # 3. Tolerate a malformed message rather than raising out of the caller.
+    _SENTINELS = ("__start__", "__resume__", "__generate__")
+    raw_user_msgs: list[str] = []
+    saw_question_since_last_answer = True
+    for m in chat_history_dicts:
+        if not isinstance(m, dict):
+            saw_question_since_last_answer = True
+            continue
+        if m.get("role") != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m.get("content") or ""
+        if content in _SENTINELS:
+            continue
+        if (
+            raw_user_msgs
+            and content == raw_user_msgs[-1]
+            and not saw_question_since_last_answer
+        ):
+            continue
+        raw_user_msgs.append(content)
+        saw_question_since_last_answer = False
 
-    resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+    # Prefer the profile snapshot the quiz was actually served from.
+    #
+    # The stream endpoint freezes resume_profile into parsed_json["_qps"] on the
+    # first turn that has real data, so the question sequence cannot change
+    # underneath a student mid-quiz. Reading the live column here meant this
+    # replay could build a DIFFERENT sequence than the one the student answered,
+    # and then file their answers against it.
+    _parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+    _snapshot = _parsed.get("_qps")
+    if isinstance(_snapshot, dict) and (_snapshot.get("likely_roles") or _snapshot.get("domain")):
+        resume_profile = _snapshot
+    else:
+        resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
     resume_text = candidate.resume_text or ""
     parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
 
@@ -644,7 +708,18 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     industry_interests = resume_profile.get("target_industries", []) or []
 
     # New quiz fields (post Phase A audit)
-    niche_keywords = _parse_multi(answers.get("niche_keywords", ""))
+    #
+    # Pass the real option list so the exact-match path is live rather than
+    # dead: none of these options contains a comma today, so the ", " split
+    # happens to work, but that is a property of the current copy and not of
+    # the code. With the options in hand an edit that adds a comma cannot
+    # quietly start splitting one answer into two.
+    try:
+        from .question_engine import _NICHE_OPTIONS_BASE
+        _niche_options = list(_NICHE_OPTIONS_BASE)
+    except Exception:  # pragma: no cover - never let an import break the build
+        _niche_options = None
+    niche_keywords = _parse_multi(answers.get("niche_keywords", ""), _niche_options)
     niche_keywords = [
         n.split(" / ")[0].strip() for n in niche_keywords
         if n and n.lower() not in ("none", "no strong preference", "skip")

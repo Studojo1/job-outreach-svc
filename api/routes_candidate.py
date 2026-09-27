@@ -4,6 +4,7 @@ import asyncio
 import json as _json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import or_, cast, Text
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel
@@ -17,7 +18,7 @@ from core.analytics import capture, identify
 import hashlib
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/candidate", tags=["Candidate"])
@@ -64,12 +65,61 @@ async def upload_resume(
                 ),
             )
 
-        new_candidate = Candidate(
-            user_id=current_user.id,
-            resume_text=raw_text,
-            parsed_json=preview,
+        # Reuse a recent candidate row rather than always inserting a new one.
+        #
+        # This endpoint used to insert unconditionally, so a double-tapped
+        # upload button, a retried request, or a student re-uploading to fix a
+        # typo each produced another candidate row. 939 users have more than one
+        # and the worst has 190. Those extras are not harmless: the quiz answers
+        # land on whichever row the client happens to hold while the order points
+        # at another, which is the same split that stranded 88 orders' leads.
+        #
+        # "Recent and unused" is the safe window to reuse: created in the last
+        # 30 minutes, nothing generated from it yet (no target_roles, no leads).
+        # Once a candidate has produced targeting or leads it is a real, distinct
+        # attempt and must never be overwritten — that would destroy the work the
+        # student already did.
+        # `target_roles.is_(None)` is NOT enough on its own: a JSONB column
+        # stores Python None as the JSON value `null`, which is not SQL NULL, so
+        # an IS NULL test silently matches nothing and reuse never happens. The
+        # empty-list case matters too — 74 rows have `[]` rather than NULL.
+        reuse_cutoff = datetime.utcnow() - timedelta(minutes=30)
+        _no_targeting = or_(
+            Candidate.target_roles.is_(None),
+            cast(Candidate.target_roles, Text) == "null",
+            cast(Candidate.target_roles, Text) == "[]",
         )
-        db.add(new_candidate)
+        new_candidate = (
+            db.query(Candidate)
+            .outerjoin(Lead, Lead.candidate_id == Candidate.id)
+            .filter(
+                Candidate.user_id == current_user.id,
+                Candidate.created_at >= reuse_cutoff,
+                _no_targeting,
+                Lead.id.is_(None),
+            )
+            .order_by(Candidate.created_at.desc())
+            .first()
+        )
+
+        if new_candidate is not None:
+            logger.info(
+                "[UPLOAD] Reusing candidate %s for user %s (created %s, no targeting or leads yet)",
+                new_candidate.id, current_user.id, new_candidate.created_at,
+            )
+            new_candidate.resume_text = raw_text
+            new_candidate.parsed_json = preview
+            # The previous resume's derived intelligence does not describe this
+            # one, so clear it and let the background extraction run again.
+            new_candidate.resume_profile = None
+        else:
+            new_candidate = Candidate(
+                user_id=current_user.id,
+                resume_text=raw_text,
+                parsed_json=preview,
+            )
+            db.add(new_candidate)
+
         db.commit()
         db.refresh(new_candidate)
 
@@ -104,161 +154,6 @@ async def upload_resume(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-# DEPRECATED — superseded by /chat/stream, which is what the quiz actually uses.
-# No caller exists in the frontend, this service, or the extensions. It is left
-# mounted rather than deleted so an unknown client gets a logged warning instead
-# of a silent 404; once the log shows no hits for a release, delete it along with
-# /chat/v2 and the engine helpers only they reach.
-@router.post("/{candidate_id}/chat", deprecated=True)
-async def candidate_chat(
-    candidate_id: int,
-    request: ChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """DEPRECATED. Send a message to the profiling agent and get the next response."""
-    t_start = time.perf_counter()
-    logger.warning(
-        "[DEPRECATED] POST /candidate/%s/chat called by user %s — this endpoint has "
-        "no known caller and is scheduled for deletion; use /chat/stream",
-        candidate_id, current_user.id,
-    )
-
-    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-    try:
-        from services.candidate_intelligence.profiler_agent import get_agent_response
-        from services.candidate_intelligence.models import ChatMessage
-
-        t_db = time.perf_counter()
-        logger.info(f"[TIMING] DB lookup: {(t_db - t_start)*1000:.0f}ms")
-
-        chat_history = [
-            ChatMessage(role=msg["role"], content=msg["content"])
-            for msg in request.chat_history
-        ]
-        chat_history.append(ChatMessage(role="user", content=request.message))
-
-        # Run blocking LLM call in a thread to avoid blocking the event loop
-        response = await asyncio.to_thread(
-            get_agent_response,
-            chat_history=chat_history,
-            resume_summary=candidate.parsed_json,
-            resume_raw_text=candidate.resume_text,
-        )
-
-        t_end = time.perf_counter()
-        logger.info(f"[TIMING] Total chat request: {(t_end - t_start)*1000:.0f}ms")
-
-        mcq_dict = None
-        if response.mcq:
-            mcq_dict = response.mcq.model_dump() if hasattr(response.mcq, 'model_dump') else response.mcq.dict()
-
-        return {
-            "message": response.message,
-            "current_state": response.current_state,
-            "mcq": mcq_dict,
-            "text_input": response.text_input,
-            "is_complete": response.is_complete,
-            "questions_asked_so_far": response.questions_asked_so_far,
-        }
-    except Exception as e:
-        logger.error(f"Chat error for candidate {candidate_id} after {(time.perf_counter() - t_start)*1000:.0f}ms: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# DEPRECATED — see the note on /chat above. Same story: superseded by
-# /chat/stream, no known caller.
-@router.post("/{candidate_id}/chat/v2", deprecated=True)
-async def candidate_chat_fast(
-    candidate_id: int,
-    request: ChatRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """DEPRECATED. Fast profiling chat using pre-defined static questions."""
-    t_start = time.perf_counter()
-    logger.warning(
-        "[DEPRECATED] POST /candidate/%s/chat/v2 called by user %s — this endpoint "
-        "has no known caller and is scheduled for deletion; use /chat/stream",
-        candidate_id, current_user.id,
-    )
-
-    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-
-    try:
-        from services.candidate_intelligence._question_flow import get_active_questions, get_question
-
-        # Collect user answers from chat history (frontend includes current msg in chat_history)
-        user_answers = [
-            m["content"] for m in request.chat_history
-            if m["role"] == "user" and m["content"] != "__start__"
-        ]
-
-        # Build session by replaying answers to determine conditional question branching
-        parsed_summary = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
-        resume_skills = (
-            parsed_summary.get("personal_info", {}).get("skills_detected", [])
-            or parsed_summary.get("skills", [])
-        )
-        session = {
-            "resume_uploaded": bool(candidate.resume_text),
-            "resume_summary": {"skills": resume_skills},
-            "answers": {},
-        }
-        for i, answer in enumerate(user_answers):
-            active_qs = get_active_questions(session)
-            if i < len(active_qs):
-                session["answers"][active_qs[i]] = answer
-
-        # Determine next question index
-        active_qs = get_active_questions(session)
-        q_index = len(user_answers)
-
-        if q_index >= len(active_qs):
-            t_end = time.perf_counter()
-            logger.info(f"[CHAT-V2] Complete after {q_index} answers in {(t_end - t_start)*1000:.0f}ms")
-            return {
-                "message": "Got it! Generating your profile now...",
-                "current_state": "PAYLOAD_READY",
-                "mcq": None,
-                "text_input": False,
-                "is_complete": True,
-                "questions_asked_so_far": q_index,
-            }
-
-        q_id = active_qs[q_index]
-        q_def = get_question(q_id, session)
-
-        # Build message: ack for previous answer + new question
-        if request.message == "__start__":
-            msg = q_def["message"]
-        else:
-            prev_q_id = active_qs[q_index - 1] if q_index > 0 else None
-            ack = get_question(prev_q_id, session).get("ack") or "Got it." if prev_q_id else "Got it."
-            msg = f"{ack}|||{q_def['message']}"
-
-        t_end = time.perf_counter()
-        logger.info(f"[CHAT-V2] Q{q_index + 1}/{len(active_qs)} ({q_id}) served in {(t_end - t_start)*1000:.0f}ms")
-
-        return {
-            "message": msg,
-            "current_state": "MCQ" if q_def.get("mcq") else "TEXT",
-            "mcq": q_def.get("mcq"),
-            "text_input": q_def.get("text_input", False),
-            "is_complete": False,
-            "questions_asked_so_far": q_index + 1,
-        }
-
-    except Exception as e:
-        logger.error(f"[CHAT-V2] Error for candidate {candidate_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{candidate_id}/chat/stream")
@@ -302,10 +197,19 @@ async def candidate_chat_stream(
     raw_user_msgs: list[str] = []
     saw_question_since_last_answer = True
     for m in request.chat_history:
-        if m["role"] != "user":
+        # The history comes straight off the wire, so a message is not
+        # guaranteed to be a dict with both keys. Bracket indexing raised
+        # KeyError on anything malformed and killed the whole turn: the student
+        # got a bare 500 with no SSE frame, on the one request that has no
+        # retry. A missing role is treated as "not a user message", which is
+        # the safe reading — it cannot invent an answer.
+        if not isinstance(m, dict):
             saw_question_since_last_answer = True
             continue
-        content = m["content"]
+        if m.get("role") != "user":
+            saw_question_since_last_answer = True
+            continue
+        content = m.get("content") or ""
         if content in _SENTINELS:
             continue
         if (
