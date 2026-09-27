@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import cast, create_engine, or_, Text
+from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
@@ -45,31 +45,10 @@ def db():
 
 
 def _find_reusable(db, user_id):
-    """The lookup from routes_candidate.upload_resume.
-
-    Kept identical to the code under test on purpose: if the endpoint's query
-    changes and this does not, the assertions below stop describing production.
-    """
-    cutoff = datetime.utcnow() - timedelta(minutes=30)
-    # A JSONB column stores Python None as the JSON value `null`, not SQL NULL,
-    # so IS NULL alone matches nothing. This mirrors the endpoint exactly.
-    no_targeting = or_(
-        Candidate.target_roles.is_(None),
-        cast(Candidate.target_roles, Text) == "null",
-        cast(Candidate.target_roles, Text) == "[]",
-    )
-    return (
-        db.query(Candidate)
-        .outerjoin(Lead, Lead.candidate_id == Candidate.id)
-        .filter(
-            Candidate.user_id == user_id,
-            Candidate.created_at >= cutoff,
-            no_targeting,
-            Lead.id.is_(None),
-        )
-        .order_by(Candidate.created_at.desc())
-        .first()
-    )
+    # The production lookup, not a copy of it: a copy "kept identical on
+    # purpose" is exactly what let the endpoint and these tests drift.
+    from api.routes_candidate import find_reusable_candidate
+    return find_reusable_candidate(db, user_id)
 
 
 def _candidate(db, cid, user="u1", minutes_ago=1, target_roles=None):
@@ -105,10 +84,44 @@ def test_a_row_with_leads_is_never_reused(db):
     assert _find_reusable(db, "u1") is None
 
 
-def test_an_old_row_is_not_reused(db):
-    """Past the window this is a deliberate new attempt, not a retry."""
-    _candidate(db, 1, minutes_ago=45)
+def test_an_old_unused_row_is_still_reused(db):
+    """There is no age limit any more (quiz audit Q20/Q39, 27 Sep re-check).
+
+    A 30-minute window still left 8% of recent users with duplicate rows: a
+    student who uploads, leaves before finishing the quiz and comes back the
+    next day is the same attempt. An unused row has nothing worth keeping.
+    """
+    _candidate(db, 1, minutes_ago=60 * 24 * 3)
+    assert _find_reusable(db, "u1").id == 1
+
+
+def test_an_old_used_row_is_still_protected(db):
+    _candidate(db, 1, minutes_ago=60 * 24 * 3, target_roles=["Backend Engineer"])
     assert _find_reusable(db, "u1") is None
+
+
+def test_reusing_a_row_forgets_the_previous_quiz(db):
+    """Answers given for the old resume must not merge into the new quiz,
+    whose questions are built from a different resume."""
+    from api.routes_candidate import reset_candidate_for_new_resume
+
+    c = _candidate(db, 1, minutes_ago=5)
+    c.quiz_answers = {"career_stage": "Student, not graduating soon"}
+    c.quiz_answers_updated_at = datetime.utcnow()
+    c.parsed_json = {"_qps": {"domain": "engineering"}}
+    c.resume_profile = {"domain": "engineering"}
+    c.dream_companies = ["Google"]
+    db.commit()
+
+    reset_candidate_for_new_resume(c, "new resume", {"name": "A"})
+    db.commit()
+    db.refresh(c)
+    assert c.resume_text == "new resume"
+    assert c.parsed_json == {"name": "A"}          # frozen _qps snapshot gone too
+    assert c.resume_profile is None
+    assert c.quiz_answers is None
+    assert c.quiz_answers_updated_at is None
+    assert c.dream_companies is None
 
 
 def test_another_users_row_is_never_reused(db):
