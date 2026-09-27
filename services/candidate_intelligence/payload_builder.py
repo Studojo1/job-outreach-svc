@@ -50,20 +50,43 @@ def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[st
 
     # Prefer exact matches against the known options: unambiguous regardless of
     # what punctuation the option copy contains.
+    #
+    # Walk the ", "-separated pieces and, at each point, take the longest run of
+    # pieces that re-joins into a real option. Whatever is left between options
+    # is text the student typed into an "Something else" box, which the
+    # frontend sends as ONE entry, so a run of non-option pieces is kept whole
+    # rather than split on its own commas. The previous version found options
+    # by substring and then split the remainder on every ",", which tore typed
+    # text apart and could match an option inside the student's own sentence.
     if known_options:
-        remaining = text
+        opts = {o.strip() for o in known_options if o and o.strip()}
+        pieces = [p.strip() for p in text.split(", ")]
         found: list[str] = []
-        # Longest first, so "Student, graduating within 6 months" is matched
-        # before a shorter option that is a prefix of it.
-        for opt in sorted(known_options, key=len, reverse=True):
-            if opt and opt in remaining:
-                found.append(opt)
-                remaining = remaining.replace(opt, "", 1)
-        leftovers = [p.strip(" ,") for p in remaining.split(",")]
-        found.extend(p for p in leftovers if p)
+        free: list[str] = []
+
+        def _flush_free():
+            joined = ", ".join(p for p in free if p).strip(" ,")
+            if joined:
+                found.append(joined)
+            free.clear()
+
+        i = 0
+        while i < len(pieces):
+            match_end = None
+            for j in range(len(pieces), i, -1):
+                if ", ".join(pieces[i:j]) in opts:
+                    match_end = j
+                    break
+            if match_end is None:
+                free.append(pieces[i])
+                i += 1
+                continue
+            _flush_free()
+            found.append(", ".join(pieces[i:match_end]))
+            i = match_end
+        _flush_free()
         if found:
-            # Preserve the order they appear in the original answer.
-            return sorted(found, key=lambda v: text.find(v) if v in text else len(text))
+            return found
 
     # Free text the student typed into an "Other" box can itself contain ", ".
     # Splitting on it blindly turned "I want fintech, healthtech" into two
@@ -418,7 +441,9 @@ def _build_specializations(answers: dict, resume_profile: dict) -> list[dict]:
     return specs[:3]
 
 
-def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
+def _build_recommended_roles(
+    answers: dict, resume_profile: dict, answer_options: dict | None = None
+) -> list[dict]:
     seniority = _map_seniority(answers.get("career_stage", ""))
     career_goal = answers.get("career_goal", "")
     target_role = answers.get("target_role", "")
@@ -446,7 +471,12 @@ def _build_recommended_roles(answers: dict, resume_profile: dict) -> list[dict]:
         seen.add(t)
 
     # 1. Explicit quiz target_role — user's stated preference, always ranks first
-    for t in _parse_multi(target_role):
+    #
+    # These options include the LLM's archetype_label, which can contain a
+    # comma ("Product-Growth Generalist (AI-fluent, early-stage)"). Without the
+    # option list the split turned it into two junk titles that went straight
+    # into the Apollo person_titles filter (quiz audit Q40/Q42).
+    for t in _parse_multi(target_role, (answer_options or {}).get("target_role")):
         if t.lower() not in ("other", "skip"):
             _add(t, 0.95, "quiz")
 
@@ -574,27 +604,24 @@ def _build_profile_summary(
 
 # ── Answer reconstruction ───────────────────────────────────────────────────
 
-def reconstruct_answers(chat_history_dicts: list[dict], candidate) -> dict:
-    """
-    Replay chat history through the question sequence to recover the structured
-    answers dict. Same logic used in the chat/stream endpoint.
-    """
-    from services.candidate_intelligence.question_engine import build_question_sequence
+_SENTINELS = ("__start__", "__resume__", "__generate__")
 
-    # Same three rules as the stream endpoint, because the two replays must
-    # agree: they reconstruct the same answers from the same history, and a
-    # divergence means the profile is built from a different set of answers
-    # than the quiz collected.
-    #
-    # 1. Skip every sentinel, not just __start__.
-    # 2. Drop an answer that repeats the one before it with no question in
-    #    between — a retried turn leaves exactly that, and assigning it by
-    #    position shifts every later answer onto the wrong question key.
-    # 3. Tolerate a malformed message rather than raising out of the caller.
-    _SENTINELS = ("__start__", "__resume__", "__generate__")
+
+def user_answers_from_history(chat_history_dicts: list) -> list[str]:
+    """The student's answers, in order, from a client-sent chat history.
+
+    1. Skip every sentinel, not just __start__.
+    2. Drop an answer that repeats the one before it with no question in
+       between. A retried turn leaves exactly that, and assigning it by
+       position shifts every later answer onto the wrong question key.
+       Two identical answers to DIFFERENT questions ("Skip", then "Skip")
+       have a question between them and are both kept.
+    3. Tolerate a malformed message rather than raising out of the caller:
+       the history comes straight off the wire.
+    """
     raw_user_msgs: list[str] = []
     saw_question_since_last_answer = True
-    for m in chat_history_dicts:
+    for m in chat_history_dicts or []:
         if not isinstance(m, dict):
             saw_question_since_last_answer = True
             continue
@@ -609,50 +636,111 @@ def reconstruct_answers(chat_history_dicts: list[dict], candidate) -> dict:
             and content == raw_user_msgs[-1]
             and not saw_question_since_last_answer
         ):
+            logger.info("[REPLAY] Dropping duplicate answer (no question between): %.40r", content)
             continue
         raw_user_msgs.append(content)
         saw_question_since_last_answer = False
+    return raw_user_msgs
 
-    # Prefer the profile snapshot the quiz was actually served from.
-    #
-    # The stream endpoint freezes resume_profile into parsed_json["_qps"] on the
-    # first turn that has real data, so the question sequence cannot change
-    # underneath a student mid-quiz. Reading the live column here meant this
-    # replay could build a DIFFERENT sequence than the one the student answered,
-    # and then file their answers against it.
-    _parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
-    _snapshot = _parsed.get("_qps")
-    if isinstance(_snapshot, dict) and (_snapshot.get("likely_roles") or _snapshot.get("domain")):
-        resume_profile = _snapshot
-    else:
-        resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
-    resume_text = candidate.resume_text or ""
-    parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
 
+def quiz_profile_snapshot(candidate) -> dict:
+    """The resume_profile the quiz was served from.
+
+    The stream endpoint freezes resume_profile into parsed_json["_qps"] on the
+    first turn that has real data, so the question sequence cannot change
+    underneath a student mid-quiz. Reading the live column instead can build a
+    DIFFERENT sequence than the one the student answered, and then file their
+    answers against it.
+    """
+    parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+    snapshot = parsed.get("_qps")
+    if isinstance(snapshot, dict) and (snapshot.get("likely_roles") or snapshot.get("domain")):
+        return snapshot
+    return candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
+
+
+def replay_answers(
+    chat_history_dicts: list,
+    resume_profile: dict,
+    resume_text: str,
+    parsed_json: dict,
+) -> tuple[dict, dict]:
+    """Replay a chat history through the question sequence.
+
+    This is the ONLY replay. The stream endpoint (which serves the next
+    question) and the payload build (which turns answers into targeting) both
+    call it, with the profile snapshot passed explicitly, so they cannot file
+    the same history under different keys. There used to be three copies that
+    had already drifted once (quiz audit Q35).
+
+    Returns (answers, answer_options):
+      answers         question key -> the raw answer string
+      answer_options  question key -> the option texts that question offered,
+                      for multi-select questions only. The frontend sends a
+                      multi-select answer as the chosen texts joined with ", ",
+                      so these are what lets _parse_multi split it without
+                      tearing apart an option that contains a comma.
+    """
+    from services.candidate_intelligence.question_engine import build_question_sequence
+
+    resume_text = resume_text or ""
+    parsed_json = parsed_json if isinstance(parsed_json, dict) else {}
     answers: dict[str, str] = {}
-    for answer in raw_user_msgs:
-        state = {
+    answer_options: dict[str, list[str]] = {}
+    for answer in user_answers_from_history(chat_history_dicts):
+        seq = build_question_sequence({
             "answers": answers.copy(),
             "resume_profile": resume_profile,
             "resume_text": resume_text,
             "parsed_json": {**parsed_json, "_resume_text": resume_text},
-        }
-        seq = build_question_sequence(state)
+        })
         idx = len(answers)
-        if idx < len(seq):
-            answers[seq[idx]["key"]] = answer
+        if idx >= len(seq):
+            continue
+        q = seq[idx]
+        answers[q["key"]] = answer
+        mcq = q.get("mcq") or {}
+        if mcq.get("allow_multiple"):
+            answer_options[q["key"]] = [
+                o.get("text", "") for o in mcq.get("options") or [] if isinstance(o, dict)
+            ]
+    return answers, answer_options
 
+
+def reconstruct_quiz(chat_history_dicts: list, candidate) -> tuple[dict, dict]:
+    """replay_answers for a stored candidate, against its frozen profile snapshot."""
+    answers, answer_options = replay_answers(
+        chat_history_dicts,
+        quiz_profile_snapshot(candidate),
+        candidate.resume_text or "",
+        candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {},
+    )
     logger.info(f"[PAYLOAD-BUILDER] Reconstructed answers: {list(answers.keys())}")
-    return answers
+    return answers, answer_options
+
+
+def reconstruct_answers(chat_history_dicts: list, candidate) -> dict:
+    """Just the answers from reconstruct_quiz."""
+    return reconstruct_quiz(chat_history_dicts, candidate)[0]
 
 
 # ── Main entry point ────────────────────────────────────────────────────────
 
-def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool = True) -> dict:
+def build_payload_from_answers(
+    answers: dict,
+    candidate,
+    resume_uploaded: bool = True,
+    answer_options: dict | None = None,
+) -> dict:
     """
     Build the full parsed_json payload from structured quiz answers.
     Zero LLM calls — pure deterministic mapping. ~1ms vs 15-30s.
+
+    answer_options (from replay_answers) holds the option texts each
+    multi-select question offered, so a comma inside an option or inside typed
+    "Something else" text is not mistaken for a separator.
     """
+    answer_options = answer_options or {}
     # resume_profile: LLM-extracted at upload time (domain, top_skills, likely_roles, geography, etc.)
     resume_profile = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
 
@@ -698,7 +786,7 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     company_stage = answers.get("company_stage", "")
     career_goal   = answers.get("career_goal", "")
 
-    locations = _parse_multi(answers.get("location", ""))
+    locations = _parse_multi(answers.get("location", ""), answer_options.get("location"))
     # Add resume city if not already covered
     if resume_city and resume_city not in locations and not locations:
         locations = [resume_city]
@@ -710,21 +798,21 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     # New quiz fields (post Phase A audit)
     #
     # Pass the real option list so the exact-match path is live rather than
-    # dead: none of these options contains a comma today, so the ", " split
-    # happens to work, but that is a property of the current copy and not of
-    # the code. With the options in hand an edit that adds a comma cannot
-    # quietly start splitting one answer into two.
-    try:
-        from .question_engine import _NICHE_OPTIONS_BASE
-        _niche_options = list(_NICHE_OPTIONS_BASE)
-    except Exception:  # pragma: no cover - never let an import break the build
-        _niche_options = None
+    # dead. The options the student was actually shown come from the replay;
+    # the static base list is the fallback for a caller that has none.
+    _niche_options = answer_options.get("niche_keywords")
+    if not _niche_options:
+        try:
+            from .question_engine import _NICHE_OPTIONS_BASE
+            _niche_options = list(_NICHE_OPTIONS_BASE)
+        except Exception:  # pragma: no cover - never let an import break the build
+            _niche_options = None
     niche_keywords = _parse_multi(answers.get("niche_keywords", ""), _niche_options)
     niche_keywords = [
         n.split(" / ")[0].strip() for n in niche_keywords
         if n and n.lower() not in ("none", "no strong preference", "skip")
     ]
-    tech_stack = _parse_multi(answers.get("tech_stack", ""))
+    tech_stack = _parse_multi(answers.get("tech_stack", ""), answer_options.get("tech_stack"))
     tech_stack = [t.strip() for t in tech_stack if t.strip()]
 
     # Explicit clarity (Q2) — drives filter aggressiveness downstream
@@ -754,7 +842,7 @@ def build_payload_from_answers(answers: dict, candidate, resume_uploaded: bool =
     # ── Career analysis ─────────────────────────────────────────────────────
     primary_cluster   = _build_primary_cluster(answers, resume_profile)
     specializations   = _build_specializations(answers, resume_profile)
-    recommended_roles = _build_recommended_roles(answers, resume_profile)
+    recommended_roles = _build_recommended_roles(answers, resume_profile, answer_options)
 
     profile_summary = _build_profile_summary(
         name=name,

@@ -22,33 +22,13 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-_SENTINELS = ("__start__", "__resume__", "__generate__")
+from services.candidate_intelligence.payload_builder import user_answers_from_history
 
-
-def _replay(chat_history):
-    """The dedup from routes_candidate.candidate_chat_stream.
-
-    Kept identical to the code under test on purpose: if the endpoint's replay
-    changes and this does not, the assertions below stop describing production.
-    """
-    raw_user_msgs = []
-    saw_question_since_last_answer = True
-    for m in chat_history:
-        if m["role"] != "user":
-            saw_question_since_last_answer = True
-            continue
-        content = m["content"]
-        if content in _SENTINELS:
-            continue
-        if (
-            raw_user_msgs
-            and content == raw_user_msgs[-1]
-            and not saw_question_since_last_answer
-        ):
-            continue
-        raw_user_msgs.append(content)
-        saw_question_since_last_answer = False
-    return raw_user_msgs
+# These tests call the production function. They used to call a copy of the
+# loop "kept identical to the code under test on purpose", which meant a change
+# to the endpoint could never fail them (quiz audit re-check, 27 Sep).
+_replay = user_answers_from_history
+_replay_hardened = user_answers_from_history
 
 
 def _a(text):
@@ -119,37 +99,6 @@ def test_empty_history_is_empty():
 
 
 # ── malformed history must not kill the turn ────────────────────────────────
-
-def _replay_hardened(chat_history):
-    """The replay from routes_candidate, including the defensive reads.
-
-    The history arrives from the client, so a message is not guaranteed to be
-    a dict carrying both keys. Bracket indexing raised KeyError on anything
-    malformed and the student got a bare 500 with no SSE frame, on the one
-    request in the app that has no retry.
-    """
-    raw_user_msgs = []
-    saw_question_since_last_answer = True
-    for m in chat_history:
-        if not isinstance(m, dict):
-            saw_question_since_last_answer = True
-            continue
-        if m.get("role") != "user":
-            saw_question_since_last_answer = True
-            continue
-        content = m.get("content") or ""
-        if content in _SENTINELS:
-            continue
-        if (
-            raw_user_msgs
-            and content == raw_user_msgs[-1]
-            and not saw_question_since_last_answer
-        ):
-            continue
-        raw_user_msgs.append(content)
-        saw_question_since_last_answer = False
-    return raw_user_msgs
-
 
 def test_a_message_missing_content_does_not_raise():
     history = [_a("Q1"), {"role": "user"}, _a("Q2"), _u("Internship")]
@@ -231,3 +180,34 @@ def test_reconstruct_answers_prefers_the_frozen_snapshot():
 
     got = reconstruct_answers([_a("Q1"), _u("Student, not graduating soon")], _Candidate())
     assert len(got) == 1
+
+
+# ── one replay, and it knows each multi-select question's options ───────────
+
+def test_replay_records_the_options_of_multi_select_questions():
+    """The payload build needs the options the student was actually shown to
+    split a multi-select answer safely. The replay is the only place that
+    knows which question each answer belongs to, so it hands them over."""
+    from services.candidate_intelligence.payload_builder import replay_answers
+
+    history = [_a("Q1"), _u("Student, not graduating soon")]
+    answers, options = replay_answers(
+        history, {"domain": "engineering", "likely_roles": ["Backend Engineer"]}, "resume", {},
+    )
+    assert answers == {"career_stage": "Student, not graduating soon"}
+    # career_stage is single-select, so no options are recorded for it.
+    assert "career_stage" not in options
+
+
+def test_stream_endpoint_uses_the_shared_replay():
+    """Q35: there must be exactly one replay. The stream endpoint used to carry
+    its own inline copy, which had already drifted from the payload builder's
+    once. Guard against a copy creeping back in."""
+    import inspect
+
+    import api.routes_candidate as rc
+
+    src = inspect.getsource(rc)
+    assert "replay_answers(" in inspect.getsource(rc._chat_stream_turn)
+    assert "raw_user_msgs" not in src
+    assert "_run_generate_payload_background" not in src

@@ -18,7 +18,7 @@ from core.analytics import capture, identify
 import hashlib
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/candidate", tags=["Candidate"])
@@ -27,6 +27,66 @@ router = APIRouter(prefix="/candidate", tags=["Candidate"])
 class ChatRequest(BaseModel):
     message: str
     chat_history: List[Dict[str, str]] = []
+
+
+def find_reusable_candidate(db: Session, user_id) -> Optional[Candidate]:
+    """This user's most recent candidate whose quiz never produced anything.
+
+    Upload used to insert unconditionally, so a double-tapped button, a retried
+    request, or a student re-uploading to fix a typo each produced another
+    candidate row. 939 users have more than one and the worst has 190. The
+    extras are not harmless: the quiz answers land on whichever row the client
+    happens to hold while the order points at another.
+
+    "Unused" means nothing has been generated from the row: no target_roles
+    and no leads. Once a candidate has produced targeting or leads it is a
+    real, distinct attempt and must never be overwritten, because that would
+    destroy work the student already did (and leads someone may have paid for).
+
+    There is deliberately NO age limit. It used to be 30 minutes, which left 5
+    of 61 recent users with duplicates anyway (quiz audit Q20/Q39, re-checked
+    27 Sep): a student who uploads, wanders off before finishing the quiz and
+    comes back the next day is the same attempt, not a new one, and an unused
+    row has nothing on it worth keeping.
+
+    `target_roles.is_(None)` is NOT enough on its own: a JSONB column stores
+    Python None as the JSON value `null`, which is not SQL NULL, so an IS NULL
+    test silently matches nothing. 74 rows have `[]` rather than NULL too.
+    """
+    no_targeting = or_(
+        Candidate.target_roles.is_(None),
+        cast(Candidate.target_roles, Text) == "null",
+        cast(Candidate.target_roles, Text) == "[]",
+    )
+    return (
+        db.query(Candidate)
+        .outerjoin(Lead, Lead.candidate_id == Candidate.id)
+        .filter(
+            Candidate.user_id == user_id,
+            no_targeting,
+            Lead.id.is_(None),
+        )
+        .order_by(Candidate.created_at.desc())
+        .first()
+    )
+
+
+def reset_candidate_for_new_resume(candidate: Candidate, raw_text: str, preview: dict) -> None:
+    """Point a reused candidate at a new resume and forget the old quiz.
+
+    Everything derived from the previous resume is dropped: its profile (the
+    background extraction re-runs), the frozen quiz snapshot (it lives inside
+    parsed_json, which is replaced), and any answers from a quiz started on it.
+    Keeping those answers would merge them into the new quiz, whose questions
+    are built from a different resume, so they would be filed under keys the
+    student never answered for this resume.
+    """
+    candidate.resume_text = raw_text
+    candidate.parsed_json = preview
+    candidate.resume_profile = None
+    candidate.quiz_answers = None
+    candidate.quiz_answers_updated_at = None
+    candidate.dream_companies = None
 
 
 @router.post("/upload")
@@ -38,80 +98,60 @@ async def upload_resume(
 ):
     """Upload and parse a resume. Returns raw text and metadata preview."""
     contents = await file.read()
+
+    # Only a parse failure is the student's to fix, so only a parse failure is
+    # a 400, and its message is written for them. parse_resume raises
+    # ValueError with copy meant to be shown ("Unsupported file type: .png.
+    # Please upload a PDF or DOCX file."). Anything else it raises is a bug on
+    # our side and gets the generic message: the old catch-all returned
+    # str(exception) as a 400 for every failure in this handler, database
+    # outages included, and showed the raw Python error to the student.
     try:
         raw_text, preview = parse_resume(contents, file.filename)
+    except ValueError as e:
+        logger.info("[UPLOAD] Could not parse resume from user %s (%s): %s",
+                    current_user.id, file.filename, e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("[UPLOAD] Parser crashed on resume from user %s (%s)",
+                         current_user.id, file.filename)
+        raise HTTPException(
+            status_code=400,
+            detail="We could not read that file. Please upload a text-based PDF or a Word document.",
+        ) from e
 
-        # Refuse a resume we could not read, instead of reporting success.
-        #
-        # parse_resume returns empty text for a scanned image PDF, a corrupt
-        # file, or a format it cannot handle. That used to create a candidate
-        # anyway and return "success", so the student walked into the quiz with
-        # no resume behind it: the background profile extraction had nothing to
-        # work with (3.6% of uploads never get a resume_profile), the adaptive
-        # role options fell back to generic ones, and nothing ever told them.
-        # Failing here lets them upload a readable file while they are still on
-        # the upload screen and expecting to deal with it.
-        if not raw_text or not raw_text.strip():
-            logger.warning(
-                "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
-                current_user.id, file.filename, len(contents),
-            )
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "We could not read any text from that file. If it is a "
-                    "scanned copy or an image, please upload a text-based PDF "
-                    "or a Word document instead."
-                ),
-            )
-
-        # Reuse a recent candidate row rather than always inserting a new one.
-        #
-        # This endpoint used to insert unconditionally, so a double-tapped
-        # upload button, a retried request, or a student re-uploading to fix a
-        # typo each produced another candidate row. 939 users have more than one
-        # and the worst has 190. Those extras are not harmless: the quiz answers
-        # land on whichever row the client happens to hold while the order points
-        # at another, which is the same split that stranded 88 orders' leads.
-        #
-        # "Recent and unused" is the safe window to reuse: created in the last
-        # 30 minutes, nothing generated from it yet (no target_roles, no leads).
-        # Once a candidate has produced targeting or leads it is a real, distinct
-        # attempt and must never be overwritten — that would destroy the work the
-        # student already did.
-        # `target_roles.is_(None)` is NOT enough on its own: a JSONB column
-        # stores Python None as the JSON value `null`, which is not SQL NULL, so
-        # an IS NULL test silently matches nothing and reuse never happens. The
-        # empty-list case matters too — 74 rows have `[]` rather than NULL.
-        reuse_cutoff = datetime.utcnow() - timedelta(minutes=30)
-        _no_targeting = or_(
-            Candidate.target_roles.is_(None),
-            cast(Candidate.target_roles, Text) == "null",
-            cast(Candidate.target_roles, Text) == "[]",
+    # Refuse a resume we could not read, instead of reporting success.
+    #
+    # parse_resume returns empty text for a scanned image PDF, a corrupt
+    # file, or a format it cannot handle. That used to create a candidate
+    # anyway and return "success", so the student walked into the quiz with
+    # no resume behind it: the background profile extraction had nothing to
+    # work with (3.6% of uploads never get a resume_profile), the adaptive
+    # role options fell back to generic ones, and nothing ever told them.
+    # Failing here lets them upload a readable file while they are still on
+    # the upload screen and expecting to deal with it.
+    if not raw_text or not raw_text.strip():
+        logger.warning(
+            "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
+            current_user.id, file.filename, len(contents),
         )
-        new_candidate = (
-            db.query(Candidate)
-            .outerjoin(Lead, Lead.candidate_id == Candidate.id)
-            .filter(
-                Candidate.user_id == current_user.id,
-                Candidate.created_at >= reuse_cutoff,
-                _no_targeting,
-                Lead.id.is_(None),
-            )
-            .order_by(Candidate.created_at.desc())
-            .first()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "We could not read any text from that file. If it is a "
+                "scanned copy or an image, please upload a text-based PDF "
+                "or a Word document instead."
+            ),
         )
 
+    try:
+        new_candidate = find_reusable_candidate(db, current_user.id)
         if new_candidate is not None:
             logger.info(
                 "[UPLOAD] Reusing candidate %s for user %s (created %s, no targeting or leads yet)",
                 new_candidate.id, current_user.id, new_candidate.created_at,
             )
-            new_candidate.resume_text = raw_text
-            new_candidate.parsed_json = preview
-            # The previous resume's derived intelligence does not describe this
-            # one, so clear it and let the background extraction run again.
-            new_candidate.resume_profile = None
+            reset_candidate_for_new_resume(new_candidate, raw_text, preview)
         else:
             new_candidate = Candidate(
                 user_id=current_user.id,
@@ -122,38 +162,48 @@ async def upload_resume(
 
         db.commit()
         db.refresh(new_candidate)
+    except Exception as e:
+        logger.exception("[UPLOAD] Could not store resume for user %s", current_user.id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong saving your resume. Please try again in a minute.",
+        ) from e
 
-        # Extract resume intelligence in background — powers adaptive Q6 options
-        from services.candidate_intelligence.resume_intelligence import extract_and_store_resume_profile
-        background_tasks.add_task(
-            extract_and_store_resume_profile,
-            candidate_id=new_candidate.id,
-            db_session_factory=SessionLocal,
-        )
+    # The resume is stored. Nothing below may turn that into a failure the
+    # student sees: each step is best-effort on its own.
 
+    # Extract resume intelligence in background — powers adaptive Q6 options
+    from services.candidate_intelligence.resume_intelligence import extract_and_store_resume_profile
+    background_tasks.add_task(
+        extract_and_store_resume_profile,
+        candidate_id=new_candidate.id,
+        db_session_factory=SessionLocal,
+    )
+
+    try:
         capture("resume_uploaded", str(current_user.id), {
             "candidate_id": new_candidate.id,
             "file_type": (file.filename or "").rsplit(".", 1)[-1].lower(),
         })
+    except Exception:
+        logger.warning("[UPLOAD] analytics capture failed", exc_info=True)
 
-        # Funnel: create / advance the user's OutreachOrder to stage 1.
-        # This is the entry point to the funnel — every uploaded resume
-        # produces an order row so we can see drop-off from here on.
-        from services.stage_tracking import safe_mark_stage
-        safe_mark_stage(db, str(current_user.id), "resume_uploaded",
-                        candidate_id=new_candidate.id)
+    # Funnel: create / advance the user's OutreachOrder to stage 1.
+    # This is the entry point to the funnel — every uploaded resume
+    # produces an order row so we can see drop-off from here on.
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, str(current_user.id), "resume_uploaded",
+                    candidate_id=new_candidate.id)
 
-        return {
-            "status": "success",
-            "candidate_id": new_candidate.id,
-            "preview": preview,
-        }
-    except HTTPException:
-        # Already a deliberate, user-facing failure with its own status code —
-        # re-raise it rather than flattening it into a generic 400.
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "success",
+        "candidate_id": new_candidate.id,
+        "preview": preview,
+    }
 
 
 @router.post("/{candidate_id}/chat/stream")
@@ -169,64 +219,59 @@ async def candidate_chat_stream(
     Resume profile (extracted in background after upload) powers Q6 role options.
     Returns text/event-stream with 'complete' events only (no streaming chunks needed).
     """
-    from services.candidate_intelligence.question_engine import (
-        build_question_sequence, build_message
-    )
-
     candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    # Reconstruct answer map by replaying chat history against question sequence
-    # Drop a user message that repeats the one before it with no question in
-    # between.
+    # One catch-all for the whole turn (quiz audit Q16).
     #
-    # Answers are assigned by position during this replay, so a single duplicate
-    # shifts every later answer onto the wrong question key: the student's city
-    # is stored as their company stage, and nothing errors. A failed-and-retried
-    # turn used to leave exactly such a duplicate behind (the frontend now
-    # removes the optimistic message, but older clients are still out there),
-    # and the stream fetch's new automatic retry is a second way to produce one.
-    #
-    # The assistant's question is what separates two answers. Two identical
-    # answers to *different* questions are legitimate and common — "Skip" to one
-    # question and "Skip" to the next — and those have a question between them,
-    # so they are kept. Only a repeat with nothing in between is a duplicate of
-    # one answer, which is the bug.
-    _SENTINELS = ("__start__", "__resume__", "__generate__")
-    raw_user_msgs: list[str] = []
-    saw_question_since_last_answer = True
-    for m in request.chat_history:
-        # The history comes straight off the wire, so a message is not
-        # guaranteed to be a dict with both keys. Bracket indexing raised
-        # KeyError on anything malformed and killed the whole turn: the student
-        # got a bare 500 with no SSE frame, on the one request that has no
-        # retry. A missing role is treated as "not a user message", which is
-        # the safe reading — it cannot invent an answer.
-        if not isinstance(m, dict):
-            saw_question_since_last_answer = True
-            continue
-        if m.get("role") != "user":
-            saw_question_since_last_answer = True
-            continue
-        content = m.get("content") or ""
-        if content in _SENTINELS:
-            continue
-        if (
-            raw_user_msgs
-            and content == raw_user_msgs[-1]
-            and not saw_question_since_last_answer
-        ):
-            logger.info(
-                "[STREAM] Dropping duplicate answer (no question between) for "
-                "candidate %s: %.40r", candidate_id, content,
-            )
-            continue
-        raw_user_msgs.append(content)
-        saw_question_since_last_answer = False
+    # Without it, anything unexpected in the replay, the persistence, or the
+    # question build escaped as a bare 500 with no SSE frame, so the student
+    # read nothing about what happened. Individual steps below already guard
+    # their own known failure points; this is for the ones nobody predicted.
+    # The frontend treats an {"type": "error"} frame as a failed turn: it takes
+    # the answer back out of the transcript and shows the retry banner.
+    try:
+        return _chat_stream_turn(candidate_id, request, candidate, current_user, db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "[STREAM] Unhandled error for candidate %s: %s: %s",
+            candidate_id, type(exc).__name__, exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        error_frame = {
+            "type": "error",
+            "message": "Something went wrong on our side. Please try again.",
+        }
 
-    # Build answers dict incrementally (needed because sequence depends on answers)
-    answers: dict[str, str] = {}
+        async def error_sse():
+            yield f"data: {_json.dumps(error_frame)}\n\n"
+
+        return StreamingResponse(
+            error_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+
+def _chat_stream_turn(
+    candidate_id: int,
+    request: ChatRequest,
+    candidate: Candidate,
+    current_user: User,
+    db: Session,
+) -> StreamingResponse:
+    """One quiz turn: replay the history, persist answers, serve the next question."""
+    from services.candidate_intelligence.question_engine import (
+        build_question_sequence, build_message
+    )
+    from services.candidate_intelligence.payload_builder import replay_answers
+
     resume_text = candidate.resume_text or ""
     parsed_json = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
 
@@ -263,23 +308,22 @@ async def candidate_chat_stream(
                 except Exception:
                     pass
 
-    def _make_state() -> dict:
-        return {
-            "answers": answers,
-            "resume_profile": resume_profile,
-            "resume_text": resume_text,
-            # _resume_text is a private key used by question_engine for NLP role detection
-            "parsed_json": {**parsed_json, "_resume_text": resume_text},
-        }
-
-    for answer in raw_user_msgs:
-        seq = build_question_sequence(_make_state())
-        answered_count = len(answers)
-        if answered_count < len(seq):
-            answers[seq[answered_count]["key"]] = answer
+    # Replay the history into keyed answers. This is the same function the
+    # payload build uses (payload_builder.replay_answers), given the same frozen
+    # snapshot, so the quiz that was served and the profile built from it file
+    # every answer under the same key. It also drops a retried duplicate: one
+    # extra message would otherwise shift every later answer onto the wrong
+    # question, silently.
+    answers, _ = replay_answers(request.chat_history, resume_profile, resume_text, parsed_json)
 
     # Build state for the *current* turn (current message not yet in answers)
-    state = _make_state()
+    state = {
+        "answers": answers,
+        "resume_profile": resume_profile,
+        "resume_text": resume_text,
+        # _resume_text is a private key used by question_engine for NLP role detection
+        "parsed_json": {**parsed_json, "_resume_text": resume_text},
+    }
     sequence = build_question_sequence(state)
     q_index = len(answers)  # index of next question to serve
 
@@ -425,6 +469,9 @@ async def candidate_chat_stream(
         "mcq": mcq,
         "text_input": q_def.get("text_input", False),
         "input_placeholder": q_def.get("input_placeholder") or None,
+        # Which question this is, so the client can tune the input for it
+        # (e.g. capitalise each word in the dream-companies box).
+        "question_key": q_def.get("key"),
         "is_complete": False,
         "questions_asked_so_far": q_index + 1,
         # The sequence length is already known here and was only ever logged.
@@ -493,11 +540,11 @@ def _mark_quiz_completed_if_targeted(db: Session, user_id: str, candidate: Candi
 def _generate_payload_now(db: Session, candidate: Candidate, chat_history_dicts: list[dict]) -> dict:
     """Build the profile payload and store it. Raises on failure."""
     from services.candidate_intelligence.payload_builder import (
-        reconstruct_answers,
+        reconstruct_quiz,
         build_payload_from_answers,
     )
 
-    answers = reconstruct_answers(chat_history_dicts, candidate)
+    answers, answer_options = reconstruct_quiz(chat_history_dicts, candidate)
     logger.info(
         "[PAYLOAD] Reconstructed %d answers: %s", len(answers), list(answers.keys())
     )
@@ -506,57 +553,11 @@ def _generate_payload_now(db: Session, candidate: Candidate, chat_history_dicts:
         answers=answers,
         candidate=candidate,
         resume_uploaded=bool(candidate.resume_text),
+        answer_options=answer_options,
     )
     _apply_payload(candidate, payload_dict)
     db.commit()
     return payload_dict
-
-
-def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list[dict]) -> None:
-    """
-    Background worker: generate final payload and store it.
-    Opens its own DB session (request session is already closed).
-    Uses deterministic parser — zero LLM calls, completes in <50ms.
-    """
-    import traceback
-    t_start = time.perf_counter()
-    try:
-        db = SessionLocal()
-        try:
-            from services.candidate_intelligence.payload_builder import (
-                reconstruct_answers,
-                build_payload_from_answers,
-            )
-
-            candidate = db.query(Candidate).filter_by(id=candidate_id).first()
-            if not candidate:
-                logger.error(f"[PAYLOAD-BG] Candidate {candidate_id} not found")
-                return
-
-            # Reconstruct structured answers from chat history (same logic as chat/stream endpoint)
-            answers = reconstruct_answers(chat_history_dicts, candidate)
-            logger.info(f"[PAYLOAD-BG] Reconstructed {len(answers)} answers: {list(answers.keys())}")
-
-            # Build payload deterministically — no LLM
-            payload_dict = build_payload_from_answers(
-                answers=answers,
-                candidate=candidate,
-                resume_uploaded=bool(candidate.resume_text),
-            )
-
-            _apply_payload(candidate, payload_dict)
-            db.commit()
-            _mark_quiz_completed_if_targeted(db, str(candidate.user_id), candidate)
-
-            logger.info(
-                f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms "
-                f"(deterministic, no LLM)"
-            )
-        finally:
-            db.close()
-    except Exception as exc:
-        logger.error(f"[PAYLOAD-BG] FAILED for candidate {candidate_id}: {type(exc).__name__}: {exc}")
-        logger.error(traceback.format_exc())
 
 
 @router.post("/{candidate_id}/generate-payload")
