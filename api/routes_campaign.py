@@ -18,7 +18,7 @@ from services.email_campaign.campaign_service import (
     transition_campaign,
     get_campaign_metrics,
 )
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_internal_caller
 from core.analytics import capture
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,32 @@ class CampaignCreateRequest(BaseModel):
 
 class CampaignTransitionRequest(BaseModel):
     target_status: str
+
+
+def _owned_campaign(db: Session, campaign_id: int, user_id: str) -> Campaign:
+    """The campaign, if it belongs to this user. 404 if missing, 403 if not theirs.
+
+    Campaign ids are small sequential integers, so every route that takes one
+    must check ownership, not just authentication.
+    """
+    from database.models import Candidate
+    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    owner = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=user_id).first()
+    if not owner:
+        raise HTTPException(status_code=403, detail="Not your campaign")
+    return campaign
+
+
+def _owned_email_account(db: Session, email_account_id: int, user_id: str):
+    """The Gmail account, if this user connected it; None otherwise.
+
+    Without this, any signed-in user could launch a campaign or a test send
+    from someone else's connected Gmail by passing its id.
+    """
+    from database.models import EmailAccount
+    return db.query(EmailAccount).filter_by(id=email_account_id, user_id=user_id).first()
 
 
 def _resolve_effective_candidate(db: Session, user_id: str, candidate_id: int) -> int:
@@ -171,7 +197,7 @@ async def validate_campaign_readiness(
     db: Session = Depends(get_db),
 ):
     """Pre-launch validation: check leads, Gmail, and profile are ready."""
-    from database.models import Candidate, Lead, EmailAccount
+    from database.models import Candidate, Lead
 
     # Auto-rebind to a complete candidate if the bound one never finished the quiz.
     candidate_id = _resolve_effective_candidate(db, current_user.id, candidate_id)
@@ -185,7 +211,7 @@ async def validate_campaign_readiness(
         return {"valid": False, "reason": "Candidate profile incomplete. Please complete the career quiz."}
 
     # Check Gmail account
-    account = db.query(EmailAccount).filter_by(id=email_account_id).first()
+    account = _owned_email_account(db, email_account_id, current_user.id)
     if not account:
         return {"valid": False, "reason": "Gmail account not connected. Please connect your Gmail first."}
 
@@ -223,11 +249,17 @@ async def api_create_campaign(
     If selected_styles is provided (non-empty list), generates fully AI-personalized emails.
     Otherwise, uses legacy template substitution.
     """
+    # What this request actually added to used_credits. The error handlers
+    # refund exactly this, never the client-supplied lead_limit: a failure
+    # before the reservation must not hand back credits nobody reserved.
+    reserved = 0
     try:
         # Auto-rebind to a complete candidate if the bound one never finished the
         # quiz (re-onboarding / Rs.499 dup-candidate case). Keeps the whole create
         # flow on the candidate that actually has a profile + leads.
         request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
+        if not _owned_email_account(db, request.email_account_id, current_user.id):
+            raise HTTPException(status_code=403, detail="Gmail account not found for this user")
 
         # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
         # where two simultaneous requests both read the same balance and both pass.
@@ -253,7 +285,11 @@ async def api_create_campaign(
         # Reserve credits immediately so concurrent requests see the updated balance
         if credits:
             credits.used_credits += required
-            db.flush()  # write to DB within transaction before slow AI generation
+            # Commit (not flush) so the reservation is durable on its own: the
+            # failure handler can then always release exactly `reserved`
+            # without guessing whether a rollback already undid it.
+            db.commit()
+            reserved = required
 
         # Default to AI styles if none provided — never silently fall back to blank template
         if not request.selected_styles:
@@ -293,6 +329,9 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
+        # The campaign now exists and owns the reservation; a later failure must
+        # not refund credits its email rows are holding.
+        reserved = 0
         # Funnel: prefer the user's *active* OutreachOrder (created at resume
         # upload) and advance it to campaign_setup. Falls back to creating a
         # new row only if none exists, so we don't fragment a user's history.
@@ -332,29 +371,34 @@ async def api_create_campaign(
         })
         return {"status": "success", **result}
     except HTTPException:
+        _release_create_reservation(db, current_user.id, reserved)
         raise
     except ValueError as e:
-        # Refund the reserved credits if campaign creation failed
-        try:
-            from database.models import UserCredit
-            credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
-            if credits:
-                credits.used_credits = max(0, credits.used_credits - (request.lead_limit or 200))
-                db.commit()
-        except Exception:
-            pass
+        _release_create_reservation(db, current_user.id, reserved)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # Refund the reserved credits if campaign creation failed
-        try:
-            from database.models import UserCredit
-            credits = db.query(UserCredit).filter_by(user_id=current_user.id).first()
-            if credits:
-                credits.used_credits = max(0, credits.used_credits - (request.lead_limit or 200))
-                db.commit()
-        except Exception:
-            pass
+        _release_create_reservation(db, current_user.id, reserved)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _release_create_reservation(db: Session, user_id: str, reserved: int) -> None:
+    """Undo a failed /campaign/create's reservation, and only that much.
+
+    If the reservation was only flushed, the rollback already undoes it; if it
+    was committed (create_campaign commits), subtract it explicitly.
+    """
+    if not reserved:
+        return
+    try:
+        from database.models import UserCredit
+        db.rollback()  # discard the failed work; the reservation was committed separately
+        credits = db.query(UserCredit).filter_by(user_id=user_id).with_for_update().first()
+        if credits:
+            credits.used_credits = max(0, credits.used_credits - reserved)
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("[CAMPAIGN] could not release %d reserved credits for %s", reserved, user_id)
 
 
 class EmailPreviewRequest(BaseModel):
@@ -426,6 +470,7 @@ async def api_transition_campaign(
     db: Session = Depends(get_db),
 ):
     """Transition a campaign to a new state."""
+    _owned_campaign(db, campaign_id, current_user.id)
     try:
         result = transition_campaign(db, campaign_id, request.target_status)
         return {"status": "success", **result}
@@ -440,6 +485,7 @@ async def api_start_campaign(
     db: Session = Depends(get_db),
 ):
     """Start sending emails for a campaign."""
+    _owned_campaign(db, campaign_id, current_user.id)
     try:
         result = transition_campaign(db, campaign_id, "running")
         campaign = db.query(Campaign).filter_by(id=campaign_id).first()
@@ -596,9 +642,7 @@ async def get_campaign(
     db: Session = Depends(get_db),
 ):
     """Get campaign details."""
-    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = _owned_campaign(db, campaign_id, current_user.id)
 
     return {
         "id": campaign.id,
@@ -618,6 +662,7 @@ async def get_campaign_analytics(
     db: Session = Depends(get_db),
 ):
     """Get campaign analytics and metrics."""
+    _owned_campaign(db, campaign_id, current_user.id)
     try:
         metrics = get_campaign_metrics(db, campaign_id)
         return {"status": "success", **metrics}
@@ -729,7 +774,7 @@ def _run_test_launch_in_background(
 ):
     """Background thread: send test emails, updating _test_launch_jobs leads in real-time."""
     from database.session import SessionLocal
-    from database.models import Candidate, Lead, EmailAccount
+    from database.models import Candidate, Lead
     from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
     from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 
@@ -744,7 +789,7 @@ def _run_test_launch_in_background(
 
     try:
         candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
-        account = db.query(EmailAccount).filter_by(id=email_account_id).first()
+        account = _owned_email_account(db, email_account_id, user_id)
 
         if not candidate or not account or not account.access_token:
             job["status"] = "failed"
@@ -833,7 +878,7 @@ async def test_launch_campaign(
     and causing health probe failures (which was causing 503 errors).
     Use GET /test-launch/{job_id}/status to poll for results.
     """
-    from database.models import Candidate, Lead, EmailAccount
+    from database.models import Candidate, Lead
 
     # Validate inputs before spawning background job
     request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
@@ -843,7 +888,7 @@ async def test_launch_campaign(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    account = db.query(EmailAccount).filter_by(id=request.email_account_id).first()
+    account = _owned_email_account(db, request.email_account_id, current_user.id)
     if not account or not account.access_token:
         raise HTTPException(status_code=400, detail="Gmail account not connected or token missing")
 
@@ -1140,14 +1185,15 @@ async def cancel_campaign(
     }
 
 
-# ── Internal Worker Endpoints (no auth — cluster-only) ─────────────────────
+# ── Internal Worker Endpoints (shared-secret auth) ─────────────────────────
 
-@router.post("/worker/send-ready")
+@router.post("/worker/send-ready", dependencies=[Depends(require_internal_caller)])
 def worker_send_ready():
     """Internal endpoint called by job-outreach-worker goroutine every 30s.
 
     Runs the 3-phase JIT cycle: enrich upcoming → generate content → send ready.
-    No auth required because this is only accessible within the k8s cluster.
+    Requires the x-studojo-internal secret: the studojo.com ingress forwards
+    /api/v1/outreach/* here, so "cluster-only" was never true.
 
     NOTE: this MUST be `def`, not `async def`. The cycle does blocking HTTP
     calls (Azure OpenAI takes 5-15s) and synchronous DB queries. As an

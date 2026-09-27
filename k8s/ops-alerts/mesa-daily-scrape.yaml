@@ -26,8 +26,15 @@ spec:
             - name: trigger
               image: curlimages/curl:8.10.1
               command: ["sh", "-c"]
+              env:
+                - name: INTERNAL_API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: INTERNAL_API_SECRET
               args:
                 - >
                   curl -fsS -m 1500 -X POST
+                  -H "x-studojo-internal: $INTERNAL_API_SECRET"
                   http://job-outreach-svc.studojo.svc.cluster.local:8000/job-outreach/api/v1/mesa/worker/run-due
                   && echo "mesa run-due triggered"
