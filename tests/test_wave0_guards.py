@@ -27,7 +27,7 @@ from api.routes_campaign import (
     _owned_email_account,
     _release_create_reservation,
 )
-from database.models import Base, Campaign, Candidate, EmailAccount, UserCredit
+from database.models import Base, Campaign, Candidate, CreditLedger, EmailAccount, UserCredit
 
 
 @compiles(JSONB, "sqlite")
@@ -39,7 +39,7 @@ def _jsonb_as_json(type_, compiler, **kw):  # pragma: no cover - test plumbing
 def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(
-        engine, tables=[t.__table__ for t in (Candidate, Campaign, EmailAccount, UserCredit)]
+        engine, tables=[t.__table__ for t in (Candidate, Campaign, EmailAccount, UserCredit, CreditLedger)]
     )
     session = sessionmaker(bind=engine)()
     session.add_all([

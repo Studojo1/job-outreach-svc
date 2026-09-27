@@ -20,6 +20,7 @@ from services.email_campaign.campaign_service import (
 )
 from api.dependencies import get_current_user, require_internal_caller
 from core.analytics import capture
+from services import credits
 
 logger = logging.getLogger(__name__)
 
@@ -264,11 +265,8 @@ async def api_create_campaign(
         # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
         # where two simultaneous requests both read the same balance and both pass.
         # This allows multiple campaigns (e.g. 3x200 with 600 credits) but blocks double-clicks.
-        from api.routes_payment import deduct_credits
-        from database.models import UserCredit
-        from sqlalchemy import text
-        credits = db.query(UserCredit).filter_by(user_id=current_user.id).with_for_update().first()
-        available = (credits.total_credits - credits.used_credits) if credits else 0
+        wallet = credits.lock_wallet(db, current_user.id)
+        available = (wallet.total_credits - wallet.used_credits) if wallet else 0
         requested = request.lead_limit or 200  # default campaign size
         # Minimum credits to start a campaign — set to the smallest plan (50) so
         # 50-credit plan users can launch. Campaign size is still capped at the
@@ -282,14 +280,16 @@ async def api_create_campaign(
         # Cap at available credits — prevents error when setup was done at a higher tier than paid
         required = min(requested, available)
         request.lead_limit = required
-        # Reserve credits immediately so concurrent requests see the updated balance
-        if credits:
-            credits.used_credits += required
-            # Commit (not flush) so the reservation is durable on its own: the
-            # failure handler can then always release exactly `reserved`
-            # without guessing whether a rollback already undid it.
-            db.commit()
-            reserved = required
+        # Reserve credits immediately so concurrent requests see the updated balance.
+        # Commit (not flush) so the reservation is durable on its own: the
+        # failure handler can then always release exactly `reserved` without
+        # guessing whether a rollback already undid it.
+        reservation = credits.reserve(db, current_user.id, required, credits.RESERVE_CAMPAIGN,
+                                      actor=str(current_user.id))
+        if reservation is None:
+            raise HTTPException(status_code=402, detail="Insufficient credits.")
+        db.commit()
+        reserved = required
 
         # Default to AI styles if none provided — never silently fall back to blank template
         if not request.selected_styles:
@@ -331,6 +331,12 @@ async def api_create_campaign(
             )
         # The campaign now exists and owns the reservation; a later failure must
         # not refund credits its email rows are holding.
+        try:
+            credits.attach_campaign(reservation, db.get(Campaign, result["campaign_id"]))
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("[CAMPAIGN] could not attach reservation to campaign %s", result["campaign_id"])
         reserved = 0
         # Funnel: prefer the user's *active* OutreachOrder (created at resume
         # upload) and advance it to campaign_setup. Falls back to creating a
@@ -390,12 +396,9 @@ def _release_create_reservation(db: Session, user_id: str, reserved: int) -> Non
     if not reserved:
         return
     try:
-        from database.models import UserCredit
         db.rollback()  # discard the failed work; the reservation was committed separately
-        credits = db.query(UserCredit).filter_by(user_id=user_id).with_for_update().first()
-        if credits:
-            credits.used_credits = max(0, credits.used_credits - reserved)
-            db.commit()
+        credits.release(db, user_id, reserved, credits.RELEASE_CREATE_FAILED, actor=str(user_id))
+        db.commit()
     except Exception:
         db.rollback()
         logger.exception("[CAMPAIGN] could not release %d reserved credits for %s", reserved, user_id)
