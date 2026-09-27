@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     # session cookie) instead of failing startup.
     INTERNAL_API_SECRET: str = ""
 
+    # EMAILER (Studojo1/emailer-service). send-template is gated by its own
+    # X-Internal-Secret. Blank secret disables the paid-not-launched nudge
+    # emails (the routing fix still applies); nothing else sends through it.
+    EMAILER_URL: str = "http://emailer-service:8087"
+    EMAILER_INTERNAL_SECRET: str = ""
+    # Founders who get the paid-not-launched alert. Comma-separated.
+    OPS_ALERT_RECIPIENTS: str = "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+
     # OBSERVABILITY
     SENTRY_DSN: str = ""
     SERVICE_NAME: str = "job-outreach-svc"

@@ -1,5 +1,6 @@
+import uuid
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY, BigInteger
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY, BigInteger, JSON
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -360,6 +361,32 @@ class UserCredit(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="user_credits")
+
+
+class SystemEvent(Base):
+    """Shared event log (table owned by the frontend; worker_error rows).
+
+    The launch-nudge sweep records its hourly/daily run markers here (no
+    user_id, so they never show in a user's own event stream). `metadata` is
+    reserved on declarative classes, hence the attribute name `meta`.
+    """
+    __tablename__ = "system_events"
+    id = Column(Text, primary_key=True, default=lambda: str(uuid.uuid4()))
+    event_type = Column(Text, nullable=False)
+    user_id = Column(Text, nullable=True)
+    meta = Column("metadata", JSONB().with_variant(JSON(), "sqlite"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LaunchNudge(Base):
+    """One paid-not-launched email sent to a user (migration 049)."""
+    __tablename__ = "launch_nudges"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    n = Column(Integer, nullable=False)
+    state = Column(String(30), nullable=False)
+    action_url = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class CreditLedger(Base):
