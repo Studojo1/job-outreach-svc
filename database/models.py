@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY, BigInteger
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -182,6 +182,15 @@ class Campaign(Base):
     started_at = Column(DateTime, nullable=True)     # set when status → running
     completed_at = Column(DateTime, nullable=True)   # set when status → completed
     expires_at = Column(DateTime, nullable=True)     # set for duration-limited plans (e.g. email_50 = 8 days)
+    # Migration 049. What this campaign took from the wallet and has given back;
+    # services/credits.py keeps both in step with credit_ledger.
+    credits_reserved = Column(Integer, nullable=True)
+    credits_released = Column(Integer, nullable=False, default=0)
+    # Many campaigns per order. outreach_orders.campaign_id is the legacy
+    # single pointer that a second campaign overwrote (audit P03).
+    outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL", use_alter=True), nullable=True)
+    pause_reason = Column(Text, nullable=True)
+    paused_by = Column(Text, nullable=True)   # 'user' | 'system' | admin user id
     created_at = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("Candidate", back_populates="campaigns")
@@ -227,6 +236,7 @@ class EmailSent(Base):
     # email instead of advancing it toward the 3-attempt cap.
     replacement_for_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="SET NULL"))
     replacement_reason = Column(String(40))             # 'bounce' | 'enrichment_exhausted'
+    status_changed_at = Column(DateTime)                # Migration 049; failure/terminal time, not launch time
     created_at = Column(DateTime, default=datetime.utcnow)
 
     campaign = relationship("Campaign", back_populates="emails_sent")
@@ -350,6 +360,26 @@ class UserCredit(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="user_credits")
+
+
+class CreditLedger(Base):
+    """One row per change to user_credits (migration 049). Written only by
+    services/credits.py, in the same transaction as the balance change.
+
+    delta_total moves total_credits (grants, money refunds); delta_used moves
+    used_credits (reserve > 0, release < 0). Per user the sums equal the wallet.
+    """
+    __tablename__ = "credit_ledger"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    delta_total = Column(Integer, nullable=False, default=0)
+    delta_used = Column(Integer, nullable=False, default=0)
+    reason = Column(String(40), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    payment_order_id = Column(Integer, ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True)
+    actor = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class LinkedInToken(Base):

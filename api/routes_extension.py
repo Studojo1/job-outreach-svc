@@ -724,6 +724,7 @@ def send_one_email(
     at any point leaves the student's balance untouched.
     """
     from api.routes_payment import deduct_credits
+    from services.credits import RESERVE_EXTENSION_SEND
     from services.enrichment.enrichment_service import enrich_single_lead_classified
     from services.email_campaign.gmail_send_service import send_email_via_gmail
 
@@ -907,7 +908,7 @@ def send_one_email(
         )
 
     # ── Charge, only now that it actually went ───────────────────────────
-    if not deduct_credits(db, current_user.id, CREDITS_PER_SEND):
+    if not deduct_credits(db, current_user.id, CREDITS_PER_SEND, reason=RESERVE_EXTENSION_SEND):
         # The balance was checked above, so this is a race with another send.
         # The email is already gone; log it and let the student keep it rather
         # than reporting a failure for something that succeeded.
