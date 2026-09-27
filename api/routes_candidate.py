@@ -371,18 +371,11 @@ async def candidate_chat_stream(
             "has_flex_notes": bool(candidate.flex_notes),
         })
 
-        # Funnel: mark stage 3.
-        #
-        # This fires when the student finishes answering, which is genuinely
-        # what "quiz completed" means, and deliberately still does — the 138
-        # orders marked completed with no target_roles were caused by the
-        # profile write that follows being fire-and-forget, not by this line.
-        # generate-payload is now inline and returns a real status, so a failed
-        # build is surfaced to the student instead of leaving the funnel
-        # claiming a completion that produced no targeting.
-        from services.stage_tracking import safe_mark_stage
-        safe_mark_stage(db, str(current_user.id), "quiz_completed",
-                        candidate_id=candidate_id)
+        # Funnel stage 3 ("quiz_completed") is NOT marked here any more. It is
+        # marked by /generate-payload once the build has written target_roles
+        # (see _mark_quiz_completed_if_targeted): a completion that produced no
+        # targeting is not a completed quiz for the funnel. Decision 2026-09-27
+        # (quiz audit Q21): 138 orders had been marked completed with no roles.
 
         payload = {
             "type": "complete",
@@ -472,6 +465,31 @@ def _apply_payload(candidate: Candidate, payload_dict: dict) -> None:
     )
 
 
+def _has_target_roles(candidate: Candidate) -> bool:
+    roles = candidate.target_roles
+    return isinstance(roles, list) and any(str(r).strip() for r in roles)
+
+
+def _mark_quiz_completed_if_targeted(db: Session, user_id: str, candidate: Candidate) -> bool:
+    """Mark the funnel's quiz_completed stage only once targeting exists.
+
+    Decision 2026-09-27 (quiz audit Q21): "quiz completed" means the quiz
+    produced target_roles, not merely that the last answer arrived. Before this,
+    138 orders were marked completed while their candidate had no roles, so the
+    funnel counted students whose lead discovery had nothing to search for.
+    Returns whether the stage was marked.
+    """
+    if not _has_target_roles(candidate):
+        logger.warning(
+            "[PAYLOAD] Candidate %s has no target_roles after the build; "
+            "quiz_completed NOT marked", candidate.id,
+        )
+        return False
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, user_id, "quiz_completed", candidate_id=candidate.id)
+    return True
+
+
 def _generate_payload_now(db: Session, candidate: Candidate, chat_history_dicts: list[dict]) -> dict:
     """Build the profile payload and store it. Raises on failure."""
     from services.candidate_intelligence.payload_builder import (
@@ -528,6 +546,7 @@ def _run_generate_payload_background(candidate_id: int, chat_history_dicts: list
 
             _apply_payload(candidate, payload_dict)
             db.commit()
+            _mark_quiz_completed_if_targeted(db, str(candidate.user_id), candidate)
 
             logger.info(
                 f"[PAYLOAD-BG] Done for candidate {candidate_id} in {(time.perf_counter() - t_start)*1000:.0f}ms "
@@ -583,6 +602,7 @@ async def generate_payload(
         "[PAYLOAD] Done for candidate %s in %.0fms (deterministic, no LLM)",
         candidate_id, (time.perf_counter() - t_start) * 1000,
     )
+    _mark_quiz_completed_if_targeted(db, str(current_user.id), candidate)
     return {"status": "ready", "candidate_id": candidate_id}
 
 
