@@ -104,7 +104,10 @@ class LeadScore(Base):
     __tablename__ = "lead_scores"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id", ondelete="CASCADE"))
-    overall_score = Column(Integer, nullable=False)
+    # NUMERIC(4,1) (migration 046): the scorer rounds to one decimal on purpose
+    # to break ties, which an INTEGER column silently threw away. asdecimal=False
+    # keeps it a float in Python so JSON serialisation and arithmetic are unchanged.
+    overall_score = Column(Numeric(4, 1, asdecimal=False), nullable=False)
     title_relevance = Column(Integer, nullable=False)
     department_relevance = Column(Integer, nullable=False)
     industry_relevance = Column(Integer, nullable=False)
@@ -264,6 +267,7 @@ class OutreachOrder(Base):
     quiz_started_at         = Column(DateTime, nullable=True)
     quiz_completed_at       = Column(DateTime, nullable=True)
     leads_generated_at      = Column(DateTime, nullable=True)
+    leads_viewed_at         = Column(DateTime, nullable=True)  # migration 047
     payment_page_reached_at = Column(DateTime, nullable=True)
     payment_made_at         = Column(DateTime, nullable=True)
     gmail_connected_at      = Column(DateTime, nullable=True)

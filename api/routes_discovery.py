@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
+
+from services.lead_discovery.domain_utils import clean_domain as _clean_domain
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
@@ -36,6 +38,10 @@ JUSTIFY_TOP_K = 100
 # Azure line. Kept small deliberately: the top-N get rich company-specific facts,
 # everyone else uses the 90k-company cache + a free logo-domain fallback below.
 RESEARCH_TOP_N = 8
+
+# Marks the score-0 row stored for a lead the title filter dropped, so later
+# score adjustments leave it at 0.
+_FILTERED_EXPLANATION = "Filtered out: title is not a hiring decision-maker"
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +126,7 @@ def _fill_logo_domains_free(top_leads: list, lead_id_to_obj: dict) -> int:
 
     filled = 0
     for (name, objs), dom in zip(items, domains):
+        dom = _clean_domain(dom)
         if not dom:
             continue
         for lo in objs:
@@ -240,6 +247,26 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         score_rows[lead_id] = ls
         count += 1
 
+    # Leads the scorer filtered out (title blocklist) get a 0 row rather than
+    # none. With no row they counted toward scoring-ready's total but never
+    # toward scored, so enough of them held the discovery screen at 96%, and
+    # every rescore retried them. 0 ranks them last, which is what the filter
+    # means. They are not in score_rows, so they are never justified.
+    filtered_ids = sorted(lead_id_map.keys() - score_rows.keys())
+    for lead_id in filtered_ids:
+        db.add(LeadScore(
+            lead_id=lead_id,
+            overall_score=0,
+            title_relevance=0,
+            department_relevance=0,
+            industry_relevance=0,
+            seniority_relevance=0,
+            location_relevance=0,
+            explanation=_FILTERED_EXPLANATION,
+        ))
+    if filtered_ids:
+        logger.info("[SCORE_BG] %d leads filtered by title; stored as score 0", len(filtered_ids))
+
     # Commit heuristic scores immediately — durable regardless of what LLM phases do.
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
@@ -319,13 +346,16 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                     continue
                 if profile.domain == (lead_obj.company or "").lower():
                     continue  # company-name fallback / negative-cache sentinel — not a real domain
+                domain = _clean_domain(profile.domain)
+                if not domain:
+                    continue
                 if not lead_obj.company_domain:
-                    lead_obj.company_domain = profile.domain
+                    lead_obj.company_domain = domain
                     backfilled += 1
-                elif lead_obj.company_domain != profile.domain:
+                elif lead_obj.company_domain != domain:
                     logger.info("[ENRICH] corrected lead %d domain %s → %s",
-                                lead_obj.id, lead_obj.company_domain, profile.domain)
-                    lead_obj.company_domain = profile.domain
+                                lead_obj.id, lead_obj.company_domain, domain)
+                    lead_obj.company_domain = domain
                     corrected += 1
             if backfilled or corrected:
                 logger.info("[ENRICH] domain writeback: backfilled %d, corrected %d leads",
@@ -343,8 +373,10 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             # ── Domain-affinity adjustment (round-2) ─────────────────────────
             # Now that fact extraction has run during enrichment, compare each
             # company's `extracted_facts` to the candidate's resume_profile
-            # subdomain + target_industries. Hard mismatches push leads below
-            # the score floor so they're hidden from /candidate/{id}/leads.
+            # subdomain + target_industries. Hard mismatches are pushed down the
+            # ranking, not hidden: the score is clamped at 0 below and
+            # /candidate/{id}/leads has no score floor, so every lead is still
+            # returned, just sorted lower.
             from services.lead_scoring.lead_scoring_service import apply_domain_affinity_to_top_leads
             resume_prof = candidate.resume_profile if isinstance(candidate.resume_profile, dict) else {}
             facts_by_domain = {d: (p.extracted_facts or {}) for d, p in profiles.items()}
@@ -512,13 +544,6 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             "company_description": l.company_description,
         } for l in leads]
 
-        score_rows = {
-            s.lead_id: s
-            for s in db.query(LeadScore).filter(
-                LeadScore.lead_id.in_([l.id for l in leads])
-            ).all()
-        }
-
         from services.lead_scoring.company_intelligence_service import evaluate_company_fit
         candidate_prefs_for_intel = {
             "company_stage": [prefs.get("company_stage", "any")],
@@ -527,8 +552,17 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             "archetype_label": (candidate.resume_profile or {}).get("archetype_label", ""),
             "company_type_avoid": (candidate.resume_profile or {}).get("company_type_avoid", []),
         }
+        # Releases the connection during its LLM calls (it commits the read
+        # transaction first), so the score rows are loaded after it returns.
         company_fit_scores = evaluate_company_fit(lead_dicts, candidate_prefs_for_intel, db)
         logger.info("[COMPANY_INTEL_BG] candidate %d: %d companies evaluated", candidate_id, len(company_fit_scores))
+
+        score_rows = {
+            s.lead_id: s
+            for s in db.query(LeadScore).filter(
+                LeadScore.lead_id.in_([ld["id"] for ld in lead_dicts])
+            ).order_by(LeadScore.id).all()
+        }
 
         for ld in lead_dicts:
             name_lower = (ld.get("company") or "").lower()
@@ -536,7 +570,7 @@ def _run_company_intel_bg(candidate_id: int) -> None:
             if fit is None:
                 continue
             row = score_rows.get(ld["id"])
-            if row is None:
+            if row is None or row.explanation == _FILTERED_EXPLANATION:
                 continue
             fit_pts = round((fit - 1) / 9 * 15)
             current = row.overall_score or 0
@@ -595,6 +629,11 @@ async def search_leads(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    # Record discovery on the user's order (creating it if the user has none),
+    # so a user on the leads pages has a row that says where they are.
+    from services.stage_tracking import safe_advance_discovery_status
+    safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_generating")
+
     # ── Idempotency guard ──────────────────────────────────────────────
     # If this candidate already has a substantial scored lead set from the
     # last 5 minutes, treat the call as a duplicate (e.g. browser retry,
@@ -620,6 +659,7 @@ async def search_leads(
             "returning early without re-running pipeline",
             candidate.id, recent_lead_count,
         )
+        safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
         return {
             "status": "success",
             "leads_collected": total_count,
@@ -776,6 +816,8 @@ async def search_leads(
         # exceeds ingress/browser limits). Frontend loading screen polls
         # /discovery/scoring-ready/{candidate_id} until bullets are ready.
         if count > 0:
+            # Leads are stored; the order is ready for the results page.
+            safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
             background_tasks.add_task(
                 _score_candidate_leads_sync, candidate.id, str(current_user.id)
             )
@@ -818,13 +860,24 @@ async def scoring_ready(
     # renders justifications as they stream in, so the user gets onto their leads in
     # ~seconds instead of staring at 96% for minutes. with_bullets stays in the response
     # as a progress signal for the results page.
-    ready = scored >= max(1, total * 0.9)
-    return {
+    #
+    # A zero-lead run never dispatches scoring (search_leads only does when
+    # count > 0), so scored stays 0 and the old max(1, ...) floor made ready
+    # permanently false: the user sat at 96% until the client's 6-minute
+    # timeout. Nothing is coming, so say so and let the client stop polling.
+    # This endpoint is only polled after POST /discovery/search has returned,
+    # so total == 0 here means the search itself found nobody.
+    zero_leads = total == 0
+    ready = zero_leads or scored >= total * 0.9
+    resp = {
         "ready": ready,
         "total": total,
         "scored": scored,
         "with_bullets": with_bullets,
     }
+    if zero_leads:
+        resp["zero_leads"] = True
+    return resp
 
 
 class ImportFromOutreachRequest(BaseModel):

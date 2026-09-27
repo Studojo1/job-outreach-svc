@@ -93,6 +93,13 @@ jobs:
               META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
               -n studojo
           fi
+          # Service-to-service secret: X-User-Id is only trusted next to a matching
+          # x-studojo-internal header. Read from the same app-secrets key the
+          # frontend uses, so the two can never drift. Without it the header path is
+          # off and the frontend's server-side CRM/extension calls get 401.
+          kubectl set env deployment/${{ env.SERVICE_NAME }} \
+            --from=secret/app-secrets --keys=INTERNAL_API_SECRET \
+            -n studojo
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n studojo --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."
             kubectl get pods -n studojo -l app=${{ env.SERVICE_NAME }} -o wide

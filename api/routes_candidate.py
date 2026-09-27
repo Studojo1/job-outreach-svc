@@ -2,10 +2,10 @@
 
 import asyncio
 import json as _json
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Literal, Optional
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
@@ -14,6 +14,7 @@ from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
 from core.analytics import capture, identify
 
+import hashlib
 import logging
 import time
 from datetime import datetime
@@ -726,13 +727,46 @@ async def get_candidate_profile(
     }
 
 
-@router.get("/{candidate_id}/leads")
-async def get_candidate_leads(
-    candidate_id: int,
+# Plain `def`: this is the product's heaviest poll (hundreds of rows, all
+# blocking SQLAlchemy), so it runs in the threadpool, not on the event loop.
+@router.get("/latest")
+def get_latest_candidate(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get all leads for a candidate with their scores."""
+    """The caller's most recent candidate, for pages that lost the id client-side.
+
+    candidateId otherwise lives only in the browser's localStorage, so a cleared
+    store or a new device sent the user back to resume upload even though their
+    leads were already here.
+    """
+    candidate = (
+        db.query(Candidate.id)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Candidate.id.desc())
+        .first()
+    )
+    return {"candidate_id": candidate.id if candidate else None}
+
+
+@router.get("/{candidate_id}/leads")
+def get_candidate_leads(
+    request: Request,
+    candidate_id: int,
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    fields: Optional[Literal["justification"]] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get a candidate's leads with their scores, best first.
+
+    With no query params this returns every lead, as it always has. `limit` /
+    `offset` page through the same ranked list, and `total` is always the full
+    count before paging. `fields=justification` is the cheap poll: each item is
+    just {id, score: {overall, justification}} so a client that already holds
+    the lead cards can pick up bullets as they stream in.
+    """
     logger.info(f"[LeadSearch] GET /candidate/{candidate_id}/leads — user_id={current_user.id}")
 
     candidate = db.query(Candidate).filter_by(
@@ -742,30 +776,58 @@ async def get_candidate_leads(
         logger.warning(f"[LeadSearch] Candidate {candidate_id} not found for user {current_user.id}")
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    leads = db.query(Lead).filter_by(candidate_id=candidate_id).all()
+    light = fields == "justification"
+
+    # Ordered, so identical polls return identical lists. Heap order moves as
+    # the justification pass rewrites company_domain on rows mid-poll.
+    # Plain column tuples, not ORM objects: building 1,600 mapped instances
+    # (lead + score) was ~70% of this handler's CPU, and it is CPU-bound on a
+    # single-worker pod. Only the columns the response carries are selected.
+    lead_cols = (Lead.id,) if light else (
+        Lead.id, Lead.name, Lead.title, Lead.company, Lead.company_domain,
+        Lead.industry, Lead.location, Lead.linkedin_url, Lead.email,
+        Lead.email_verified, Lead.company_size, Lead.status,
+    )
+    leads = (
+        db.query(*lead_cols)
+        .filter(Lead.candidate_id == candidate_id)
+        .order_by(Lead.id)
+        .all()
+    )
     logger.info(f"[LeadSearch] Leads retrieved from DB: {len(leads)}")
 
-    # Batch-fetch all LeadScores for these leads in one query (was N+1: 1 + len(leads))
-    lead_ids = [l.id for l in leads]
-    scores_by_lead: dict[int, LeadScore] = {}
-    if lead_ids:
-        for s in db.query(LeadScore).filter(LeadScore.lead_id.in_(lead_ids)).all():
+    # One joined query for the scores. Ordered by id so that if a lead ever has
+    # two score rows, the newest wins every time.
+    scores_by_lead = {}
+    if leads:
+        score_rows = (
+            db.query(LeadScore.lead_id, LeadScore.overall_score, LeadScore.justification_json)
+            .join(Lead, Lead.id == LeadScore.lead_id)
+            .filter(Lead.candidate_id == candidate_id)
+            .order_by(LeadScore.id)
+            .all()
+        )
+        for s in score_rows:
             scores_by_lead[s.lead_id] = s
 
-    # Score-floor cutoff disabled. Users pay for ~500 emails so they need
-    # to see ~500 leads — even the noisier ones. Quality is preserved by
-    # the sort order (high-score leads at the top, garbage at the bottom).
-    # Set to a value > 0 to re-enable hiding the very-clearly-off ones.
-    SCORE_FLOOR = 0
+    # No score floor: users pay for ~500 emails so they see every lead, and
+    # quality comes from the sort order. Unscored leads (discovery may still be
+    # running for them) are included too.
     results = []
-    hidden_count = 0
     for lead in leads:
         score = scores_by_lead.get(lead.id)
-        # Hide clearly bad leads. Unscored leads (score is None) are NOT hidden —
-        # discovery may still be running for them and we want them to surface.
-        if score is not None and score.overall_score is not None and score.overall_score < SCORE_FLOOR:
-            hidden_count += 1
+        if light:
+            results.append({
+                "id": lead.id,
+                "score": {
+                    "overall": score.overall_score,
+                    "justification": score.justification_json,
+                } if score else None,
+            })
             continue
+        # `explanation` and the five *_relevance ints are no longer sent: no
+        # client reads them (frontend, admin panel and extension all checked),
+        # and explanation was one per-run string repeated on every lead.
         results.append({
             "id": lead.id,
             "name": lead.name,
@@ -781,27 +843,36 @@ async def get_candidate_leads(
             "status": lead.status,
             "score": {
                 "overall": score.overall_score,
-                "title_relevance": score.title_relevance,
-                "department_relevance": score.department_relevance,
-                "industry_relevance": score.industry_relevance,
-                "seniority_relevance": score.seniority_relevance,
-                "location_relevance": score.location_relevance,
-                "explanation": score.explanation,
                 "justification": score.justification_json,
             } if score else None,
         })
 
-    # Sort by score descending
-    results.sort(key=lambda x: (x["score"]["overall"] if x["score"] else 0), reverse=True)
+    # Sort by score descending, lead id ascending as a total-order tiebreak
+    results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] else 0), x["id"]))
 
-    if hidden_count:
-        logger.info(
-            "[LeadSearch] Hidden %d/%d leads scoring below %d (clear mismatches)",
-            hidden_count, len(leads), SCORE_FLOOR,
-        )
+    total = len(results)
+    if offset or limit is not None:
+        results = results[offset: offset + limit if limit is not None else None]
 
-    logger.info(f"[LeadSearch] Returning {len(results)} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
-    return {"leads": results, "total": len(results)}
+    logger.info(f"[LeadSearch] Returning {len(results)}/{total} leads to frontend (scored: {sum(1 for r in results if r['score'])})")
+
+    # ETag over the exact body. The results page polls this every 15s while
+    # bullets stream in; once nothing has changed, a poll costs a 304 and no
+    # payload instead of the full list again.
+    #
+    # Serialised exactly once: the same bytes are hashed and sent. This handler
+    # is CPU-bound on a single-worker pod (800 leads per call), so encoding the
+    # body twice, once for the tag and once for the response, doubled the time
+    # every other request on the pod spent waiting.
+    content = _json.dumps(
+        {"leads": results, "total": total}, separators=(",", ":"), default=str,
+    ).encode()
+    etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if_none_match = request.headers.get("if-none-match", "")
+    if etag in [t.strip() for t in if_none_match.split(",")]:
+        return Response(status_code=304, headers=headers)
+    return Response(content, media_type="application/json", headers=headers)
 
 
 class FlexNotesRequest(BaseModel):
