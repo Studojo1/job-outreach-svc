@@ -170,7 +170,7 @@ async def linkedin_enrich(
     if not proxycurl_key:
         raise HTTPException(
             status_code=501,
-            detail="PROXYCURL_API_KEY not configured. Add it to .env to enable this tool.",
+            detail="This enrichment provider is not configured.",
         )
 
     try:
@@ -184,7 +184,10 @@ async def linkedin_enrich(
                 headers={"Authorization": f"Bearer {proxycurl_key}"},
             )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Proxycurl request failed: {e}")
+        # The reason stays in the logs; `detail` is rendered to the user, so it
+        # must not carry the provider name or the upstream error text.
+        logger.warning("[LEADSTEST] linkedin enrich request failed: %s", e)
+        raise HTTPException(status_code=502, detail="Enrichment request failed.")
 
     if not resp.ok:
         raise HTTPException(
