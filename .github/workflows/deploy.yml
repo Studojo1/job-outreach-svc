@@ -81,6 +81,7 @@ jobs:
             AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
             AZURE_OPENAI_API_VERSION=2025-04-01-preview \
             AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small \
+            POSTHOG_KEY=${{ secrets.POSTHOG_KEY }} \
             -n studojo
           # Wire the residential proxy (LinkedIn discovery + sending) from app-secrets.
           kubectl set env deployment/${{ env.SERVICE_NAME }} -n studojo \

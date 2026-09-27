@@ -1,51 +1,136 @@
-"""Mesa Signal Engine — turn a search's scraped jobs into ranked company SIGNALS.
+"""Mesa Signal Engine — turn a pile of scraped jobs into ranked company SIGNALS.
 
-General-purpose (works for ANY search, not just sales): a single posting is noise,
-but the combination of independent signals a company emits is intent. Scores every
-company across independent families and rewards CONFLUENCE (2+ = a real signal).
-Pure function over the standard Mesa job dicts — no external calls, no auth.
+Same idea the paid tools use (Honeylead / dfy.outreachai / TheirStack): a single
+job posting is noise, but the *combination* of independent signals a company emits
+is intent. This scores every company across independent signal families and
+rewards CONFLUENCE (2+ families = a real signal). Pure function over the standard
+Mesa job dicts — no external calls, no auth, no Apollo — so it runs instantly over
+whatever a search already scraped, from any source.
 
-Signal families (all keyword-agnostic — the jobs are already the search's matches):
-  multi_role       hiring 3+ roles you're tracking = actively scaling in your area
-  leadership_open  a Head/VP/Director/Chief/Lead/Chief-of-Staff role is open
-  founder_post     a role came from a founder/recruiter hiring post (high intent)
-  fresh            a role was posted in the last ~10 days
-  multi_source     the company shows up from 2+ sources (corroboration)
-  sales_build      (sales searches only) hiring junior sales but no sales leader
-  revops           (sales searches only) a RevOps / Sales Ops hire = leader follows
-Plus enrichment families folded in later by intelligence.attach_enrichment
-(fresh_funding, leader_departure, enterprise_motion, enterprise_ready).
+Signal families (computable from title / company / posted_date / source / post_text):
+  leader_seat   a live Head/VP/Director/Chief of Sales/Revenue/GTM role
+  no_leader     'no leader yet' language in a title/post (founding / first / 0-to-1 / build GTM)
+  army          hiring junior sales roles (SDR/AE/BDR) but NO leadership sales role
+  surge         3+ open sales roles at once
+  revops        a RevOps / Sales Ops hire = they're systematizing sales; a leader usually follows
+  founder_post  the role came from a founder/recruiter hiring POST (source=linkedin_posts) = high intent
 """
 
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
 
 _LEADER = re.compile(
-    r"\b(head of|head[,\- ]|vp\b|v\.p|vice president|director of|director[,\- ]|chief|"
-    r"cro\b|cmo\b|cto\b|cfo\b|coo\b|chief of staff|founder'?s office|country head|country manager|"
-    r"national head|regional head|global head|svp|principal|\blead\b)\b", re.I)
-_SALES = re.compile(r"\b(sales|revenue|gtm|go[- ]to[- ]market|business development|account executive|\bae\b|quota)\b", re.I)
-_JUNIOR_SALES = re.compile(r"\b(sdr|bdr|account executive|\bae\b|inside sales|sales development|sales executive|business development (rep|associate|executive)|sales associate)\b", re.I)
-_SALES_LEADER = re.compile(r"\b(head|vp|vice president|director|chief|cro)\b.*\b(sales|revenue|gtm|commercial)\b", re.I)
-_REVOPS = re.compile(r"\b(revenue operations|revops|rev ops|sales operations|sales ops|gtm operations|sales enablement|deal desk)\b", re.I)
+    r"\b(head of|head[,\- ]|vp\b|v\.p|vice president|director of|director[,\- ]|chief|cro\b|"
+    r"national head|country head|country manager|zonal head|regional head|business head|"
+    r"global head|svp|founding (gtm|sales|revenue))\b", re.I)
+_SALES = re.compile(
+    r"\b(sales|revenue|gtm|go[- ]to[- ]market|growth|partnership|business development|"
+    r"enterprise|commercial|account)\b", re.I)
+_JUNIOR = re.compile(
+    r"\b(sdr|bdr|account executive|\bae\b|inside sales|sales development|sales executive|"
+    r"business development (rep|associate|executive)|sales associate|sales representative|telecaller)\b", re.I)
+_INTENT = re.compile(
+    r"\b(founding|first (sales|commercial|gtm|revenue) hire|0[ -]?to[ -]?1|0-1|from scratch|"
+    r"build (the|our|out) (sales|gtm|go[- ]to[- ]market|revenue|commercial)|establish (the )?sales|"
+    r"player[- ]coach|set up (the )?sales|reports? (directly )?to (the )?(founder|ceo))\b", re.I)
+_REVOPS = re.compile(
+    r"\b(revenue operations|revops|rev ops|sales operations|sales ops|gtm operations|"
+    r"crm (admin|manager)|salesforce admin|hubspot admin|sales enablement|deal desk)\b", re.I)
+
+# ── Additional signal families (all computed from the same scraped job data) ──
+# Funding / scaling: an explicit fundraise or "we're scaling" marker in the post.
+_FUNDING = re.compile(
+    r"\b(series [a-e]\b|seed round|pre[- ]?seed|just raised|recently raised|raised (\$|usd|inr|₹|€|£)|"
+    r"well[- ]funded|backed by|y[- ]?combinator|yc ?[swf]?\d{2}|angel[- ]backed|newly funded|"
+    r"fresh (round of )?funding|closed our (seed|series)|hyper[- ]?growth|scaling (fast|rapidly))\b", re.I)
+# Org maturity / churn: a seat opened by turnover or team expansion, not greenfield.
+_CHURN = re.compile(
+    r"\b(back[- ]?fill|replacing|replacement for|maternity cover|parental cover|"
+    r"due to (growth|expansion|attrition)|re[- ]?hir(e|ing)|newly vacated|stepping (down|into))\b", re.I)
+# GTM build: marketing / demand-gen / growth LEADERSHIP alongside sales = full engine.
+_MKTG_LEAD = re.compile(
+    r"\b(head of (marketing|growth|demand|brand|content)|vp (of )?(marketing|growth)|"
+    r"marketing director|director of (marketing|growth|demand)|cmo\b|demand gen(eration)?|"
+    r"growth (lead|head|manager)|brand (lead|head|director)|head of performance)\b", re.I)
+# Geo expansion language: entering a new market / first person on the ground.
+_GEO = re.compile(
+    r"\b(first (hire|employee|team member|person) in|expanding (in|into|to)|"
+    r"new (office|market|region) in|opening (our|a)[^.]{0,25}office|launching in|"
+    r"establish(ing)? (our )?presence in|ground zero for)\b", re.I)
+# "Remote"/generic locations that must NOT count as distinct geos for expansion.
+_GENERIC_LOC = re.compile(r"^(remote|anywhere|flexible|worldwide|global|india|—|n/?a|)$", re.I)
+
+# ── Negative signals (suppressors) — dock the score, they mean bad timing ──────
+# Leader already hired: pitching a Head-of-Sales seat they just filled is wasted.
+_FILLED = re.compile(
+    r"\b(welcome[sd]? (our )?new (head|vp|chief|director|cro|cmo)|"
+    r"(thrilled|excited|happy) to (welcome|announce)[^.]{0,40}(joined|joins|as (our )?(head|vp|chief|cro))|"
+    r"has joined (us )?as (our )?(head|vp|chief|cro|cmo)|role (has been )?filled|position closed)\b", re.I)
+# Contraction, not expansion: worst possible time to sell into them.
+_LAYOFF = re.compile(
+    r"\b(layoff|lay off|laid off|restructur|downsiz|hiring freeze|freeze on hiring|"
+    r"reduction in force|\brif\b|winding down|shutting down)\b", re.I)
+
+
+def _age_days(s, now=None):
+    """Best-effort age of a posting in days from a messy posted_date string.
+    Handles ISO dates and relative labels ('3 days ago', 'today'). Returns None
+    when unparseable so the caller can treat it as neutral, not stale."""
+    if not s:
+        return None
+    from datetime import datetime, timedelta
+    now = now or datetime.utcnow()
+    txt = str(s).strip().lower()
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", txt)
+    if m:
+        try:
+            d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return max(0, (now - d).days)
+        except ValueError:
+            return None
+    if "today" in txt or "just" in txt or "hour" in txt or "minute" in txt:
+        return 0
+    if "yesterday" in txt:
+        return 1
+    m = re.search(r"(\d+)\s*(day|week|month)", txt)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        return n * (1 if unit == "day" else 7 if unit == "week" else 30)
+    return None
+
+
+def _recency_factor(age):
+    """Multiplier that keeps fresh signals ahead of stale ones. Unknown age is a
+    mild discount, not a penalty (many good sources omit dates)."""
+    if age is None:
+        return 0.9
+    if age <= 7:
+        return 1.0
+    if age <= 14:
+        return 0.95
+    if age <= 30:
+        return 0.85
+    if age <= 60:
+        return 0.7
+    return 0.55
 
 _FAMILY_WEIGHT = {
-    "multi_role": 18, "leadership_open": 16, "founder_post": 22, "fresh": 8,
-    "multi_source": 6, "sales_build": 12, "revops": 8,
+    "leader_seat": 25, "no_leader": 18, "army": 18, "surge": 10, "revops": 12, "founder_post": 20,
+    "funding": 16, "geo_expansion": 14, "org_maturity": 12, "gtm_build": 14,
 }
 _FAMILY_LABEL = {
-    "multi_role": "Hiring surge (3+ roles you track)",
-    "leadership_open": "Leadership role open",
-    "founder_post": "Founder/recruiter hiring post (high intent)",
-    "fresh": "Fresh posting (last ~10 days)",
-    "multi_source": "Corroborated across 2+ sources",
-    "sales_build": "Building a sales team, no leader yet",
+    "leader_seat": "Leadership sales seat open (live)",
+    "no_leader": "'No leader yet' language",
+    "army": "Hiring an army, no general",
+    "surge": "Hiring surge (3+ sales roles)",
     "revops": "RevOps hire (systematizing sales)",
+    "founder_post": "Founder/recruiter hiring post (high intent)",
+    "funding": "Funded / scaling fast",
+    "geo_expansion": "Expanding into a new market",
+    "org_maturity": "Team churn or seniority ladder (org maturing)",
+    "gtm_build": "Building the full GTM engine (marketing + sales)",
 }
-# families that are meaningful enough to count toward confluence (exclude the two
-# soft ones so 'fresh + multi_source' alone isn't treated as strong intent)
-_CORE = {"multi_role", "leadership_open", "founder_post", "sales_build", "revops"}
 
 
 def _norm(name: str) -> str:
@@ -54,40 +139,37 @@ def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", n)
 
 
-def _is_fresh(posted: str) -> bool:
-    if not posted:
-        return False
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(posted))
-    if not m:
-        return False
-    try:
-        d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - d).days <= 10
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _read(fams: set, lead_title: str, n_roles: int) -> str:
-    if "founder_post" in fams:
-        return "A founder/recruiter is personally posting this hire — reach them directly, the intent is explicit."
+def _read(families: set, top_leader: str) -> str:
+    if "founder_post" in families:
+        return "A founder/recruiter is personally posting the hire — reach them directly, the intent is explicit."
     bits = []
-    if "leadership_open" in fams and lead_title:
-        bits.append(f"Opening a leadership role ({lead_title[:40]}) — they're building this function out.")
-    if "multi_role" in fams:
-        bits.append(f"Hiring {n_roles} roles you're tracking — actively scaling in your area.")
-    if "sales_build" in fams:
-        bits.append("Building a sales team with no leader yet — the leadership seat is the gap.")
-    if "revops" in fams:
-        bits.append("A RevOps hire usually precedes a VP Sales hire by a quarter.")
-    if not bits:
-        bits.append("On your radar — watch for a second signal before investing time.")
-    return " ".join(bits)
+    if "leader_seat" in families:
+        bits.append(f"Live leadership role ({top_leader[:40]}) — apply direct and own the function.")
+    if "army" in families:
+        bits.append("Building a sales team with no leader — pitch the Head-of-Sales seat.")
+    if "revops" in families:
+        bits.append("A RevOps hire means they're systematizing sales; a VP Sales hire usually follows within a quarter.")
+    if "no_leader" in families:
+        bits.append("Job language says the sales org is being built from zero — greenfield leadership seat.")
+    if "surge" in families and not bits:
+        bits.append("Hiring across sales at volume — a leader to run it is the natural next hire.")
+    if "funding" in families:
+        bits.append("Fresh funding or explicit scaling language — budget is unlocked and hiring is a priority right now.")
+    if "geo_expansion" in families:
+        bits.append("Opening the same role in a new market — they're expanding and need people on the ground.")
+    if "gtm_build" in families:
+        bits.append("Hiring marketing/growth leadership next to sales — they're building the whole GTM engine, not one seat.")
+    if "org_maturity" in families and not bits:
+        bits.append("Backfills and a junior-to-senior ladder — the org is maturing and formalizing its team.")
+    return " ".join(bits) or "Sales hiring detected — watch for a second signal before investing time."
 
 
 def score_jobs(jobs: list[dict]) -> list[dict]:
-    """Group a search's jobs by company and score each on the signal families.
-    Ranked by score; confluence (2+ core families) earns a bonus."""
+    """Group jobs by company and score each on the signal families above.
+    Returns companies ranked by score (highest first). Confluence (2+ families)
+    earns a bonus; single-signal companies are kept but ranked below."""
     by_company: dict[str, dict] = {}
+    role_titles: dict[str, list] = defaultdict(list)
     for j in jobs:
         company = (j.get("company") or "").strip()
         if not company or company == "—":
@@ -97,59 +179,102 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             continue
         rec = by_company.setdefault(k, {"company": company, "sources": set(), "roles": []})
         rec["sources"].add(j.get("source") or "")
+        title = j.get("title") or ""
+        text = f"{title} {j.get('post_text') or ''}"
         rec["roles"].append({
-            "title": j.get("title") or "", "posted_date": j.get("posted_date"),
-            "source": j.get("source"), "text": f"{j.get('title') or ''} {j.get('post_text') or ''}",
+            "title": title, "url": j.get("url"), "source": j.get("source"),
+            "posted_date": j.get("posted_date"), "location": j.get("location") or "",
+            "_text": text,
         })
+        role_titles[k].append(title)
 
     out = []
     for k, rec in by_company.items():
-        roles = rec["roles"]
-        titles = [r["title"] for r in roles]
+        titles = [r["title"] for r in rec["roles"]]
+        texts = [r["_text"] for r in rec["roles"]]
         fams: set = set()
-        # general families
-        if len(roles) >= 3:
-            fams.add("multi_role")
-        leaders = [t for t in titles if _LEADER.search(t)]
+        leaders = [t for t in titles if _LEADER.search(t) and _SALES.search(t)]
         if leaders:
-            fams.add("leadership_open")
-        if "linkedin_posts" in rec["sources"]:
+            fams.add("leader_seat")
+        if any(_INTENT.search(t) for t in texts):
+            fams.add("no_leader")
+        juniors = [t for t in titles if _JUNIOR.search(t)]
+        if juniors and not leaders:
+            fams.add("army")
+        if len([t for t in titles if _SALES.search(t)]) >= 3:
+            fams.add("surge")
+        if any(_REVOPS.search(t) for t in titles):
+            fams.add("revops")
+        if "linkedin_posts" in rec["sources"] and any(_SALES.search(t) for t in titles):
             fams.add("founder_post")
-        if any(_is_fresh(r["posted_date"]) for r in roles):
-            fams.add("fresh")
-        if len([s for s in rec["sources"] if s]) >= 2:
-            fams.add("multi_source")
-        # sales-specific (only when the roles are clearly sales)
-        sales_titles = [t for t in titles if _SALES.search(t)]
-        if sales_titles:
-            junior = [t for t in sales_titles if _JUNIOR_SALES.search(t)]
-            has_sales_leader = any(_SALES_LEADER.search(t) for t in sales_titles)
-            if junior and not has_sales_leader:
-                fams.add("sales_build")
-            if any(_REVOPS.search(t) for t in titles):
-                fams.add("revops")
+        # Funding / scaling: fundraise or hyper-growth language anywhere in the posts.
+        if any(_FUNDING.search(x) for x in texts):
+            fams.add("funding")
+        # GTM build: a marketing/growth leadership role present (ideally alongside sales).
+        if any(_MKTG_LEAD.search(t) for t in titles):
+            fams.add("gtm_build")
+        # Org maturity: churn/backfill language, OR a junior->senior ladder in sales.
+        if any(_CHURN.search(x) for x in texts) or (leaders and juniors):
+            fams.add("org_maturity")
+        # Geo expansion: explicit expansion language, OR the SAME role open in 2+ real geos.
+        if any(_GEO.search(x) for x in texts):
+            fams.add("geo_expansion")
+        else:
+            by_role_geo: dict = defaultdict(set)
+            for r in rec["roles"]:
+                loc = re.sub(r"\(.*?\)", " ", (r.get("location") or "")).strip()
+                city = re.split(r"[,/|]", loc)[0].strip()
+                if city and not _GENERIC_LOC.match(city):
+                    by_role_geo[_norm(r["title"])].add(city.lower())
+            if any(len(geos) >= 2 for geos in by_role_geo.values()):
+                fams.add("geo_expansion")
         if not fams:
             continue
-
         base = sum(_FAMILY_WEIGHT[f] for f in fams)
-        n_core = len(fams & _CORE)
-        conf = 25 if n_core >= 3 else (15 if n_core >= 2 else 0)
-        score = min(100, base + conf)
-        dates = [r["posted_date"] for r in roles if r.get("posted_date")]
+        n = len(fams)
+        conf = 25 if n >= 3 else (15 if n >= 2 else 0)
+        # Source diversity: the same intent seen across independent sources
+        # (ATS + founder post + aggregator) is far more credible than one feed.
+        n_src = len([s for s in rec["sources"] if s])
+        src_bonus = 10 if n_src >= 3 else (5 if n_src >= 2 else 0)
+
+        # Recency: weight the whole score by how fresh the freshest role is.
+        ages = [a for a in (_age_days(r.get("posted_date")) for r in rec["roles"]) if a is not None]
+        freshest_age = min(ages) if ages else None
+        rf = _recency_factor(freshest_age)
+
+        raw = base + conf + src_bonus
+        score = raw * rf
+
+        # Negative signals: they already solved it, or it's the wrong time.
+        warnings: list[str] = []
+        if any(_FILLED.search(x) for x in texts) and "leader_seat" not in fams:
+            score *= 0.4
+            warnings.append("Leadership role looks recently filled — likely too late.")
+        if any(_LAYOFF.search(x) for x in texts):
+            score *= 0.3
+            warnings.append("Layoff / hiring-freeze language — bad timing to sell in.")
+
+        score = max(0, min(100, round(score)))
+        dates = [r["posted_date"] for r in rec["roles"] if r.get("posted_date")]
         out.append({
             "company": rec["company"],
             "score": score,
-            "n_families": len(fams),
-            "confluence": n_core >= 2,
+            "n_families": n,
+            "confluence": n >= 2,
             "families": sorted(fams),
             "signals": [_FAMILY_LABEL[f] for f in sorted(fams)],
-            "top_role": (leaders[0] if leaders else (titles[0] if titles else "")),
-            "role_count": len(roles),
+            "warnings": warnings,
+            "top_role": leaders[0] if leaders else (titles[0] if titles else ""),
+            "role_count": len(rec["roles"]),
             "sample_roles": titles[:6],
             "sources": sorted(s for s in rec["sources"] if s),
             "freshest_posted": max(dates) if dates else None,
-            "read": _read(fams, leaders[0] if leaders else "", len(roles)),
+            "freshest_age_days": freshest_age,
+            "recency_factor": round(rf, 2),
+            "read": _read(fams, leaders[0] if leaders else ""),
             "enriched": False,
         })
-    out.sort(key=lambda x: (-x["score"], x["company"]))
+    # Rank by score, then confluence, then most-recent, then name (stable).
+    out.sort(key=lambda x: (-x["score"], -x["n_families"], x["freshest_age_days"] if x["freshest_age_days"] is not None else 999, x["company"]))
     return out

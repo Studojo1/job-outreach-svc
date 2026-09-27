@@ -38,9 +38,31 @@ def _kw_match(text: str, keywords: str) -> bool:
 
 
 def _get(url: str, headers: dict | None = None, proxy: bool = False):
+    """GET with retries. Tries direct first, then (if a proxy is configured)
+    falls back through the proxy so a source that's geo/IP-blocked on the
+    datacenter IP still resolves. Retries twice per route on 5xx / network
+    errors. Raises the last error only if every route fails."""
     from core.config import settings
-    px = ((getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None) if proxy else None
-    return httpx.get(url, headers=headers or _H, timeout=_T, verify=False, proxy=px, follow_redirects=True)
+    proxy_url = (getattr(settings, "LINKEDIN_PROXY_URL", "") or "").strip() or None
+    routes: list = [proxy_url] if proxy else [None]
+    if not proxy and proxy_url:
+        routes.append(proxy_url)  # direct failed -> retry through residential proxy
+    last: Exception | httpx.Response | None = None
+    for px in routes:
+        for _ in range(2):
+            try:
+                r = httpx.get(url, headers=headers or _H, timeout=_T, verify=False,
+                              proxy=px, follow_redirects=True)
+                if r.status_code < 500:
+                    return r
+                last = r
+            except Exception as e:  # noqa: BLE001
+                last = e
+    if isinstance(last, Exception):
+        raise last
+    if last is not None:
+        return last
+    raise RuntimeError(f"GET failed with no response: {url}")
 
 
 def _src_linkedin(keywords, location, date_posted, workplace_types, experience_levels, max_results):
@@ -307,6 +329,132 @@ def _src_naukri(keywords, location, *_):
     return out
 
 
+# ── Direct ATS boards (Greenhouse / Lever / Ashby) ──────────────────────────
+# The source of truth for most startups — fresher and richer than aggregators,
+# no auth needed. These are per-company endpoints, so we iterate a curated board
+# list and keyword-filter. Extend/override via env MESA_ATS_BOARDS as a
+# comma-list of "provider:token" (e.g. "greenhouse:stripe,ashby:ramp").
+_ATS_DEFAULT: list[tuple[str, str]] = [
+    ("greenhouse", "stripe"), ("greenhouse", "databricks"), ("greenhouse", "gitlab"),
+    ("greenhouse", "cloudflare"), ("greenhouse", "coinbase"), ("greenhouse", "robinhood"),
+    ("greenhouse", "dropbox"), ("greenhouse", "benchling"), ("greenhouse", "gusto"),
+    ("greenhouse", "samsara"), ("greenhouse", "instacart"), ("greenhouse", "doordash"),
+    ("greenhouse", "brex"), ("greenhouse", "plaid"), ("greenhouse", "affirm"),
+    ("ashby", "ramp"), ("ashby", "linear"), ("ashby", "vanta"), ("ashby", "mercury"),
+    ("ashby", "posthog"), ("ashby", "hex"), ("ashby", "watershed"),
+]
+# Lever handles vary per company (often 404); the provider path stays supported
+# for boards added explicitly via MESA_ATS_BOARDS (e.g. "lever:yourcompany").
+
+
+def _ats_boards() -> list[tuple[str, str]]:
+    from core.config import settings
+    raw = (getattr(settings, "MESA_ATS_BOARDS", "") or "").strip()
+    if raw:
+        out = []
+        for chunk in raw.split(","):
+            if ":" in chunk:
+                prov, tok = chunk.split(":", 1)
+                out.append((prov.strip().lower(), tok.strip()))
+        return out or _ATS_DEFAULT
+    return _ATS_DEFAULT
+
+
+def _src_ats(keywords, location, date_posted, workplace_types, experience_levels, max_results):
+    """Scrape live jobs straight off company ATS boards, keyword-filtered."""
+    boards = _ats_boards()
+    cap = max_results or 60
+    per_board = max(2, cap // max(1, len(boards)))
+    out: list[dict] = []
+    loc_kw = (location or "").split(",")[0].strip().lower()
+    for provider, token in boards:
+        if len(out) >= cap:
+            break
+        got = 0
+        try:
+            if provider == "greenhouse":
+                rows = _get(f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs").json().get("jobs", [])
+                items = [(r.get("title", ""), (r.get("location") or {}).get("name", ""),
+                          str(r.get("id")), r.get("absolute_url", ""), (r.get("updated_at") or "")[:10]) for r in rows]
+            elif provider == "lever":
+                rows = _get(f"https://api.lever.co/v0/postings/{token}?mode=json").json()
+                items = [(r.get("text", ""), (r.get("categories") or {}).get("location", ""),
+                          str(r.get("id")), r.get("hostedUrl", ""), "") for r in rows]
+            elif provider == "ashby":
+                rows = _get(f"https://api.ashbyhq.com/posting-api/job-board/{token}").json().get("jobs", [])
+                items = [(r.get("title", ""), r.get("location", ""), str(r.get("id")),
+                          r.get("jobUrl", ""), (r.get("publishedAt") or "")[:10]) for r in rows]
+            else:
+                continue
+        except Exception as e:  # noqa: BLE001
+            logger.info("[MESA] ats %s/%s failed: %s", provider, token, e)
+            continue
+        company = token.replace("-", " ").title()
+        for title, loc, jid, url, posted in items:
+            if got >= per_board or len(out) >= cap:
+                break
+            if not _kw_match(title, keywords):
+                continue
+            if loc_kw and loc and loc_kw not in loc.lower() and "remote" not in loc.lower():
+                continue
+            out.append({
+                "external_id": f"{provider}:{token}:{jid}", "title": title,
+                "company": company, "location": loc or "—", "posted_date": posted or None,
+                "url": url,
+            })
+            got += 1
+    logger.info("[MESA] ats -> %d jobs across %d boards", len(out), len(boards))
+    return out
+
+
+def _src_himalayas(keywords, location, *_):
+    """Himalayas remote-jobs API (no key)."""
+    out: list[dict] = []
+    try:
+        data = _get("https://himalayas.app/jobs/api?limit=100").json()
+        for j in data.get("jobs", []):
+            title = j.get("title", "")
+            if not _kw_match(f"{title} {j.get('excerpt', '')}", keywords):
+                continue
+            locs = ", ".join(j.get("locationRestrictions", []) or []) or "Remote"
+            out.append({
+                "external_id": str(j.get("guid") or j.get("applicationLink")),
+                "title": title, "company": j.get("companyName", ""),
+                "location": locs, "posted_date": None,
+                "url": j.get("applicationLink") or j.get("guid", ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] himalayas failed: %s", e)
+    return out
+
+
+def _src_adzuna(keywords, location, *_):
+    """Adzuna aggregated jobs API. Key-gated: no-op unless ADZUNA_APP_ID/KEY set."""
+    from core.config import settings
+    app_id = (getattr(settings, "ADZUNA_APP_ID", "") or "").strip()
+    app_key = (getattr(settings, "ADZUNA_APP_KEY", "") or "").strip()
+    if not (app_id and app_key):
+        return []
+    country = (getattr(settings, "ADZUNA_COUNTRY", "") or "in").strip().lower()
+    out: list[dict] = []
+    try:
+        url = (f"https://api.adzuna.com/v1/api/jobs/{country}/search/1"
+               f"?app_id={app_id}&app_key={app_key}&results_per_page=50&content-type=application/json"
+               f"&what={urllib.parse.quote(keywords or '')}")
+        if location:
+            url += "&where=" + urllib.parse.quote(location)
+        for j in _get(url).json().get("results", []):
+            out.append({
+                "external_id": str(j.get("id")), "title": j.get("title", ""),
+                "company": (j.get("company") or {}).get("display_name", ""),
+                "location": (j.get("location") or {}).get("display_name", ""),
+                "posted_date": (j.get("created") or "")[:10], "url": j.get("redirect_url", ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[MESA] adzuna failed: %s", e)
+    return out
+
+
 # Registry — every value has the same signature.
 SOURCE_SCRAPERS = {
     "linkedin": _src_linkedin,
@@ -321,13 +469,16 @@ SOURCE_SCRAPERS = {
     "weworkremotely": _src_weworkremotely,
     "indeed": _src_indeed,    # best-effort — often Cloudflare-blocked
     "naukri": _src_naukri,    # best-effort — often reCAPTCHA-gated
+    "ats": _src_ats,          # direct Greenhouse/Lever/Ashby boards (source of truth)
+    "himalayas": _src_himalayas,
+    "adzuna": _src_adzuna,    # key-gated (ADZUNA_APP_ID/KEY)
 }
 ALL_SOURCES = list(SOURCE_SCRAPERS.keys())
 # Sources that reliably return keyword-relevant data with no auth / captcha / paid API.
-RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "getro", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "weworkremotely"]
+RELIABLE_SOURCES = ["linkedin", "linkedin_posts", "getro", "ats", "themuse", "remotive", "remoteok", "arbeitnow", "jobicy", "himalayas", "weworkremotely"]
 # Beta: auth-/bot-walled or no real keyword search — kept for when an aggregator
 # key (e.g. Adzuna / SerpApi) is wired. instahyre's public API ignores the query;
-# indeed is Cloudflare-blocked; naukri requires reCAPTCHA.
-BETA_SOURCES = ["instahyre", "indeed", "naukri"]
-# Defaults for a new search.
-DEFAULT_SOURCES = ["linkedin", "getro", "themuse", "remotive", "jobicy"]
+# indeed is Cloudflare-blocked; naukri requires reCAPTCHA; adzuna needs a key.
+BETA_SOURCES = ["instahyre", "indeed", "naukri", "adzuna"]
+# Defaults for a new search. ATS gives direct-from-company roles up front.
+DEFAULT_SOURCES = ["linkedin", "ats", "getro", "themuse", "remotive", "jobicy"]

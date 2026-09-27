@@ -329,7 +329,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
                     location_hint=location_hint,
                 )
 
-            # Cache-only pass for all companies — top-20 are now cached.
+            # Cache-only pass for all companies — the top-N are now cached.
             profiles = bulk_enrich_top_companies(
                 db, top_companies, enable_scrape=False, enable_llm_research=False
             )

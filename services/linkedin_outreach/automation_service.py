@@ -444,6 +444,13 @@ async def send_connection_request(
                         f"Session {'revoked' if revoked else 'expired'} (status {r.status_code})",
                         revoked=revoked,
                     )
+                # Already invited (or invite still pending): LinkedIn returns
+                # 400 CANT_RESEND_YET. The connection request IS live on LinkedIn,
+                # so treat it as sent and skip the Playwright fallback (which would
+                # launch a browser, see "Pending", and waste proxy bandwidth).
+                if "CANT_RESEND_YET" in (r.text or ""):
+                    logger.info("send_connection_request: %s already has a pending invite — marking sent", profile_urn)
+                    return True, ""
                 res = r
 
         last_status = res.status_code if res is not None else "no_response"
@@ -1289,6 +1296,12 @@ class LinkedInAutomationDaemon:
             .first()
         )
         last_sent = _last_row[0] if _last_row else None
+        # Postgres timestamptz columns come back tz-aware; datetime.utcnow() is
+        # naive. Normalise to naive UTC before subtracting or the whole tick
+        # throws "can't subtract offset-naive and offset-aware datetimes" and no
+        # invite is ever sent once the campaign has its first sent row.
+        if last_sent is not None and last_sent.tzinfo is not None:
+            last_sent = last_sent.replace(tzinfo=None)
         spacing_ok = True
         if last_sent and (datetime.utcnow() - last_sent).total_seconds() < MIN_SEND_SPACING_SECONDS:
             spacing_ok = False
