@@ -107,7 +107,9 @@ class LeadScore(Base):
     # NUMERIC(4,1) (migration 046): the scorer rounds to one decimal on purpose
     # to break ties, which an INTEGER column silently threw away. asdecimal=False
     # keeps it a float in Python so JSON serialisation and arithmetic are unchanged.
-    overall_score = Column(Numeric(4, 1, asdecimal=False), nullable=False)
+    # (6,1), not (4,1): scores are 0-100, but one candidate's rows (27 Apr 2026)
+    # hold 49192-50000, a manual ordering written into this column.
+    overall_score = Column(Numeric(6, 1, asdecimal=False), nullable=False)
     title_relevance = Column(Integer, nullable=False)
     department_relevance = Column(Integer, nullable=False)
     industry_relevance = Column(Integer, nullable=False)
