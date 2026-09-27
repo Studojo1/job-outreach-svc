@@ -214,3 +214,52 @@ def test_a_long_clause_is_treated_as_a_continuation():
 
 def test_two_capitalised_labels_are_not_merged():
     assert _parse_multi("Bengaluru, Mumbai") == ["Bengaluru", "Mumbai"]
+
+
+# ── the real Q40 site: target_role options come from the LLM ────────────────
+
+def test_known_options_keep_typed_other_text_whole():
+    """Typed "Something else" text is ONE entry from the frontend, commas and all.
+
+    The old known-options path split every leftover on ",", so a typed answer
+    next to a real option was torn apart even with the options in hand.
+    """
+    options = ["Strategy Analyst", "Growth Marketing Manager", "Something else"]
+    answer = "Strategy Analyst, Founder's office, ideally at a fintech"
+    assert _parse_multi(answer, options) == [
+        "Strategy Analyst",
+        "Founder's office, ideally at a fintech",
+    ]
+
+
+def test_an_option_inside_typed_text_is_not_pulled_out_of_it():
+    options = ["Strategy Analyst", "Something else"]
+    assert _parse_multi("Not a Strategy Analyst role, more ops", options) == [
+        "Not a Strategy Analyst role, more ops",
+    ]
+
+
+def test_archetype_label_with_a_comma_becomes_one_target_role():
+    """The damaged row from the audit: target_roles was
+    ["Product-Growth Generalist (AI-fluent", "early-stage)"].
+
+    The archetype label is prepended to the target_role options by the question
+    engine, and it is LLM text, so it can contain ", ". The payload build now
+    gets the options that question offered and keeps the label whole.
+    """
+    from services.candidate_intelligence.payload_builder import build_payload_from_answers
+
+    label = "Product-Growth Generalist (AI-fluent, early-stage)"
+
+    class _Candidate:
+        resume_profile = {}
+        parsed_json = {}
+
+    payload = build_payload_from_answers(
+        answers={"target_role": f"{label}, Strategy Analyst"},
+        candidate=_Candidate(),
+        answer_options={"target_role": [label, "Strategy Analyst", "Something else"]},
+    )
+    titles = [r["title"] for r in payload["career_analysis"]["recommended_roles"]]
+    assert titles[:2] == [label, "Strategy Analyst"], titles
+    assert "early-stage)" not in titles
