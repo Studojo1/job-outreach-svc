@@ -92,4 +92,18 @@ WHERE o.campaign_id = c.id AND c.outreach_order_id IS NULL;
 
 ALTER TABLE emails_sent ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMP;
 
+-- 6. launch_nudges. services/launch_nudge.py emails users who paid and never
+--    launched. One row per email sent; it is also the dedupe, so a restart or
+--    a second replica cannot double-send. Kept out of system_events because
+--    the frontend shows a user their own system_events rows.
+CREATE TABLE IF NOT EXISTS launch_nudges (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+    n           INTEGER NOT NULL,
+    state       VARCHAR(30) NOT NULL,
+    action_url  TEXT,
+    created_at  TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
+);
+CREATE INDEX IF NOT EXISTS ix_launch_nudges_user ON launch_nudges (user_id, created_at);
+
 COMMIT;

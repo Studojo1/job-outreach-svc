@@ -27,6 +27,11 @@ from database.models import Campaign, CreditLedger, UserCredit
 logger = get_logger(__name__)
 
 
+# The smallest plan. /campaign/create refuses to start below it, and a paid
+# user holding at least this much with nothing running is "paid, not launched".
+MIN_CAMPAIGN_CREDITS = 50
+
+
 # Reasons. Short and stable: the admin panel and reconciliation group by them.
 GRANT_PAYMENT = "grant_payment"
 GRANT_COUPON = "grant_coupon"

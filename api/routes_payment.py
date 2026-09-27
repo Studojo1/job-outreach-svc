@@ -925,6 +925,18 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
 
     order.credits_granted = email_credits
 
+    # Link the payment to the user's active order before anything reads the
+    # link. A payment with no order link used to skip the safety net below
+    # entirely (audit P12: 30 payments, 24 paying users).
+    from services.stage_tracking import get_or_create_active_order, promote_paid_order
+    if not order.outreach_order_id:
+        try:
+            active = get_or_create_active_order(db, str(order.user_id))
+            order.outreach_order_id = active.id
+            logger.info("[PAYMENT] linked unlinked payment %s to outreach_order %s", order.id, active.id)
+        except Exception:
+            logger.exception("[PAYMENT] could not link payment %s to an outreach order", order.id)
+
     if email_credits:
         _grant_credits(db, order.user_id, email_credits, payment_order_id=order.id)
 
@@ -936,7 +948,6 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
 
     # Safety net: a paid order must never stay frozen behind the payment step.
     if order.outreach_order_id:
-        from services.stage_tracking import promote_paid_order
         oo2 = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
         promote_paid_order(oo2, "status was frozen behind payment")
 

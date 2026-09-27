@@ -271,7 +271,7 @@ async def api_create_campaign(
         # Minimum credits to start a campaign — set to the smallest plan (50) so
         # 50-credit plan users can launch. Campaign size is still capped at the
         # user's available balance below.
-        MIN_CAMPAIGN_CREDITS = 50
+        MIN_CAMPAIGN_CREDITS = credits.MIN_CAMPAIGN_CREDITS
         if available < MIN_CAMPAIGN_CREDITS:
             raise HTTPException(
                 status_code=402,

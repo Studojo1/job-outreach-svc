@@ -100,6 +100,14 @@ jobs:
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             --from=secret/app-secrets --keys=INTERNAL_API_SECRET \
             -n studojo
+          # Emailer's send-template secret, for the paid-not-launched nudges
+          # (services/launch_nudge.py). Only wired once the app-secrets key
+          # exists; without it the nudges are off and nothing else changes.
+          if [ -n "$(kubectl get secret app-secrets -n studojo -o jsonpath='{.data.emailer-internal-secret}')" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              --from=secret/app-secrets --keys=emailer-internal-secret \
+              -n studojo
+          fi
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n studojo --timeout=10m || {
             echo "Rollout failed or timed out. Checking pod status..."
             kubectl get pods -n studojo -l app=${{ env.SERVICE_NAME }} -o wide
