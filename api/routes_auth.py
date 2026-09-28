@@ -4,7 +4,7 @@ import base64
 import json
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 
 from database.models import User
 from api.dependencies import get_current_user
@@ -42,17 +42,6 @@ def get_token(current_user: User = Depends(get_current_user)):
     platform's /api/auth/token endpoint is unavailable (e.g. cross-origin staging).
     """
     return {"token": _make_jwt(current_user)}
-
-
-@router.get("/debug-cookies")
-def debug_cookies(request: Request):
-    """Temporary endpoint to inspect incoming cookies."""
-    return {
-        "cookies": dict(request.cookies),
-        "cookie_header": request.headers.get("cookie", ""),
-        "origin": request.headers.get("origin", ""),
-        "referer": request.headers.get("referer", ""),
-    }
 
 
 @router.get("/debug-voyager")
