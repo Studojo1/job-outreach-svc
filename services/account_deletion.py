@@ -34,7 +34,7 @@ KEEP = frozenset({
 # lead_scores, campaigns and emails_sent (bodies and reply_text included).
 DELETE = (
     "scheduled_emails", "email_send_log", "email_opens", "email_preferences",
-    "launch_nudges", "system_events", "tickets", "user_attribution", "tool_used",
+    "launch_nudges", "campaign_notices", "system_events", "tickets", "user_attribution", "tool_used",
     "consultation_signups", "extension_drafts", "job_queue", "api_keys",
     "outreach_orders", "outreach_campaigns", "outreach_contacts",
     "linkedin_connection_requests", "linkedin_outreach_leads", "linkedin_search_jobs",
