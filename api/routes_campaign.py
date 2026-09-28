@@ -1180,3 +1180,31 @@ def worker_send_ready():
     except Exception as e:
         logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/worker/apollo-credits", dependencies=[Depends(require_internal_caller)])
+def worker_apollo_credits(db: Session = Depends(get_db)):
+    """How many emails are waiting on Apollo credits, and whether this replica has a usable key."""
+    from services.email_campaign.apollo_pause import paused_count
+    from services.shared.apollo_key_manager import apollo_keys
+
+    return {"credit_paused": paused_count(db), "has_valid_key": apollo_keys.has_valid_key()}
+
+
+@router.post("/worker/apollo-credits-restored", dependencies=[Depends(require_internal_caller)])
+def worker_apollo_credits_restored(note: str = "", db: Session = Depends(get_db)):
+    """Apollo was topped up: resume every email paused on credit exhaustion now.
+
+    Without this the workers still recover on their own, but only when the
+    30-minute re-probe of the exhausted key comes round. Other replicas pick
+    the signal up on their next cycle.
+    """
+    from services.email_campaign.apollo_pause import (
+        paused_count, requeue_credit_paused, signal_credits_restored,
+    )
+
+    before = paused_count(db)
+    signal_credits_restored(db, note)
+    db.commit()
+    requeued = requeue_credit_paused(db)
+    return {"credit_paused_before": before, "requeued": requeued}
