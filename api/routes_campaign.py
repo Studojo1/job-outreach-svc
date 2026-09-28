@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from database.session import get_db
-from database.models import User, Campaign
+from database.models import User, Campaign, Candidate
 from services.email_campaign.campaign_service import (
     create_campaign,
     transition_campaign,
@@ -83,6 +83,9 @@ class CampaignCreateRequest(BaseModel):
     selected_styles: list[str] = []  # Email styles for AI generation
     user_timezone: str = "Asia/Kolkata"
     lead_limit: Optional[int] = None  # Max leads to include (defaults to all)
+    # Start sending in the same request (audit P27). create + a separate
+    # /send left a draft holding the credits whenever the tab closed between.
+    launch: bool = False
 
 
 class CampaignTransitionRequest(BaseModel):
@@ -262,6 +265,29 @@ async def api_create_campaign(
         if not _owned_email_account(db, request.email_account_id, current_user.id):
             raise HTTPException(status_code=403, detail="Gmail account not found for this user")
 
+        # One live campaign at a time (audit P03). A second create used to
+        # overwrite the order's campaign pointer, and the first campaign kept
+        # sending from the student's Gmail, invisible everywhere. Finish,
+        # cancel (credits come back) or launch the existing one first.
+        live = (
+            db.query(Campaign)
+            .join(Candidate, Candidate.id == Campaign.candidate_id)
+            .filter(Candidate.user_id == current_user.id,
+                    Campaign.status.in_(("draft", "running", "paused")))
+            .order_by(Campaign.created_at.desc())
+            .first()
+        )
+        if live is not None:
+            raise HTTPException(status_code=409, detail={
+                "code": "campaign_exists",
+                "campaign_id": live.id,
+                "status": live.status,
+                "message": (
+                    "You already have a campaign that hasn't finished. Open it from your "
+                    "dashboard, or cancel it to get its unused credits back, before starting another."
+                ),
+            })
+
         # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
         # where two simultaneous requests both read the same balance and both pass.
         # This allows multiple campaigns (e.g. 3x200 with 600 credits) but blocks double-clicks.
@@ -329,6 +355,21 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
+        # Zero leads: nothing will ever send, so give the credits straight back
+        # instead of leaving them on an empty campaign (P27).
+        if not result.get("queued_messages"):
+            empty = db.get(Campaign, result["campaign_id"])
+            credits.attach_campaign(reservation, empty)
+            credits.release(db, current_user.id, reserved, credits.RELEASE_CREATE_FAILED,
+                            campaign=empty, note="campaign had no leads")
+            empty.status = "cancelled"
+            db.commit()
+            reserved = 0
+            raise HTTPException(
+                status_code=400,
+                detail="No leads found for this campaign, so nothing was charged. Run lead discovery first.",
+            )
+
         # The campaign now exists and owns the reservation; a later failure must
         # not refund credits its email rows are holding.
         try:
@@ -347,6 +388,10 @@ async def api_create_campaign(
             order = get_or_create_active_order(db, str(current_user.id), candidate_id=request.candidate_id)
             order.candidate_id = order.candidate_id or request.candidate_id
             order.campaign_id = result["campaign_id"]
+            # The order -> campaigns link that a later campaign cannot overwrite.
+            created = db.get(Campaign, result["campaign_id"])
+            if created is not None:
+                created.outreach_order_id = order.id
             order.email_account_id = order.email_account_id or request.email_account_id
             order.status = "campaign_setup"
             order.leads_collected = result.get("queued_messages", 0)
@@ -368,6 +413,12 @@ async def api_create_campaign(
                             email_account_id=request.email_account_id)
         except Exception as oe:
             logger.error("[CAMPAIGN] Failed to link funnel order: %s", oe)
+
+        if request.launch:
+            # Same transition /send performs, in this request, so no window
+            # exists where a draft holds the credits (P27).
+            transition_campaign(db, result["campaign_id"], "running")
+            result["status"] = "running"
 
         capture("campaign_created", str(current_user.id), {
             "campaign_id": result["campaign_id"],
