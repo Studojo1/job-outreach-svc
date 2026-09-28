@@ -1124,67 +1124,33 @@ async def cancel_campaign(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Cancel a running campaign and refund credits for un-enriched leads."""
-    from database.models import EmailSent, OutreachOrder, Candidate
-    from sqlalchemy import func
-    from api.routes_payment import refund_credits
-
-    campaign = db.query(Campaign).filter_by(id=campaign_id).first()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-
-    # Verify ownership
-    candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
-    if not candidate:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    """Cancel a draft, running or paused campaign and return the credits for
+    everything it had not sent yet."""
+    campaign = _owned_campaign(db, campaign_id, current_user.id)
 
     if campaign.status not in ("draft", "running", "paused"):
         raise HTTPException(status_code=400, detail=f"Cannot cancel campaign in '{campaign.status}' status")
 
-    # Count un-enriched emails (these never consumed Apollo credits)
-    pending_count = db.query(func.count(EmailSent.id)).filter(
-        EmailSent.campaign_id == campaign_id,
-        EmailSent.enrichment_status == "pending",
-    ).scalar() or 0
+    # Same settlement as completion: every unsent paid slot is retired and its
+    # credit returned. The old version counted only enrichment_status='pending'
+    # rows but destroyed every queued row too, so enriched-but-unsent emails
+    # were lost with no credit back (audit P24), and it set status 'completed'.
+    from services.email_campaign.campaign_worker import finish_campaign
+    released = finish_campaign(db, campaign, reason="cancelled by user", final_status="cancelled")
+    if campaign.credits_reserved is None:
+        logger.warning("[CAMPAIGN] Campaign %d predates the credit ledger; its credits are "
+                       "settled by the backfill, not here", campaign_id)
 
-    # Mark pending emails as skipped
-    db.query(EmailSent).filter(
-        EmailSent.campaign_id == campaign_id,
-        EmailSent.status.in_(["pending_enrichment", "queued"]),
-    ).update({
-        EmailSent.status: "failed",
-        EmailSent.error_message: "Campaign cancelled",
-    }, synchronize_session="fetch")
-
-    campaign.status = "completed"
-
-    # Refund credits for un-enriched leads
-    if pending_count > 0:
-        refund_credits(db, current_user.id, pending_count)
-
-    # Update outreach order
-    order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
-    if order:
-        order.status = "completed"
-        order.credits_refunded = (order.credits_refunded or 0) + pending_count
-        from datetime import datetime
-        log = list(order.action_log or [])
-        log.append({"ts": datetime.utcnow().isoformat(), "msg": f"Campaign cancelled, {pending_count} credits refunded"})
-        order.action_log = log
-        order.updated_at = datetime.utcnow()
-
-    db.commit()
-
-    logger.info("[CAMPAIGN] Campaign %d cancelled by user %s, refunded %d credits",
-                campaign_id, current_user.id, pending_count)
+    logger.info("[CAMPAIGN] Campaign %d cancelled by user %s, released %d credits",
+                campaign_id, current_user.id, released)
     capture("campaign_cancelled", str(current_user.id), {
         "campaign_id": campaign_id,
-        "credits_refunded": pending_count,
+        "credits_refunded": released,
     })
 
     return {
         "status": "cancelled",
-        "credits_refunded": pending_count,
+        "credits_refunded": released,
     }
 
 

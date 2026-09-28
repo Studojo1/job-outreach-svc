@@ -124,6 +124,8 @@ async def gmail_oauth_callback(
         except Exception:
             logger.exception("[GmailOAuth] Funnel stage marking failed (non-fatal)")
 
+        _resume_auth_paused_campaigns(db, user_id, email_address)
+
         redirect_url = f"{frontend_base}?status=success"
         logger.info(f"[GmailOAuth] SUCCESS — redirecting to {redirect_url}")
         return RedirectResponse(url=redirect_url)
@@ -135,6 +137,37 @@ async def gmail_oauth_callback(
         redirect_url = f"{frontend_base}?status=error&message={encoded_msg}"
         logger.info(f"[GmailOAuth] ERROR — redirecting to {redirect_url}")
         return RedirectResponse(url=redirect_url)
+
+
+def _resume_auth_paused_campaigns(db: Session, user_id: str, email_address: str) -> None:
+    """Reconnecting Gmail restarts what a dead grant stopped.
+
+    The worker pauses a campaign (pause_reason='gmail_auth') instead of
+    failing its queue when the mailbox loses access, keeping every unsent
+    email. Before, reconnecting recovered nothing: 691 paid emails across 7
+    paying campaigns stayed failed (audit P06). Only campaigns the system
+    paused, on this same mailbox, are resumed; a user's own pause is theirs.
+    """
+    from database.models import Campaign, Candidate
+    from services.email_campaign.campaign_service import transition_campaign
+    from services.email_campaign.outcomes import PAUSE_REASON_GMAIL_AUTH
+    try:
+        paused = (
+            db.query(Campaign)
+            .join(Candidate, Candidate.id == Campaign.candidate_id)
+            .join(EmailAccount, EmailAccount.id == Campaign.email_account_id)
+            .filter(Candidate.user_id == user_id,
+                    Campaign.status == "paused",
+                    Campaign.pause_reason == PAUSE_REASON_GMAIL_AUTH,
+                    EmailAccount.email_address == email_address)
+            .all()
+        )
+        for campaign in paused:
+            transition_campaign(db, campaign.id, "running", actor="system")
+            logger.info("[GmailOAuth] Resumed campaign %s after %s reconnected", campaign.id, email_address)
+    except Exception:
+        db.rollback()
+        logger.exception("[GmailOAuth] Could not resume auth-paused campaigns for %s", user_id)
 
 
 @router.get("/account")

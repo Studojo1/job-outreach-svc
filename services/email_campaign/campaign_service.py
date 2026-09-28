@@ -188,8 +188,12 @@ def create_campaign(
     }
 
 
-def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Dict[str, Any]:
+def transition_campaign(db: Session, campaign_id: int, target_status: str,
+                        actor: str = "user") -> Dict[str, Any]:
     """Transition a campaign to a new state.
+
+    actor: who asked, recorded as paused_by on a pause ('user', 'system', or
+    an admin user id).
 
     Raises:
         ValueError: If transition is invalid.
@@ -242,15 +246,20 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
     elif old_status == "running":
         CAMPAIGNS_RUNNING.dec()
 
-    if target_status == "completed" and campaign.completed_at is None:
-        campaign.completed_at = datetime.utcnow()
-        db.commit()
+    if target_status == "completed":
+        # Same settlement as the worker: retire unsent work, return its
+        # credits, close the order.
+        from services.email_campaign.campaign_worker import finish_campaign
+        finish_campaign(db, campaign, reason=f"completed by {actor}")
 
-    # Record pause time when pausing
+    # Record who paused and when (audit P40: nobody could say why a campaign stopped)
     if old_status == "running" and target_status == "paused":
         campaign.paused_at = datetime.utcnow()
+        campaign.paused_by = actor
+        campaign.pause_reason = "user" if actor == "user" else "admin"
         db.commit()
-        logger.info("[CAMPAIGN] Paused campaign #%d, paused_at=%s", campaign_id, campaign.paused_at)
+        logger.info("[CAMPAIGN] Paused campaign #%d by %s, paused_at=%s",
+                    campaign_id, actor, campaign.paused_at)
 
     # Queue campaign bootstrap (scheduler initialization) if transitioning to "running"
     if target_status == "running":
@@ -272,15 +281,16 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str) -> Di
         logger.info("[CAMPAIGN] Computed schedule for campaign #%d (emails=%d)",
                     campaign_id, email_count)
 
-    # Handle pause → running (resume): shift schedules forward by pause duration
-    if old_status == "paused" and target_status == "running" and campaign.paused_at:
-        pause_duration = (datetime.utcnow() - campaign.paused_at).total_seconds()
-        from services.email_campaign.campaign_worker import shift_schedule_forward
-        shift_schedule_forward(db, campaign_id, pause_duration)
+    # Resume: compute_campaign_schedule above already re-planned every unsent
+    # email starting from now. This used to ALSO shift the new schedule forward
+    # by the pause length, so a 22-day pause meant nothing sent for 22 more
+    # days after Resume (audit P02). The recompute is the whole compensation.
+    if old_status == "paused" and target_status == "running":
         campaign.paused_at = None
+        campaign.paused_by = None
+        campaign.pause_reason = None
         db.commit()
-        logger.info("[CAMPAIGN] Resumed campaign #%d, shifted schedule by %.0f seconds",
-                    campaign_id, pause_duration)
+        logger.info("[CAMPAIGN] Resumed campaign #%d", campaign_id)
 
     # Sync order status + record funnel stage timestamps (10/11/12).
     try:
