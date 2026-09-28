@@ -737,16 +737,22 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
     body = await request.body()
     signature = request.headers.get("X-Razorpay-Signature", "")
 
-    if settings.RAZORPAY_WEBHOOK_SECRET:
-        expected = hmac.new(
-            settings.RAZORPAY_WEBHOOK_SECRET.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
+    # Fail closed: with no secret configured, every request was accepted
+    # unsigned, so anyone could mark their own order paid. A rejected real
+    # webhook is not lost; payment_reconciler polls Razorpay for it.
+    if not settings.RAZORPAY_WEBHOOK_SECRET:
+        logger.error("[PAYMENT_WEBHOOK] RAZORPAY_WEBHOOK_SECRET is not set; rejecting webhook")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
 
-        if not hmac.compare_digest(expected, signature):
-            logger.error("[PAYMENT_WEBHOOK] Signature mismatch")
-            raise HTTPException(status_code=400, detail="Invalid signature")
+    expected = hmac.new(
+        settings.RAZORPAY_WEBHOOK_SECRET.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, signature):
+        logger.error("[PAYMENT_WEBHOOK] Signature mismatch")
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     payload = json.loads(body)
     event = payload.get("event", "")
