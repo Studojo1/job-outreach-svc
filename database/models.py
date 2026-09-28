@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY, BigInteger, JSON
+from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -339,6 +340,10 @@ class PaymentOrder(Base):
     currency = Column(String(10), default="USD", nullable=False)
     tier = Column(Integer, nullable=False)
     plan_id = Column(Text, nullable=True)  # e.g. "email_200", "linkedin_350", "both_500"
+    # Migration 052 (audit P05): written only by services/refunds.py.
+    refunded_cents = Column(Integer, nullable=True)
+    refunded_at = Column(DateTime, nullable=True)
+    refund_id = Column(Text, nullable=True)
     coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
     outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="created", nullable=False)
@@ -387,6 +392,15 @@ class LaunchNudge(Base):
     state = Column(String(30), nullable=False)
     action_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SuppressedEmail(Base):
+    """An address never to email again (it bounced). Audit P18.
+    Table predates this model; services/email_campaign/suppression.py writes it."""
+    __tablename__ = "suppressed_emails"
+    email = Column(Text, primary_key=True)
+    reason = Column(Text, nullable=False, default="")
+    suppressed_at = Column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
 
 class CampaignNotice(Base):

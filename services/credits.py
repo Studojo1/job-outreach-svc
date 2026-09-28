@@ -45,6 +45,7 @@ RELEASE_CAMPAIGN_FINISHED = "release_campaign_finished"
 RELEASE_SEND_FAILED = "release_send_failed"
 RELEASE_ENRICHMENT_UNUSED = "release_enrichment_unused"
 RELEASE_ADMIN = "release_admin"
+REVOKE_REFUND = "revoke_refund"
 
 
 def lock_wallet(db: Session, user_id: str) -> Optional[UserCredit]:
@@ -89,6 +90,26 @@ def grant(db: Session, user_id: str, amount: int, reason: str, *,
     wallet.total_credits += amount
     wallet.updated_at = datetime.utcnow()
     _record(db, user_id, delta_total=amount, reason=reason,
+            payment_order_id=payment_order_id, actor=actor, note=note)
+    return amount
+
+
+def revoke(db: Session, user_id: str, amount: int, reason: str, *,
+           payment_order_id: Optional[int] = None, actor: Optional[str] = None,
+           note: Optional[str] = None) -> int:
+    """Take purchased credits back (a refunded payment). Never below what is
+    already in use: returns how many were actually revoked."""
+    if amount <= 0:
+        return 0
+    wallet = lock_wallet(db, user_id)
+    if wallet is None:
+        return 0
+    amount = min(amount, wallet.total_credits - wallet.used_credits)
+    if amount <= 0:
+        return 0
+    wallet.total_credits -= amount
+    wallet.updated_at = datetime.utcnow()
+    _record(db, user_id, delta_total=-amount, reason=reason,
             payment_order_id=payment_order_id, actor=actor, note=note)
     return amount
 

@@ -24,8 +24,8 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from database.models import (
-    Base, Campaign, Candidate, CreditLedger, EmailAccount, EmailSent, Lead, LeadScore, SystemEvent, User,
-    UserCredit,
+    Base, Campaign, Candidate, CreditLedger, EmailAccount, EmailSent, Lead, LeadScore, SuppressedEmail,
+    SystemEvent, User, UserCredit,
 )
 from services.email_campaign import apollo_pause, campaign_worker
 from services.shared import apollo_key_manager
@@ -85,7 +85,7 @@ def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[t.__table__ for t in (
         User, Candidate, Lead, LeadScore, Campaign, EmailAccount, EmailSent, SystemEvent,
-        UserCredit, CreditLedger)])
+        UserCredit, CreditLedger, SuppressedEmail)])
     session = sessionmaker(bind=engine)()
     session.add_all([
         User(id="u", email="u@x.com", name="U", email_verified=True, created_at=NOW, updated_at=NOW),
