@@ -52,6 +52,10 @@ class NextStep:
     candidate_id: Optional[int] = None
     email_account_id: Optional[int] = None
     campaign_id: Optional[int] = None
+    # True once any campaign has actually been launched. A returning customer
+    # holding credits (a finished campaign handed back its unsent work) gets
+    # "launch another campaign", not "nothing has been sent yet".
+    has_launched: bool = False
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -102,12 +106,13 @@ def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextSt
     order_id = order.id if order else None
 
     campaigns = _user_campaigns(db, user_id)
+    has_launched = any(c.status != "draft" for c in campaigns)
     active = next((c for c in campaigns if c.status in ("running", "paused")), None)
     if active is not None:
         return NextStep(CAMPAIGN_ACTIVE, "/campaign/dashboard", available,
                         order_id=order_id, campaign_id=active.id,
                         candidate_id=active.candidate_id,
-                        email_account_id=active.email_account_id)
+                        email_account_id=active.email_account_id, has_launched=has_launched)
 
     # A draft holds its credits already, so the wallet can read 0 here. It
     # needs /send, not a second /create (which would reserve twice).
@@ -116,14 +121,14 @@ def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextSt
         return NextStep(LAUNCH_DRAFT, "/campaign/setup", available,
                         order_id=order_id, campaign_id=draft.id,
                         candidate_id=draft.candidate_id,
-                        email_account_id=draft.email_account_id)
+                        email_account_id=draft.email_account_id, has_launched=has_launched)
 
     if available < MIN_CAMPAIGN_CREDITS:
-        return NextStep(NOT_PAID, None, available, order_id=order_id)
+        return NextStep(NOT_PAID, None, available, order_id=order_id, has_launched=has_launched)
 
     # LinkedIn-only plans launch through their own flow.
     if order is not None and (getattr(order, "plan_type", None) or "email") == "linkedin":
-        return NextStep(NOT_PAID, None, available, order_id=order_id)
+        return NextStep(NOT_PAID, None, available, order_id=order_id, has_launched=has_launched)
 
     candidate_id = _launchable_candidate(db, user_id, order.candidate_id if order else None)
     mailbox = (
@@ -135,13 +140,13 @@ def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextSt
 
     if candidate_id is None:
         step = NextStep(NEEDS_PROFILE, "/onboarding/upload", available, order_id=order_id,
-                        email_account_id=mailbox.id if mailbox else None)
+                        email_account_id=mailbox.id if mailbox else None, has_launched=has_launched)
     elif mailbox is None:
         step = NextStep(CONNECT_GMAIL, "/connect/gmail", available, order_id=order_id,
-                        candidate_id=candidate_id)
+                        candidate_id=candidate_id, has_launched=has_launched)
     else:
         step = NextStep(LAUNCH_READY, "/campaign/setup", available, order_id=order_id,
-                        candidate_id=candidate_id, email_account_id=mailbox.id)
+                        candidate_id=candidate_id, email_account_id=mailbox.id, has_launched=has_launched)
 
     if heal and order is not None:
         changed = promote_paid_order(order, "next-step: paid with credits, no campaign")

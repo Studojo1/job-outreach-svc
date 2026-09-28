@@ -239,3 +239,18 @@ def test_coupon_only_accounts_are_never_nudged(db, sent):
     db.commit()
     assert launch_nudge.sweep(db, now=NOW)["stuck"] == []
     assert sent == []
+
+
+def test_returning_customer_with_spare_credits_is_marked_as_launched(db):
+    # A finished campaign handed back unsent credits: they can launch again,
+    # but the page must not claim nothing has ever been sent.
+    _, cids = _user(db, "back", credits=400, used=100)
+    db.add(Campaign(candidate_id=cids[0], name="c", status="completed", created_at=NOW))
+    db.commit()
+    step = resolve_next_step(db, "back")
+    assert step.state == LAUNCH_READY and step.has_launched is True
+
+
+def test_first_timer_is_not_marked_as_launched(db):
+    _user(db, "first")
+    assert resolve_next_step(db, "first").has_launched is False
