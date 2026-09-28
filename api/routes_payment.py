@@ -587,22 +587,34 @@ async def verify_dodo_payment(
     # instant, both see "created", and both grant. One customer ended up with
     # exactly double the credits they paid for, which then let them start a second
     # campaign. FOR UPDATE makes the second path wait and then see "paid".
-    order = db.query(PaymentOrder).filter_by(
-        dodo_checkout_id=request.session_id,
-        user_id=current_user.id,
-    ).with_for_update().first()
+    #
+    # The lock is taken only AFTER the call to Dodo (audit P15). Holding it across
+    # that await, with synchronous psycopg2 on a one-worker event loop, meant a
+    # second poll for the same order blocked the whole pod (including /health)
+    # while the first waited on Dodo. Read, ask Dodo, then lock and re-check.
+    def _load(lock: bool):
+        q = db.query(PaymentOrder).filter_by(dodo_checkout_id=request.session_id, user_id=current_user.id)
+        return q.with_for_update().first() if lock else q.first()
 
+    order = _load(lock=False)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-
     if order.status == "paid":
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
-
     if order.status == "failed":
         return {"status": "failed"}
+    db.rollback()  # end the read transaction before the network call
 
     dodo_status = await dodo_svc.get_checkout_status(request.session_id)
     logger.info("[PAYMENT] Dodo checkout %s status from API: %s", request.session_id, dodo_status)
+
+    order = _load(lock=True)
+    if order.status == "paid":  # the webhook or another poll got there first
+        db.rollback()
+        return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
+    if order.status == "failed":
+        db.rollback()
+        return {"status": "failed"}
 
     if dodo_status["status"] in ("succeeded", "paid", "complete", "completed"):
         order.dodo_payment_id = dodo_status.get("payment_id", "")
@@ -636,6 +648,7 @@ async def verify_dodo_payment(
         db.commit()
         return {"status": "failed"}
 
+    db.rollback()  # release the lock; nothing to change yet
     return {"status": "pending"}
 
 

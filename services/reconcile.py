@@ -12,6 +12,10 @@ Runs from the launch-nudge sweep (hourly, one replica at a time).
            overwritten by a second campaign) is linked through
            campaigns.outreach_order_id to the user's order that was current
            when it was created, so order views see it.
+  grants   A real-money payment marked paid that never granted its credits
+           (audit P16: one $27 order sat like that from June, its user with no
+           wallet at all). After 5 minutes the grant it should have made is
+           made, through the normal _finalize_credits, and the founders are told.
   wallets  Credits reserved by a user who owns no campaign and whose wallet
            has not moved in 24 hours are a reservation for something that no
            longer exists (P31/P44: 51 credits for one paying user). They are
@@ -70,6 +74,41 @@ def reset_orders_without_campaign(db: Session, now: datetime) -> int:
     return n
 
 
+UNGRANTED_AFTER = timedelta(minutes=5)
+
+
+def grant_paid_without_credits(db: Session, now: datetime) -> int:
+    from database.models import PaymentOrder
+    from api.routes_payment import _finalize_credits
+    orders = (
+        db.query(PaymentOrder)
+        .filter(PaymentOrder.status.in_(("paid", "completed")),
+                PaymentOrder.amount_cents > 0,
+                (PaymentOrder.credits_granted.is_(None)) | (PaymentOrder.credits_granted == 0),
+                PaymentOrder.created_at < now - UNGRANTED_AFTER)
+        .all()
+    )
+    fixed = []
+    for order in orders:
+        _finalize_credits(db, order)
+        if order.credits_granted:
+            order.updated_at = now
+            fixed.append(f"- payment {order.id} ({order.provider}, {order.amount_cents} {order.currency}) "
+                         f"for user {order.user_id}: granted {order.credits_granted} credits it never got")
+    db.commit()
+    if fixed:
+        _tell_founders("paid but never credited", "\n".join(fixed) + "\n\nThey now have the credits. "
+                       "Refund instead via POST /admin/outreach/payments/{id}/refund if they prefer.")
+    return len(fixed)
+
+
+def _tell_founders(subject: str, message: str) -> None:
+    from core.config import settings
+    from services.launch_nudge import _env_tag, _send_template
+    for to in [a.strip() for a in settings.OPS_ALERT_RECIPIENTS.split(",") if a.strip()]:
+        _send_template({"to": to, "template": "ops-alert", "subject": f"{_env_tag()}{subject}", "message": message})
+
+
 def link_orphan_campaigns(db: Session, now: datetime) -> int:
     orphans = db.query(Campaign).filter(Campaign.outreach_order_id.is_(None)).all()
     n = 0
@@ -114,6 +153,7 @@ def run(db: Session, now: datetime = None) -> dict:
     now = now or datetime.utcnow()
     out = {}
     for name, fn in (("drafts_cancelled", sweep_stale_drafts),
+                     ("payments_credited", grant_paid_without_credits),
                      ("campaigns_linked", link_orphan_campaigns),
                      ("orders_reset", reset_orders_without_campaign),
                      ("credits_released", release_orphan_reservations)):
