@@ -17,6 +17,7 @@ from services.email_campaign.campaign_service import (
     create_campaign,
     transition_campaign,
     get_campaign_metrics,
+    customer_failure_reason,
 )
 from api.dependencies import get_current_user, require_internal_caller
 from core.analytics import capture
@@ -689,6 +690,44 @@ async def get_user_latest_campaign(
     }
 
 
+@router.get("/user/all")
+def get_user_campaigns(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Every campaign the user owns, with live state.
+
+    Attached to support tickets (audit P43): the ticket that first reported
+    the orphaned-campaign bug carried only a page URL, and the answer given
+    was wrong because nobody could see the second campaign.
+    """
+    rows = (
+        db.query(Campaign)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Campaign.created_at.desc())
+        .all()
+    )
+    from database.models import EmailSent
+    out = []
+    for c in rows:
+        counts = dict(
+            db.query(EmailSent.status, func.count(EmailSent.id))
+            .filter(EmailSent.campaign_id == c.id).group_by(EmailSent.status).all()
+        )
+        last = db.query(func.max(EmailSent.sent_at)).filter(EmailSent.campaign_id == c.id).scalar()
+        out.append({
+            "id": c.id, "name": c.name, "status": c.status,
+            "pause_reason": c.pause_reason, "order_id": c.outreach_order_id,
+            "sent": counts.get("sent", 0) + counts.get("replied", 0),
+            "unsent": counts.get("pending_enrichment", 0) + counts.get("queued", 0),
+            "failed": counts.get("failed", 0),
+            "last_sent_at": last.isoformat() if last else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        })
+    return {"campaigns": out}
+
+
 @router.get("/{campaign_id}")
 async def get_campaign(
     campaign_id: int,
@@ -1074,6 +1113,8 @@ async def get_campaign_emails(
             "reply_sentiment": email.reply_sentiment,
             "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
             "bounce_reason": email.bounce_reason,
+            # A customer-safe reason; error_message stays admin-only (P22).
+            "failure_reason": customer_failure_reason(email.status, email.error_message),
             "is_test": email.is_test or False,
             "followup_number": email.followup_number or 0,
             "parent_email_id": email.parent_email_id,
