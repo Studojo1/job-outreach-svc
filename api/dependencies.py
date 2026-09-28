@@ -1,6 +1,5 @@
 """API Dependencies — Shared FastAPI dependencies for route handlers."""
 
-import base64
 import hmac
 import json
 import logging
@@ -136,15 +135,74 @@ def get_current_user(
     return user
 
 
-async def get_admin_user(
+_ADMIN_KEY_TTL = 300  # seconds; BetterAuth rotates keys rarely
+_admin_keys_cache: dict = {"at": 0.0, "keys": []}
+
+
+def _betterauth_public_keys(db: Session) -> list:
+    """(kid, PyJWK) for every non-expired BetterAuth signing key.
+
+    The admin panel's token is a BetterAuth JWT from the main site, signed
+    with a key stored in the shared `jwks` table (the admin panel's own server
+    verifies against the same table). Cached briefly.
+    """
+    import jwt
+    from sqlalchemy import text
+
+    now = time.time()
+    if now - _admin_keys_cache["at"] < _ADMIN_KEY_TTL and _admin_keys_cache["keys"]:
+        return _admin_keys_cache["keys"]
+    rows = db.execute(text(
+        "SELECT id, public_key FROM jwks WHERE expires_at IS NULL OR expires_at > NOW()"
+    )).fetchall()
+    keys = []
+    for kid, public_key in rows:
+        try:
+            jwk = json.loads(public_key)
+            alg = jwk.get("alg") or ("EdDSA" if jwk.get("kty") == "OKP" else "RS256")
+            keys.append((kid, jwt.PyJWK(jwk, algorithm=alg)))
+        except Exception:
+            logger.exception("[AUTH] unusable jwks row %s", kid)
+    _admin_keys_cache.update(at=now, keys=keys)
+    return keys
+
+
+def _verified_admin_claims(db: Session, token: str) -> dict:
+    """Claims of a BetterAuth JWT whose signature and expiry check out.
+
+    This used to base64-decode the payload and trust it: anyone who knew an
+    admin's user id could write their own token and get every admin route.
+    """
+    import jwt
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    keys = _betterauth_public_keys(db)
+    kid = header.get("kid")
+    candidates = [k for k_id, k in keys if kid and k_id == kid] or [k for _, k in keys]
+    for key in candidates:
+        try:
+            return jwt.decode(
+                token, key=key, algorithms=[key.algorithm_name],
+                options={"require": ["exp", "sub"], "verify_aud": False},
+            )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid")
+        except jwt.PyJWTError:
+            continue
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+def get_admin_user(
     request: Request,
     db: Session = Depends(get_db),
 ) -> User:
-    """Verify admin access via Bearer JWT token.
+    """Verify admin access via a signed BetterAuth Bearer JWT.
 
-    The admin panel sends BetterAuth JWTs as Bearer tokens.
-    We decode the payload to extract user_id, look up the user,
-    and verify they have the admin role.
+    Signature and expiry are verified against the shared `jwks` table, then
+    the user must hold the admin role. Plain `def`: DB work on the threadpool.
     """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -153,26 +211,8 @@ async def get_admin_user(
             detail="Missing Bearer token",
         )
 
-    token = auth_header[7:]
-
-    # Decode JWT payload (base64) to get sub (user_id)
-    try:
-        payload_b64 = token.split(".")[1]
-        payload_b64 += "=" * (4 - len(payload_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-        user_id = payload.get("sub")
-        exp = payload.get("exp", 0)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-
-    if not user_id or exp < time.time():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired or invalid",
-        )
+    claims = _verified_admin_claims(db, auth_header[7:])
+    user_id = claims.get("sub")
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
