@@ -351,9 +351,18 @@ def _enrich_upcoming(db) -> int:
                            lead.id, lead.name, result.error_type)
 
         elif result.error_type == "no_match":
-            # Apollo cannot find an email for this person. Permanent for this lead.
+            # Apollo cannot find an email for this person. Permanent for this lead,
+            # unless Apollo is out of credits and answering no-match for everyone.
             lead.enrichment_fail_count += 1
-            if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+            from services.email_campaign.apollo_pause import apollo_looks_empty
+            if (lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES
+                    and apollo_looks_empty(db, exclude_lead_id=lead.id)):
+                lead.enrichment_fail_count = 0
+                email.enrichment_status = "credit_paused"
+                email.error_message = "Apollo credit_exhausted (no-match from every lead)"
+                logger.warning("[JIT-ENRICH] Paused lead %d (%s): Apollo looks out of credits",
+                               lead.id, lead.name)
+            elif lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
                 email.enrichment_status = "skipped"
                 logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
                                lead.id, lead.name, lead.enrichment_fail_count)
