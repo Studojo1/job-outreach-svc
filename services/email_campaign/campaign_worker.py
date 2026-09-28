@@ -32,6 +32,7 @@ from database.models import (
     Candidate, OutreachOrder, UserCredit, User,
 )
 from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
+from services.email_campaign import outcomes
 from services.email_campaign.gmail_inbox_service import (
     list_inbox_messages,
     get_message_detail,
@@ -304,8 +305,7 @@ def _enrich_upcoming(db) -> int:
         lead = db.query(Lead).filter_by(id=email.lead_id).first()
         if not lead:
             email.enrichment_status = "skipped"
-            email.status = "failed"
-            email.error_message = "Lead not found"
+            outcomes.fail(db, email, "Lead not found")
             db.commit()
             continue
 
@@ -349,13 +349,17 @@ def _enrich_upcoming(db) -> int:
             lead.enrichment_fail_count += 1
             if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
                 email.enrichment_status = "skipped"
-                email.status = "failed"
-                email.error_message = "Apollo could not find email for this contact"
                 logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
                                lead.id, lead.name, lead.enrichment_fail_count)
+                replaced = False
                 if email.replacement_for_id is None:
                     from services.email_campaign.replenishment import add_replacement_lead
-                    add_replacement_lead(db, email.campaign_id, email.id, reason="enrichment_exhausted")
+                    replaced = add_replacement_lead(
+                        db, email.campaign_id, email.id, reason="enrichment_exhausted") is not None
+                # The credit comes back only if no replacement took the slot
+                # (audit P13 vs P33: otherwise the user is compensated twice).
+                outcomes.fail(db, email, "Apollo could not find email for this contact",
+                              replaced=replaced)
             else:
                 email.error_message = (
                     f"Apollo no match (attempt {lead.enrichment_fail_count}/"
@@ -383,8 +387,7 @@ def _enrich_upcoming(db) -> int:
                 lead.enrichment_fail_count += 1
                 if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
                     email.enrichment_status = "skipped"
-                    email.status = "failed"
-                    email.error_message = f"Enrichment error: {result.error_detail[:200]}"
+                    outcomes.fail(db, email, f"Enrichment error: {result.error_detail[:200]}")
                 db.commit()
                 logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
 
@@ -601,10 +604,20 @@ def _send_ready(db) -> tuple:
 
         account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
         if not account:
-            email.status = "failed"
-            email.error_message = "Email account not found"
+            outcomes.pause_for_auth(db, campaign, email, "Email account not found: reconnect Gmail")
             db.commit()
             failed_count += 1
+            continue
+
+        # Nothing to send yet (a NULL body reached here 6 times and failed with
+        # "'NoneType' object has no attribute 'encode'"). Send it back through
+        # generation instead of burning the slot.
+        if not email.is_test and (not email.subject or not email.body):
+            email.subject = None
+            email.body = None
+            email.status = "pending_enrichment"
+            email.status_changed_at = datetime.utcnow()
+            db.commit()
             continue
 
         # Get/refresh access token
@@ -614,8 +627,7 @@ def _send_ready(db) -> tuple:
                 token_cache[acct_id] = _refresh_token_sync(account, db)
             except Exception as e:
                 logger.error("[SENDER] Token refresh failed for account %d: %s", acct_id, e)
-                email.status = "failed"
-                email.error_message = f"Token refresh failed: {str(e)[:200]}"
+                outcomes.handle(db, campaign, email, e, phase="refresh")
                 db.commit()
                 failed_count += 1
                 continue
@@ -644,6 +656,7 @@ def _send_ready(db) -> tuple:
 
             email.status = "sent"
             email.sent_at = datetime.utcnow()
+            email.status_changed_at = email.sent_at
             email.message_id = result.get("id")
             email.thread_id = result.get("threadId")
 
@@ -696,8 +709,7 @@ def _send_ready(db) -> tuple:
 
         except Exception as e:
             logger.error("[SENDER] Email %d failed: %s", email.id, e)
-            email.status = "failed"
-            email.error_message = str(e)[:500]
+            outcomes.handle(db, campaign, email, e, phase="send")
             db.commit()
             failed_count += 1
             candidate = db.query(Candidate).filter_by(id=campaign.candidate_id).first()
@@ -904,8 +916,8 @@ def _process_followups(db) -> tuple:
                 token_cache[acct_id] = _refresh_token_sync(account, db)
             except Exception as e:
                 logger.error("[FOLLOWUP] Token refresh failed for account %d: %s", acct_id, e)
-                fu.status = "failed"
-                fu.error_message = f"Token refresh failed: {str(e)[:200]}"
+                fu_campaign = db.get(Campaign, fu.campaign_id)
+                outcomes.handle(db, fu_campaign, fu, e, phase="refresh", followup=True)
                 db.commit()
                 failed_count += 1
                 continue
@@ -976,8 +988,8 @@ def _process_followups(db) -> tuple:
 
         except Exception as e:
             logger.error("[FOLLOWUP] Send failed for %d: %s", fu.id, e)
-            fu.status = "failed"
-            fu.error_message = str(e)[:500]
+            fu_campaign = db.get(Campaign, fu.campaign_id)
+            outcomes.handle(db, fu_campaign, fu, e, phase="send", followup=True)
             db.commit()
             failed_count += 1
 
@@ -987,19 +999,13 @@ def _process_followups(db) -> tuple:
 # ── Campaign Completion ──────────────────────────────────────────────────────
 
 def _check_campaign_completion(db):
-    """Mark campaigns as completed if no pending_enrichment or queued emails remain,
-    or if the campaign has exceeded its duration limit (expires_at)."""
+    """Complete running campaigns that have no work left, or whose plan
+    duration (expires_at) is over, and settle them (see finish_campaign)."""
     running_campaigns = db.query(Campaign).filter_by(status="running").all()
     now = datetime.utcnow()
     for campaign in running_campaigns:
-        # Auto-complete campaigns that have exceeded their duration limit
         if campaign.expires_at and now >= campaign.expires_at:
-            campaign.status = "completed"
-            if campaign.completed_at is None:
-                campaign.completed_at = now
-            db.commit()
-            logger.info("[SENDER] Campaign %d auto-completed: duration limit reached (expires_at=%s)",
-                        campaign.id, campaign.expires_at)
+            finish_campaign(db, campaign, reason="duration limit reached")
             continue
 
         # Flush any pending changes and expire cached attributes to get fresh counts
@@ -1010,37 +1016,83 @@ def _check_campaign_completion(db):
             EmailSent.campaign_id == campaign.id,
             EmailSent.status.in_(["pending_enrichment", "queued", "followup_pending"]),
         ).scalar() or 0
-
         total = db.query(func.count(EmailSent.id)).filter(
             EmailSent.campaign_id == campaign.id,
         ).scalar() or 0
 
-        sent = db.query(func.count(EmailSent.id)).filter(
-            EmailSent.campaign_id == campaign.id,
-            EmailSent.status == "sent",
-        ).scalar() or 0
-
         if remaining == 0 and total > 0:
-            campaign.status = "completed"
-            if campaign.completed_at is None:
-                campaign.completed_at = datetime.utcnow()
-            db.commit()
-            logger.info("[SENDER] Campaign %d completed — total=%d sent=%d remaining=%d",
-                        campaign.id, total, sent, remaining)
+            finish_campaign(db, campaign, reason="no emails left to send")
 
-            # Funnel: stage 12 — also mark on the linked OutreachOrder.
-            try:
-                from database.models import OutreachOrder as _OO
-                from services.stage_tracking import safe_mark_stage
-                _order = db.query(_OO).filter_by(campaign_id=campaign.id).first()
-                if _order:
-                    safe_mark_stage(db, str(_order.user_id), "campaign_completed",
-                                    campaign_id=campaign.id)
-            except Exception:
-                logger.exception("[SENDER] Funnel stage marking failed for campaign %d", campaign.id)
-        elif remaining > 0:
-            logger.debug("[SENDER] Campaign %d still active — remaining=%d (total=%d sent=%d)",
-                         campaign.id, remaining, total, sent)
+
+def finish_campaign(db, campaign: Campaign, *, reason: str, final_status: str = "completed") -> int:
+    """End a campaign ('completed' or 'cancelled') and settle it. Returns
+    credits released.
+
+    - Unsent first touches (only possible when the plan's duration ran out)
+      are retired as 'expired', so resuming a completed campaign can never
+      send work whose credits were handed back.
+    - Credits still held for unsent paid slots come back (audit P04/P47).
+      Failed slots were already released one by one as they failed.
+    - The owning order moves to 'completed' (P10: 0 of 4,805 ever had), so
+      /orders/active stops returning it and the next campaign gets its own.
+    """
+    from services import credits as _credits
+
+    now = datetime.utcnow()
+    unsent = (
+        db.query(EmailSent)
+        .filter(EmailSent.campaign_id == campaign.id,
+                EmailSent.status.in_(["pending_enrichment", "queued", "followup_pending"]))
+        .all()
+    )
+    unsent_paid = 0
+    for email in unsent:
+        if email.status != "followup_pending" and outcomes.holds_paid_slot(email):
+            unsent_paid += 1
+        email.status = "expired" if email.status != "followup_pending" else "cancelled_expired"
+        email.error_message = f"Campaign ended before sending ({reason})"
+        email.status_changed_at = now
+
+    campaign.status = final_status
+    if campaign.completed_at is None:
+        campaign.completed_at = now
+
+    released = 0
+    owner = db.query(Candidate.user_id).filter(Candidate.id == campaign.candidate_id).scalar()
+    if unsent_paid and owner and campaign.credits_reserved is not None:
+        release_reason = (_credits.RELEASE_CAMPAIGN_CANCELLED if final_status == "cancelled"
+                          else _credits.RELEASE_CAMPAIGN_FINISHED)
+        released = _credits.release(db, owner, unsent_paid, release_reason,
+                                    campaign=campaign, note=reason)
+
+    from database.models import OutreachOrder as _OO
+    order = None
+    if campaign.outreach_order_id:
+        order = db.get(_OO, campaign.outreach_order_id)
+    if order is None:
+        order = db.query(_OO).filter_by(campaign_id=campaign.id).first()
+    if order is not None and order.status != "completed":
+        order.status = "completed"
+        log = list(order.action_log or [])
+        log.append({"ts": now.isoformat(),
+                    "msg": f"Campaign {campaign.id} {final_status} ({reason}); {released} unused credits returned"})
+        order.action_log = log
+        order.updated_at = now
+    db.commit()
+
+    sent = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign.id, EmailSent.status.in_(["sent", "replied"]),
+    ).scalar() or 0
+    logger.info("[SENDER] Campaign %d %s (%s): sent=%d expired=%d released=%d",
+                campaign.id, final_status, reason, sent, len(unsent), released)
+
+    if order is not None:
+        try:
+            from services.stage_tracking import safe_mark_stage
+            safe_mark_stage(db, str(order.user_id), "campaign_completed", campaign_id=campaign.id)
+        except Exception:
+            logger.exception("[SENDER] Funnel stage marking failed for campaign %d", campaign.id)
+    return released
 
 
 # ── Credit Exhaustion Check ──────────────────────────────────────────────────

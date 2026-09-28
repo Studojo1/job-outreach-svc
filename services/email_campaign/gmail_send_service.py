@@ -14,6 +14,25 @@ from core.metrics import EMAILS_SENT_TOTAL
 logger = get_logger(__name__)
 
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+class GmailAuthError(RuntimeError):
+    """The mailbox cannot send until its owner reconnects Gmail: the refresh
+    token was revoked/expired, or the grant lacks the send scope. Retrying
+    will not help; the campaign pauses and waits for a reconnect."""
+
+
+class GmailTransientError(RuntimeError):
+    """Google was unavailable or throttling (token endpoint 5xx, send 429/5xx).
+    The email was not sent and is safe to retry next cycle."""
+
+
+class GmailSendError(RuntimeError):
+    """Gmail rejected this one message. `status` is the HTTP status."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 # (connect, read) seconds. requests has no default, so without this one hung
 # connection to Google stalls the whole send cycle with no ceiling.
 GMAIL_HTTP_TIMEOUT = (5, 30)
@@ -108,7 +127,14 @@ def send_gmail_email(
     if not resp.ok:
         EMAILS_SENT_TOTAL.labels(status="failed").inc()
         logger.error("Gmail send failed: %d %s", resp.status_code, resp.text)
-        raise RuntimeError(f"Gmail send failed: {resp.text}")
+        message = f"Gmail send failed: {resp.status_code}: {resp.text}"
+        if resp.status_code == 401 or (
+            resp.status_code == 403 and "insufficient authentication scopes" in resp.text.lower()
+        ):
+            raise GmailAuthError(message)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise GmailTransientError(message)
+        raise GmailSendError(message, resp.status_code)
 
     result = resp.json()
     EMAILS_SENT_TOTAL.labels(status="sent").inc()
@@ -165,7 +191,7 @@ def _refresh_token_sync(email_account, db) -> str:
             "[GMAIL-AUTH] No refresh token for account %d (%s) — user must reconnect Gmail",
             email_account.id, email_account.email_address,
         )
-        raise RuntimeError(
+        raise GmailAuthError(
             f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
         )
 
@@ -197,7 +223,7 @@ def _refresh_token_sync(email_account, db) -> str:
                 "User must reconnect Gmail. Google error: %s",
                 email_account.id, email_account.email_address, err_body,
             )
-            raise RuntimeError(
+            raise GmailAuthError(
                 f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
             )
         else:
@@ -205,7 +231,7 @@ def _refresh_token_sync(email_account, db) -> str:
                 "[GMAIL-AUTH] Transient token refresh failure for account %d: HTTP %d %s",
                 email_account.id, resp.status_code, err_body,
             )
-            raise RuntimeError(
+            raise GmailTransientError(
                 f"Gmail token refresh failed (HTTP {resp.status_code}) — will retry next cycle"
             )
 
