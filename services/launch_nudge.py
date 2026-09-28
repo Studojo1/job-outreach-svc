@@ -249,6 +249,13 @@ def maybe_sweep(db: Session) -> Optional[dict]:
             return None
         db.add(SystemEvent(event_type=SWEEP_EVENT, created_at=now))
         db.commit()
+        from services import campaign_notices, reconcile
+        reconcile.run(db, now=now)
+        try:
+            campaign_notices.run(db, now=now)
+        except Exception:
+            db.rollback()
+            logger.exception("[NOTICES] run failed")
         result = sweep(db, now=now)
         if result["nudged"]:
             logger.info("[LAUNCH-NUDGE] nudged %d, %d paid-not-launched",

@@ -12,11 +12,12 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from database.session import get_db
-from database.models import User, Campaign
+from database.models import User, Campaign, Candidate
 from services.email_campaign.campaign_service import (
     create_campaign,
     transition_campaign,
     get_campaign_metrics,
+    customer_failure_reason,
 )
 from api.dependencies import get_current_user, require_internal_caller
 from core.analytics import capture
@@ -83,6 +84,9 @@ class CampaignCreateRequest(BaseModel):
     selected_styles: list[str] = []  # Email styles for AI generation
     user_timezone: str = "Asia/Kolkata"
     lead_limit: Optional[int] = None  # Max leads to include (defaults to all)
+    # Start sending in the same request (audit P27). create + a separate
+    # /send left a draft holding the credits whenever the tab closed between.
+    launch: bool = False
 
 
 class CampaignTransitionRequest(BaseModel):
@@ -262,6 +266,29 @@ async def api_create_campaign(
         if not _owned_email_account(db, request.email_account_id, current_user.id):
             raise HTTPException(status_code=403, detail="Gmail account not found for this user")
 
+        # One live campaign at a time (audit P03). A second create used to
+        # overwrite the order's campaign pointer, and the first campaign kept
+        # sending from the student's Gmail, invisible everywhere. Finish,
+        # cancel (credits come back) or launch the existing one first.
+        live = (
+            db.query(Campaign)
+            .join(Candidate, Candidate.id == Campaign.candidate_id)
+            .filter(Candidate.user_id == current_user.id,
+                    Campaign.status.in_(("draft", "running", "paused")))
+            .order_by(Campaign.created_at.desc())
+            .first()
+        )
+        if live is not None:
+            raise HTTPException(status_code=409, detail={
+                "code": "campaign_exists",
+                "campaign_id": live.id,
+                "status": live.status,
+                "message": (
+                    "You already have a campaign that hasn't finished. Open it from your "
+                    "dashboard, or cancel it to get its unused credits back, before starting another."
+                ),
+            })
+
         # Credit check — use SELECT FOR UPDATE to lock the row and prevent race conditions
         # where two simultaneous requests both read the same balance and both pass.
         # This allows multiple campaigns (e.g. 3x200 with 600 credits) but blocks double-clicks.
@@ -329,6 +356,21 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
+        # Zero leads: nothing will ever send, so give the credits straight back
+        # instead of leaving them on an empty campaign (P27).
+        if not result.get("queued_messages"):
+            empty = db.get(Campaign, result["campaign_id"])
+            credits.attach_campaign(reservation, empty)
+            credits.release(db, current_user.id, reserved, credits.RELEASE_CREATE_FAILED,
+                            campaign=empty, note="campaign had no leads")
+            empty.status = "cancelled"
+            db.commit()
+            reserved = 0
+            raise HTTPException(
+                status_code=400,
+                detail="No leads found for this campaign, so nothing was charged. Run lead discovery first.",
+            )
+
         # The campaign now exists and owns the reservation; a later failure must
         # not refund credits its email rows are holding.
         try:
@@ -347,6 +389,10 @@ async def api_create_campaign(
             order = get_or_create_active_order(db, str(current_user.id), candidate_id=request.candidate_id)
             order.candidate_id = order.candidate_id or request.candidate_id
             order.campaign_id = result["campaign_id"]
+            # The order -> campaigns link that a later campaign cannot overwrite.
+            created = db.get(Campaign, result["campaign_id"])
+            if created is not None:
+                created.outreach_order_id = order.id
             order.email_account_id = order.email_account_id or request.email_account_id
             order.status = "campaign_setup"
             order.leads_collected = result.get("queued_messages", 0)
@@ -368,6 +414,12 @@ async def api_create_campaign(
                             email_account_id=request.email_account_id)
         except Exception as oe:
             logger.error("[CAMPAIGN] Failed to link funnel order: %s", oe)
+
+        if request.launch:
+            # Same transition /send performs, in this request, so no window
+            # exists where a draft holds the credits (P27).
+            transition_campaign(db, result["campaign_id"], "running")
+            result["status"] = "running"
 
         capture("campaign_created", str(current_user.id), {
             "campaign_id": result["campaign_id"],
@@ -636,6 +688,44 @@ async def get_user_latest_campaign(
             "created_at": campaign.created_at.isoformat() if campaign.created_at else None,
         }
     }
+
+
+@router.get("/user/all")
+def get_user_campaigns(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Every campaign the user owns, with live state.
+
+    Attached to support tickets (audit P43): the ticket that first reported
+    the orphaned-campaign bug carried only a page URL, and the answer given
+    was wrong because nobody could see the second campaign.
+    """
+    rows = (
+        db.query(Campaign)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == current_user.id)
+        .order_by(Campaign.created_at.desc())
+        .all()
+    )
+    from database.models import EmailSent
+    out = []
+    for c in rows:
+        counts = dict(
+            db.query(EmailSent.status, func.count(EmailSent.id))
+            .filter(EmailSent.campaign_id == c.id).group_by(EmailSent.status).all()
+        )
+        last = db.query(func.max(EmailSent.sent_at)).filter(EmailSent.campaign_id == c.id).scalar()
+        out.append({
+            "id": c.id, "name": c.name, "status": c.status,
+            "pause_reason": c.pause_reason, "order_id": c.outreach_order_id,
+            "sent": counts.get("sent", 0) + counts.get("replied", 0),
+            "unsent": counts.get("pending_enrichment", 0) + counts.get("queued", 0),
+            "failed": counts.get("failed", 0),
+            "last_sent_at": last.isoformat() if last else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+        })
+    return {"campaigns": out}
 
 
 @router.get("/{campaign_id}")
@@ -1023,6 +1113,8 @@ async def get_campaign_emails(
             "reply_sentiment": email.reply_sentiment,
             "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
             "bounce_reason": email.bounce_reason,
+            # A customer-safe reason; error_message stays admin-only (P22).
+            "failure_reason": customer_failure_reason(email.status, email.error_message),
             "is_test": email.is_test or False,
             "followup_number": email.followup_number or 0,
             "parent_email_id": email.parent_email_id,
