@@ -12,7 +12,7 @@ Architecture (Just-In-Time):
 Scheduling rules:
   - First email: 30-180 seconds after launch (ignores business hours — trust signal)
   - All subsequent emails: business hours only (9am-6pm user timezone)
-  - Daily limit: 5-7 emails per day (randomized)
+  - Daily limit: campaign.daily_limit per day, capped at DAILY_LIMIT_CEILING (see _daily_target)
   - Within each day, send times are randomly distributed between 9am-6pm
 """
 

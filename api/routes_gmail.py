@@ -1,6 +1,7 @@
 """Gmail OAuth Routes — Gmail Mailbox OAuth (separate from Login OAuth)."""
 
 import logging
+from typing import Optional
 
 import requests as http_requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -176,19 +177,26 @@ def _resume_auth_paused_campaigns(db: Session, user_id: str, email_address: str)
 
 @router.get("/account")
 async def get_gmail_account(
+    email_account_id: Optional[int] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the current user's connected Gmail account ID, email, and token health."""
-    account = db.query(EmailAccount).filter_by(
-        user_id=str(current_user.id), provider="gmail"
-    ).first()
+    """Return the current user's connected Gmail account ID, email, and token health.
+
+    token_valid is True/False when Google answered, and None when the check
+    itself failed (timeout, DNS). It used to report False for any network
+    blip, which forced the "your emails cannot be sent" banner on healthy
+    mailboxes (audit P48). email_account_id, when given, picks that account
+    instead of an arbitrary one.
+    """
+    q = db.query(EmailAccount).filter_by(user_id=str(current_user.id), provider="gmail")
+    account = (q.filter_by(id=email_account_id).first() if email_account_id else None) or q.first()
 
     if not account:
         raise HTTPException(status_code=404, detail="No Gmail account connected")
 
     # Verify the refresh token is still valid
-    token_valid = False
+    token_valid: Optional[bool] = None
     try:
         resp = http_requests.post(
             "https://oauth2.googleapis.com/token",
@@ -200,7 +208,10 @@ async def get_gmail_account(
             },
             timeout=5,
         )
-        token_valid = resp.status_code == 200
+        if resp.status_code == 200:
+            token_valid = True
+        elif resp.status_code in (400, 401):
+            token_valid = False  # invalid_grant / revoked: really dead
     except Exception:
         logger.warning("[GmailOAuth] Token validation request failed for account %s", account.id)
 

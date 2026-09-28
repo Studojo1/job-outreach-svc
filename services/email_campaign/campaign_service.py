@@ -339,6 +339,37 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
     }
 
 
+# What a customer is told about an email that did not go out (audit P22).
+# error_message is internal (stack text, provider payloads); these are not.
+_NO_EMAIL_MARKERS = ("apollo could not find", "lead not found")
+_AUTH_MARKERS = ("token refresh failed", "auth expired", "must reconnect", '"code": 401',
+                 "insufficient authentication scopes", "email account not found")
+
+
+def customer_failure_reason(status: Optional[str], error_message: Optional[str]) -> Optional[str]:
+    msg = (error_message or "").lower()
+    if status == "bounced":
+        return "The address bounced. We queued a replacement contact where we could."
+    if status == "expired":
+        return "The campaign ended before this email was sent. Its credit was returned."
+    if status != "failed":
+        return None
+    if any(m in msg for m in _NO_EMAIL_MARKERS):
+        return "No verified email address exists for this contact, so it was skipped."
+    if any(m in msg for m in _AUTH_MARKERS):
+        return "Gmail disconnected. Reconnect Gmail to keep sending."
+    if "enrichment" in msg:
+        return "We could not verify this contact's email, so it was skipped."
+    if "cancelled" in msg:
+        return "The campaign was cancelled before this email was sent."
+    return "Gmail did not accept this email."
+
+
+def is_skipped_no_email(error_message: Optional[str]) -> bool:
+    msg = (error_message or "").lower()
+    return any(m in msg for m in _NO_EMAIL_MARKERS) or "enrichment" in msg
+
+
 def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
     """Compute metrics for a campaign."""
     campaign = db.query(Campaign).filter_by(id=campaign_id).first()
@@ -407,6 +438,22 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
 
     reply_rate = (replied / sent * 100) if sent > 0 else 0.0
 
+    # Split "Failed" (audit P22): most failures were leads with no email at
+    # all, which is a skip, not Studojo breaking the campaign.
+    failed_msgs = [m for (m,) in db.query(EmailSent.error_message).filter(
+        EmailSent.campaign_id == campaign_id, EmailSent.status == "failed")]
+    skipped_no_email = sum(1 for m in failed_msgs if is_skipped_no_email(m))
+
+    # "X of Y delivered" for the finished-campaign banner (P20): first touches only.
+    first_touch = (EmailSent.followup_number == 0) & (EmailSent.is_test.isnot(True))
+    first_total = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id, first_touch).scalar() or 0
+    first_delivered = db.query(func.count(EmailSent.id)).filter(
+        EmailSent.campaign_id == campaign_id, first_touch,
+        EmailSent.status.in_(["sent", "replied", "bounced"])).scalar() or 0
+    last_sent_at = db.query(func.max(EmailSent.sent_at)).filter(
+        EmailSent.campaign_id == campaign_id).scalar()
+
     metrics = {
         "campaign_id": campaign_id,
         "campaign_name": campaign.name,
@@ -425,6 +472,20 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
         "emails_negative": negative,
         "emails_neutral": neutral_replies,
         "reply_rate": round(reply_rate, 2),
+        "emails_skipped_no_email": skipped_no_email,
+        "emails_failed_other": failed - skipped_no_email,
+        "first_touch_total": first_total,
+        "first_touch_delivered": first_delivered,
+        "last_sent_at": last_sent_at.isoformat() if last_sent_at else None,
+        # The real sending rate (P41: the dashboard said 5-7/day).
+        "daily_limit": campaign.daily_limit,
+        # Why it stopped (P40).
+        "paused_at": campaign.paused_at.isoformat() if campaign.paused_at else None,
+        "paused_by": campaign.paused_by,
+        "pause_reason": campaign.pause_reason,
+        # What this campaign holds of the wallet (P39).
+        "credits_reserved": campaign.credits_reserved,
+        "credits_released": campaign.credits_released or 0,
     }
 
     logger.info("[CAMPAIGN] Metrics for #%d: %s", campaign_id, metrics)
