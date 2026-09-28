@@ -389,6 +389,17 @@ class LaunchNudge(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class CampaignNotice(Base):
+    """One lifecycle email sent to a customer about a campaign (migration 051)."""
+    __tablename__ = "campaign_notices"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(30), nullable=False)
+    occurrence = Column(String(40), nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CreditLedger(Base):
     """One row per change to user_credits (migration 049). Written only by
     services/credits.py, in the same transaction as the balance change.

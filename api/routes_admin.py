@@ -1325,15 +1325,25 @@ async def paid_funnel(
                        is_initial,
                        EmailSent.error_message.ilike("%enrichment failed%"))
             )
-            auth_failures = _fail_count(
-                sa_and(EmailSent.status == "failed",
-                       EmailSent.created_at > _recent_window,
-                       sa_or(
-                           EmailSent.error_message.ilike("%invalid authentication%"),
-                           EmailSent.error_message.ilike("%authError%"),
-                           EmailSent.error_message.ilike('%"code": 401%'),
-                       ))
+            # Audit P17/P21: the patterns missed "Token refresh failed ... must
+            # reconnect" (502 of 729 auth failures), and the 7-day window on
+            # created_at (launch time, not failure time) zeroed every mailbox
+            # that died more than a week after launch. All-time is the headline;
+            # recent uses when the row actually failed.
+            _auth = sa_or(
+                EmailSent.error_message.ilike("%invalid authentication%"),
+                EmailSent.error_message.ilike("%authError%"),
+                EmailSent.error_message.ilike('%"code": 401%'),
+                EmailSent.error_message.ilike("%Token refresh failed%"),
+                EmailSent.error_message.ilike("%auth expired%"),
+                EmailSent.error_message.ilike("%must reconnect%"),
+                EmailSent.error_message.ilike("%insufficient authentication scopes%"),
             )
+            auth_failures = _fail_count(sa_and(EmailSent.status == "failed", _auth))
+            auth_failures_recent = _fail_count(sa_and(
+                EmailSent.status == "failed", _auth,
+                func.coalesce(EmailSent.status_changed_at, EmailSent.created_at) > _recent_window,
+            ))
             # Sample error messages (top 3 distinct)
             sample_errors = [
                 r[0] for r in
@@ -1387,6 +1397,8 @@ async def paid_funnel(
                 "id": best_campaign.id,
                 "name": best_campaign.name,
                 "status": best_campaign.status,
+                "pause_reason": best_campaign.pause_reason,
+                "paused_by": best_campaign.paused_by,
                 "daily_limit": best_campaign.daily_limit,
                 "started_at": best_campaign.started_at.isoformat() if best_campaign.started_at else None,
                 "gmail_account": email_account.email_address if email_account else None,
@@ -1404,6 +1416,7 @@ async def paid_funnel(
                     "failure_breakdown": {
                         "enrichment": enrichment_failures,
                         "auth": auth_failures,
+                        "auth_last_7d": auth_failures_recent,
                         "other": max(0, failed - enrichment_failures - auth_failures),
                     },
                     "sample_errors": sample_errors,
