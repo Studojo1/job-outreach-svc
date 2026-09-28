@@ -41,9 +41,9 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
-from database.models import Campaign, Candidate, EmailSent, OutreachOrder, UserCredit
+from database.models import Campaign, Candidate, CreditLedger, EmailSent, OutreachOrder, UserCredit
 from database.session import SessionLocal
 from services import credits
 from services.email_campaign.outcomes import PAUSE_REASON_GMAIL_AUTH, holds_paid_slot
@@ -56,6 +56,14 @@ def _is_auth_failure(email: EmailSent) -> bool:
     msg = (email.error_message or "").lower()
     return (msg.startswith("token refresh failed") or "gmail auth expired" in msg
             or '"code": 401' in msg or "insufficient authentication scopes" in msg)
+
+
+def _already_released_for_failures(db, campaign_id) -> int:
+    released = db.query(func.coalesce(func.sum(CreditLedger.delta_used), 0)).filter(
+        CreditLedger.campaign_id == campaign_id,
+        CreditLedger.reason == credits.RELEASE_SEND_FAILED,
+    ).scalar()
+    return -int(released)
 
 
 def _owner(db, campaign):
@@ -110,13 +118,17 @@ def run(db, apply: bool) -> dict:
                     c.pause_reason = PAUSE_REASON_GMAIL_AUTH
                     report[uid]["campaigns_reopened"] += 1
 
-            # 3. other failed paid first touches return their credit
+            # 3. other failed paid first touches return their credit. Failed
+            # rows stay 'failed', so subtract what the ledger already returned
+            # for them (an earlier run of this script, or the wave-2 worker);
+            # otherwise every rerun pays the same failures back again.
             lost = [r for r in rows if r.status == "failed" and holds_paid_slot(r)
                     and r.id not in replaced_ids]
-            if lost:
-                n = credits.release(db, uid, len(lost), credits.RELEASE_SEND_FAILED,
+            owed = len(lost) - _already_released_for_failures(db, c.id)
+            if owed > 0:
+                n = credits.release(db, uid, owed, credits.RELEASE_SEND_FAILED,
                                     campaign=c, actor=ACTOR,
-                                    note=f"{len(lost)} failed first touches before wave 2")
+                                    note=f"{owed} failed first touches before wave 2")
                 report[uid]["released_failed"] += n
 
             # 4. ended campaigns still holding unsent paid work

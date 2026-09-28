@@ -122,3 +122,34 @@ def test_dry_run_changes_nothing(db):
     assert _used(db) == 200
     assert db.query(CreditLedger).count() == 0
     assert db.get(Campaign, 45).credits_reserved is None
+
+
+def test_rerun_does_not_pay_failures_back_twice(db):
+    """Prod, 28 Sep: after the 08:31 UTC --apply, a dry run offered 739 credits again."""
+    db.add(UserCredit(user_id="u", total_credits=100, used_credits=100))
+    db.add(Campaign(id=51, candidate_id=1, name="c", status="running", created_at=datetime(2026, 7, 1)))
+    _rows(db, 51, "sent", 42)
+    _rows(db, 51, "failed", 58, error_message="Apollo could not find email for this contact")
+    db.commit()
+
+    assert run(db, apply=True)["u"]["released_failed"] == 58
+    assert _used(db) == 42
+    assert run(db, apply=True)["u"]["released_failed"] == 0
+    assert _used(db) == 42
+
+
+def test_rerun_releases_only_failures_nobody_returned_yet(db):
+    """The wave-2 worker returns new failures itself; a rerun pays only the rest."""
+    from services import credits
+
+    db.add(UserCredit(user_id="u", total_credits=100, used_credits=100))
+    db.add(Campaign(id=52, candidate_id=1, name="c", status="running", created_at=datetime(2026, 7, 1),
+                    credits_reserved=100, credits_released=0))
+    _rows(db, 52, "sent", 90)
+    _rows(db, 52, "failed", 10, error_message="Apollo could not find email for this contact")
+    db.commit()
+    credits.release(db, "u", 4, credits.RELEASE_SEND_FAILED, campaign=db.get(Campaign, 52))
+    db.commit()
+
+    assert run(db, apply=True)["u"]["released_failed"] == 6
+    assert _used(db) == 90
