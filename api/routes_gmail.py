@@ -17,7 +17,7 @@ from services.authentication.google_oauth import (
     verify_gmail_state,
 )
 from pydantic import BaseModel
-from services.authentication.token_manager import store_user_tokens
+from services.authentication.token_manager import MailboxOwnedElsewhere, store_user_tokens
 from api.dependencies import get_current_user
 from core.analytics import capture
 
@@ -45,8 +45,9 @@ def gmail_oauth_connect_url(current_user: User = Depends(get_current_user)):
 
 @router.get("/callback")
 async def gmail_oauth_callback(
-    code: str,
+    code: str | None = None,
     state: str = "",
+    error: str | None = None,
 ):
     """Google redirects here (api.studojo.com). Hand the one-time code to the
     signed-in page, which finishes the connection.
@@ -61,6 +62,11 @@ async def gmail_oauth_callback(
     """
     from urllib.parse import urlencode
     frontend_base = f"{settings.FRONTEND_URL}/connect/gmail"
+    # Cancel on Google's screen comes back as ?error=access_denied with no
+    # code. A required `code` turned that into a raw 422 on the API host.
+    if error or not code:
+        logger.info("[GmailOAuth] Callback without a code (error=%s)", error)
+        return RedirectResponse(url=f"{frontend_base}?status=error&message=cancelled")
     if not state or verify_gmail_state(state) is None:
         logger.warning("[GmailOAuth] Callback with missing/invalid/expired state")
         return RedirectResponse(url=f"{frontend_base}?status=error&message=invalid_state")
@@ -110,10 +116,18 @@ async def gmail_oauth_complete(
     if not email_address:
         raise HTTPException(status_code=400, detail="Google did not share an email address.")
 
-    await store_user_tokens(
-        db=db, user_id=user_id, email_address=email_address,
-        access_token=access_token, refresh_token=refresh_token, expires_in=expires_in,
-    )
+    try:
+        await store_user_tokens(
+            db=db, user_id=user_id, email_address=email_address,
+            access_token=access_token, refresh_token=refresh_token, expires_in=expires_in,
+        )
+    except MailboxOwnedElsewhere:
+        logger.warning("[GmailOAuth] %s is connected to another account; refusing for %s", email_address, user_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"{email_address} is already connected to a different Studojo account. "
+                   "Sign in with that account, or connect a different Gmail.",
+        ) from None
     capture("gmail_connected", user_id, {"email_address": email_address, "provider": "gmail"})
 
     account = db.query(EmailAccount).filter_by(email_address=email_address, user_id=user_id).first()

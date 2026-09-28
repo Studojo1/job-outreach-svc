@@ -108,3 +108,59 @@ def test_own_flow_connects(monkeypatch):
         routes_gmail.GmailCompleteRequest(code="c", state=google_oauth.sign_gmail_state("u1")),
         current_user=_U("u1"), db=_DB()))
     assert out["status"] == "connected" and stored["user_id"] == "u1"
+
+
+def test_cancel_on_googles_screen_returns_to_the_app():
+    """NEW-02: ?error=access_denied has no code; it used to be a raw 422."""
+    resp = asyncio.run(routes_gmail.gmail_oauth_callback(error="access_denied", state="x"))
+    assert resp.status_code == 307
+    assert "status=error&message=cancelled" in resp.headers["location"]
+
+
+def test_someone_elses_mailbox_is_not_taken_over():
+    """Connecting a Gmail another account already holds must not move its row."""
+    from services.authentication import token_manager
+
+    class _Acct:
+        user_id = "owner"
+        email_address = "shared@gmail.com"
+
+    class _Q:
+        def __init__(self, hit): self.hit = hit
+        def filter(self, *a): return self
+        def first(self): return self.hit
+
+    class _DB:
+        calls = 0
+        def query(self, *a):
+            _DB.calls += 1
+            return _Q(None if _DB.calls == 1 else _Acct())   # none by user, one by address
+        def rollback(self): pass
+        def commit(self): raise AssertionError("must not commit")
+
+    with pytest.raises(token_manager.MailboxOwnedElsewhere):   # raised before any write
+        asyncio.run(token_manager.store_user_tokens(
+            _DB(), "intruder", "shared@gmail.com", "at", "rt", 3599))
+
+
+def test_complete_turns_a_taken_mailbox_into_409(monkeypatch):
+    from services.authentication.token_manager import MailboxOwnedElsewhere
+
+    async def exchange(code):
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 3599,
+                "scope": "gmail.send gmail.readonly"}
+
+    async def info(token):
+        return {"email": "shared@gmail.com"}
+
+    async def store(**kw):
+        raise MailboxOwnedElsewhere(kw["email_address"])
+
+    monkeypatch.setattr(routes_gmail, "exchange_gmail_code", exchange)
+    monkeypatch.setattr(routes_gmail, "get_google_user_info", info)
+    monkeypatch.setattr(routes_gmail, "store_user_tokens", store)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(routes_gmail.gmail_oauth_complete(
+            routes_gmail.GmailCompleteRequest(code="c", state=google_oauth.sign_gmail_state("u1")),
+            current_user=_U("u1"), db=None))
+    assert exc.value.status_code == 409
