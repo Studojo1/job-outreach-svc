@@ -21,7 +21,7 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 # Valid state transitions (JIT: enrichment happens during campaign_running, not as a separate step)
 VALID_TRANSITIONS = {
     "created": ["leads_generating", "profile_complete"],
-    "profile_complete": ["leads_generating", "leads_ready"],
+    "profile_complete": ["leads_generating", "leads_ready", "campaign_setup"],
     "leads_generating": ["leads_ready"],
     "leads_ready": ["campaign_setup"],
     "campaign_setup": ["email_connected"],
@@ -140,6 +140,22 @@ async def list_orders(
     for o in orders:
         _heal_candidate_binding(db, o)
     return {"orders": [_serialize_order(o) for o in orders]}
+
+
+@router.get("/next-step")
+def get_next_step(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Where this user should go next, from what they actually hold.
+
+    A paid user with spendable credits and nothing running always gets Launch
+    (or the one thing blocking it: Gmail, or a finished profile). Every
+    outreach entry point asks this before falling back to its own routing.
+    Plain `def`: blocking DB work runs on the threadpool.
+    """
+    from services.next_step import resolve_next_step
+    return resolve_next_step(db, str(current_user.id)).as_dict()
 
 
 @router.get("/{order_id}")
@@ -296,6 +312,24 @@ async def resume_order(
 
     status = order.status
     plan_type = getattr(order, "plan_type", "email") or "email"
+
+    # A paid user who has not launched goes to Launch, whatever this order's
+    # status says. order.status is exactly what goes stale after payment: one
+    # paid user's order still read 'created' and this sent them to upload.
+    if status not in ("campaign_running", "completed"):
+        from services.next_step import PAID_NOT_LAUNCHED, resolve_next_step
+        step = resolve_next_step(db, str(current_user.id))
+        if step.state in PAID_NOT_LAUNCHED:
+            db.refresh(order)
+            return {
+                "redirect": step.path,
+                "order_id": order.id,
+                "status": order.status,
+                "candidate_id": step.candidate_id or order.candidate_id,
+                "campaign_id": step.campaign_id or order.campaign_id,
+                "email_account_id": step.email_account_id or order.email_account_id,
+                "next_step": step.state,
+            }
 
     # profile_complete (create_order on a candidate with no leads yet) is the
     # same place: profile done, discovery not. Falling through to the else sent

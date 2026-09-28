@@ -48,6 +48,20 @@ def _trusted_internal_caller(request: Request) -> bool:
     return hmac.compare_digest(supplied.encode(), expected.encode())
 
 
+def require_internal_caller(request: Request) -> None:
+    """Gate for cluster-internal worker routes (send cycle, mesa sweep).
+
+    These used to rely on "only reachable in-cluster", but the studojo.com
+    ingress forwards /api/v1/outreach/* here, so they were public. Callers
+    (job-outreach-worker, the mesa CronJob) send the shared secret.
+    """
+    if not _trusted_internal_caller(request):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Internal endpoint",
+        )
+
+
 def get_current_user(
     request: Request,
     db: Session = Depends(get_db),

@@ -114,6 +114,14 @@ jobs:
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             --from=secret/app-secrets --keys=INTERNAL_API_SECRET \
             -n ${{ env.NAMESPACE }}
+          # Emailer's send-template secret, for the paid-not-launched nudges
+          # (services/launch_nudge.py). Only wired once the app-secrets key
+          # exists; without it the nudges are off and nothing else changes.
+          if [ -n "$(kubectl get secret app-secrets -n ${{ env.NAMESPACE }} -o jsonpath='{.data.emailer-internal-secret}')" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              --from=secret/app-secrets --keys=emailer-internal-secret \
+              -n ${{ env.NAMESPACE }}
+          fi
           if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
             kubectl set env deployment/${{ env.SERVICE_NAME }} \
               CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \

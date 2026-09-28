@@ -1258,6 +1258,10 @@ def _process_cycle():
         from services.email_campaign.replenishment import requeue_credit_paused
         requeue_credit_paused(db)
 
+        # Phase 6: paid-not-launched sweep (hourly, self-throttled via system_events)
+        from services.launch_nudge import maybe_sweep
+        maybe_sweep(db)
+
     finally:
         db.close()
 

@@ -182,7 +182,10 @@ def safe_advance_discovery_status(db: Session, user_id: str, candidate_id: int, 
 
 # Every status before campaign_setup. A user who has paid must never be left
 # at one of these.
-FROZEN_BEHIND_PAYMENT = ("created", "leads_generating", "leads_ready", "enriching", "enrichment_complete")
+# profile_complete was missing (audit P12): 4 paid orders sat there with no way
+# forward, because nothing promoted them and no transition led out.
+FROZEN_BEHIND_PAYMENT = ("created", "profile_complete", "leads_generating", "leads_ready",
+                         "enriching", "enrichment_complete")
 
 
 def promote_paid_order(order: Optional[OutreachOrder], reason: str) -> bool:
