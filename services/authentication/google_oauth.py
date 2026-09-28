@@ -13,7 +13,7 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - a public OAuth endpoint URL, not a secret
 
 # --- Gmail OAuth client ---
 GMAIL_CLIENT_ID = settings.GMAIL_CLIENT_ID

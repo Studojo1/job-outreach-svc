@@ -32,4 +32,4 @@ async def score_leads(
         return {"status": "success", "scored_count": scored_count}
     except Exception as e:
         logger.error(f"[SCORING] Error scoring candidate {candidate_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

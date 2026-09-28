@@ -27,12 +27,21 @@ ignore = [
     # try/except/pass is used deliberately in several best-effort paths where
     # failing loudly would break the request for no benefit.
     "S110",
+    # Same idea inside loops: skip one bad item (a card, a row, a page) and keep
+    # going. Reviewed 2026-09-28: all 10 are per-item scraping/parsing skips.
+    "S112",
+    # `random` here is send jitter, human-like pacing, daily-limit spread and
+    # picking a greeting variant. Reviewed 2026-09-28: none of the 21 uses
+    # generates a token, password, id or anything security-bearing. Anything
+    # that does must use `secrets`.
+    "S311",
 ]
 
 [lint.per-file-ignores]
 # Assertions are the point of a test.
 "tests/*" = ["S101"]
-"scripts/*" = ["T20"]      # scripts are meant to print
+"scripts/*" = ["T20", "S311"]      # scripts are meant to print; random is pacing
+"linkedin_sender.py" = ["T20", "S311"]  # standalone local CLI, same as scripts/
 "migrations/*" = ["ALL"]   # historical, never edited
 
 [lint.flake8-bugbear]

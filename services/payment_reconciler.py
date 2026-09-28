@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 
 from database.session import SessionLocal
 from database.models import PaymentOrder, Coupon
-from core.config import settings
 
 logger = logging.getLogger(__name__)
 

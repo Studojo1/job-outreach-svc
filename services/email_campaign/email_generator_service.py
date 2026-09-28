@@ -1000,7 +1000,7 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         cred_required = [w.strip("(),.'") for w in cred.split() if w.isupper() and len(w.strip("(),.'")) >= 3]
 
         body = ""
-        for attempt in range(2):
+        for _attempt in range(2):
             result = generate_json(
                 prompt, schema, temperature=0.85, system_prompt=_EMAIL_SYSTEM_PROMPT,
                 deployment=settings.AZURE_OPENAI_EMAIL_DEPLOYMENT,
@@ -1035,7 +1035,7 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
         raise  # let campaign_worker handle content filter blocks specifically
     except Exception as e:
         logger.error("[EmailGen] Failed for %s: %s", lead.name, e, exc_info=True)
-        raise ValueError(f"Email generation failed for {lead.name}: {e}")
+        raise ValueError(f"Email generation failed for {lead.name}: {e}") from e
 
 
 # ── Follow-up Email Generation ────────────────────────────────────────────────

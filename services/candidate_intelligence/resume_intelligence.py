@@ -114,7 +114,7 @@ def _parse_json(raw: str) -> dict:
         end = raw.rfind("}")
         if start != -1 and end != -1:
             return json.loads(raw[start:end + 1])
-        raise ValueError(f"Could not parse resume profile JSON: {raw[:200]}")
+        raise ValueError(f"Could not parse resume profile JSON: {raw[:200]}") from None
 
 
 # ---------------------------------------------------------------------------

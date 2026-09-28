@@ -1,7 +1,6 @@
 """Pricing configuration — email, LinkedIn, and both-channel plans."""
 
 from dataclasses import dataclass
-from typing import Literal
 
 
 @dataclass(frozen=True)

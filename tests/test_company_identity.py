@@ -20,7 +20,7 @@ import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from services.extension.contact_finder import (
-    _same_company, _normalise_company, email_matches_company,
+    _same_company, email_matches_company,
 )
 
 

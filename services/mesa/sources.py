@@ -51,7 +51,7 @@ def _get(url: str, headers: dict | None = None, proxy: bool = False):
     for px in routes:
         for _ in range(2):
             try:
-                r = httpx.get(url, headers=headers or _H, timeout=_T, verify=False,
+                r = httpx.get(url, headers=headers or _H, timeout=_T, verify=False,  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
                               proxy=px, follow_redirects=True)
                 if r.status_code < 500:
                     return r
@@ -248,7 +248,7 @@ def _src_weworkremotely(keywords, location, *_):
             blk = m.group(1)
 
             def tag(t):
-                mm = re.search(rf"<{t}>(.*?)</{t}>", blk, re.S)
+                mm = re.search(rf"<{t}>(.*?)</{t}>", blk, re.S)  # noqa: B023 - called immediately in this iteration
                 return html.unescape(mm.group(1).strip()) if mm else ""
             title = tag("title")
             if not _kw_match(title, keywords):

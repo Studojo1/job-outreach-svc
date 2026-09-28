@@ -778,7 +778,6 @@ def build_payload_from_answers(
     # Geography from resume_profile (candidate's actual location)
     geo = resume_profile.get("geography") or {}
     resume_city = geo.get("city", "")
-    resume_country = geo.get("country", "")
 
     # ── Quiz answer mapping ─────────────────────────────────────────────────
     career_stage  = answers.get("career_stage", "")

@@ -62,7 +62,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         return text
     except Exception as e:
         logger.error(f"Error parsing PDF: {e}")
-        raise ValueError(f"Could not parse PDF file: {str(e)}")
+        raise ValueError(f"Could not parse PDF file: {str(e)}") from e
 
 
 def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
@@ -138,14 +138,16 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
         import io
         import zipfile
-        import xml.etree.ElementTree as ET
+        import defusedxml.ElementTree as DefusedET
 
         with io.BytesIO(file_bytes) as f:
             with zipfile.ZipFile(f) as z:
                 if "word/document.xml" not in z.namelist():
                     raise ValueError("Invalid DOCX file")
                 xml_content = z.read("word/document.xml")
-                tree = ET.fromstring(xml_content)
+                # defusedxml: this is an uploaded file, so refuse entity
+                # expansion and external references (billion laughs, XXE).
+                tree = DefusedET.fromstring(xml_content)
                 texts = []
                 for t_elem in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
                     if t_elem.text:
@@ -155,7 +157,7 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                 return text
     except Exception as e:
         logger.error(f"Error parsing DOCX: {e}")
-        raise ValueError(f"Could not parse DOCX file: {str(e)}")
+        raise ValueError(f"Could not parse DOCX file: {str(e)}") from e
 
 
 # Degree tokens, and the words that mean the line is NOT a degree the candidate

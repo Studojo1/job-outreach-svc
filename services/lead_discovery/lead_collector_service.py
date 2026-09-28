@@ -811,7 +811,6 @@ def collect_dream_company_leads(
                 logger.info("[DREAM] No results for company '%s'", company_name)
                 continue
 
-            before = total_added
             # Use a high target so we store all results from the single page
             current_count = _store_people(people, candidate_id, 10000, db, 0)
             total_added += current_count

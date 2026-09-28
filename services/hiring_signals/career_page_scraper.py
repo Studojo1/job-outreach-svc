@@ -9,7 +9,6 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -77,7 +76,7 @@ async def scrape_career_page(domain: str, company_name: str = "") -> dict:
         headers=_HEADERS,
         follow_redirects=True,
         timeout=_TIMEOUT,
-        verify=False,  # some company sites have cert issues
+        verify=False,  # noqa: S501 - anonymous scrape of public pages; some company sites have cert issues
     ) as client:
         careers_url, html = await _find_careers_page(client, domain)
 
