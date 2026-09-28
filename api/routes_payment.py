@@ -159,7 +159,7 @@ async def validate_coupon(
     # High-discount internal codes work on staging only. Same 404 an unknown
     # code gets, so probing can't distinguish "blocked" from "does not exist".
     if not settings.RAZORPAY_TEST_MODE and is_internal_only_coupon(
-        coupon.discount_type, coupon.discount_value
+        coupon.discount_type, coupon.discount_value, coupon.max_uses
     ):
         raise HTTPException(status_code=404, detail="Invalid coupon code")
     # Per-recipient founder coupons are bound to one buyer — reject if someone
@@ -273,7 +273,7 @@ async def create_order(
                 valid = False
             # High-discount internal codes are staging-only.
             if not settings.RAZORPAY_TEST_MODE and is_internal_only_coupon(
-                coupon.discount_type, coupon.discount_value
+                coupon.discount_type, coupon.discount_value, coupon.max_uses
             ):
                 valid = False
             # Per-recipient founder coupons are bound to one buyer.

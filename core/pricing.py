@@ -116,17 +116,24 @@ def get_dodo_product_id(settings) -> str:
     return settings.DODO_PRODUCT_OUTREACH
 
 
-# Coupons at or above this discount are internal tools — the 99%/100% codes we
-# use for testing, Google's OAuth review, and one-off comps. They are usable on
-# staging (test mode) and rejected in production so a leaked code cannot hand
-# out free plans on the live site. Campus-ambassador and partner codes sit far
-# below this line.
+# Coupons at or above this discount hand out free or near-free plans. An
+# UNLIMITED one is an internal tool (TREAT100, SAVE99): usable on staging (test
+# mode), rejected in production so a leaked code cannot give away plans on the
+# live site. A high-discount code WITH a use cap (FREE100 for a LinkedIn promo,
+# PRASHIKA100 promised to one person, OAUTH100 capped for Google's app review)
+# is a deliberate, bounded grant and keeps working. Campus-ambassador and
+# partner codes sit far below this line either way.
 INTERNAL_DISCOUNT_FLOOR = 50.0
 
 
-def is_internal_only_coupon(discount_type: str, discount_value: float) -> bool:
-    """True for the high-discount codes that must not work in production."""
-    return discount_type == "percent" and float(discount_value) >= INTERNAL_DISCOUNT_FLOOR
+def is_internal_only_coupon(discount_type: str, discount_value: float, max_uses=None) -> bool:
+    """True for the high-discount codes that must not work in production:
+    at or above INTERNAL_DISCOUNT_FLOOR percent AND with no use cap."""
+    return (
+        discount_type == "percent"
+        and float(discount_value) >= INTERNAL_DISCOUNT_FLOOR
+        and max_uses is None
+    )
 
 
 def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -> int:
