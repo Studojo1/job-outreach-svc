@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -202,6 +202,25 @@ class CreateOrderRequest(BaseModel):
     coupon_code: Optional[str] = None
 
 
+def _has_something_to_send(db: Session, user_id: str) -> bool:
+    from database.models import Candidate, Lead
+    has_leads = (
+        db.query(Lead.id).join(Candidate, Candidate.id == Lead.candidate_id)
+        .filter(Candidate.user_id == user_id).first() is not None
+    )
+    if has_leads:
+        return True
+    try:
+        with db.begin_nested():
+            return db.execute(
+                text("SELECT 1 FROM extension_drafts WHERE user_id = :u LIMIT 1"), {"u": user_id}
+            ).first() is not None
+    except Exception:
+        # Never block a payment on a failed check.
+        logger.warning("[PAYMENT] extension_drafts check failed for %s; allowing", user_id)
+        return True
+
+
 @router.post("/create-order")
 async def create_order(
     body: CreateOrderRequest,
@@ -237,6 +256,15 @@ async def create_order(
         raise HTTPException(
             status_code=400,
             detail="That plan is no longer available. Please choose one of the current plans.",
+        )
+
+    # Nothing to send to, nothing to sell (B2C UC-Q24). Only when the user has
+    # no leads on any candidate and has never drafted from the extension, whose
+    # users buy credits for one-off sends without running discovery.
+    if (plan.email_credits or 0) > 0 and not _has_something_to_send(db, current_user.id):
+        raise HTTPException(
+            status_code=409,
+            detail="We have not found hiring managers for you yet, so there is nothing to buy. Run the search again first.",
         )
 
     # email_50 is India-only (no USD price); block non-India orders
@@ -839,7 +867,7 @@ async def get_credits(
     if not credit:
         return {"total_credits": 0, "used_credits": 0, "available_credits": 0,
                 "emails_delivered": 0, "emails_scheduled": 0, "reserved_credits": 0,
-                "has_active_campaign": False}
+                "has_active_campaign": False, "campaign_status": None}
 
     counts = (
         db.query(EmailSent.status, func.count(EmailSent.id))
@@ -854,13 +882,14 @@ async def get_credits(
     by = {st: n for st, n in counts}
     delivered = by.get("sent", 0)
     scheduled = by.get("pending_enrichment", 0) + by.get("queued", 0)
-    active = (
-        db.query(Campaign.id)
+    live = {
+        st for (st,) in db.query(Campaign.status)
         .join(Candidate, Candidate.id == Campaign.candidate_id)
         .filter(Candidate.user_id == current_user.id,
                 Campaign.status.in_(["running", "paused"]))
-        .first() is not None
-    )
+        .distinct()
+    }
+    active = bool(live)
     return {
         "total_credits": credit.total_credits,
         "used_credits": credit.used_credits,
@@ -870,6 +899,9 @@ async def get_credits(
         "emails_scheduled": scheduled,
         "reserved_credits": max(0, credit.used_credits - delivered),
         "has_active_campaign": active,
+        # has_active_campaign is true for paused campaigns too, so the pricing
+        # page said "campaign running" for a paused one (PP-P39).
+        "campaign_status": "running" if "running" in live else ("paused" if live else None),
     }
 
 
