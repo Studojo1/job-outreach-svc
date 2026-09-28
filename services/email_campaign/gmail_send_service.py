@@ -14,6 +14,9 @@ from core.metrics import EMAILS_SENT_TOTAL
 logger = get_logger(__name__)
 
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+# (connect, read) seconds. requests has no default, so without this one hung
+# connection to Google stalls the whole send cycle with no ceiling.
+GMAIL_HTTP_TIMEOUT = (5, 30)
 GMAIL_MESSAGE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 
 
@@ -100,7 +103,7 @@ def send_gmail_email(
     if thread_id:
         payload["threadId"] = thread_id
 
-    resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers)
+    resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers, timeout=GMAIL_HTTP_TIMEOUT)
 
     if not resp.ok:
         EMAILS_SENT_TOTAL.labels(status="failed").inc()
@@ -175,7 +178,7 @@ def _refresh_token_sync(email_account, db) -> str:
         "client_secret": settings.GMAIL_CLIENT_SECRET,
         "refresh_token": email_account.refresh_token,
         "grant_type": "refresh_token",
-    })
+    }, timeout=GMAIL_HTTP_TIMEOUT)
 
     if not resp.ok:
         try:

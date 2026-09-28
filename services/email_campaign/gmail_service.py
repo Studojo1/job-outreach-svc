@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+from services.email_campaign.gmail_send_service import GMAIL_HTTP_TIMEOUT  # noqa: E402
 
 
 class GmailService:
@@ -61,7 +62,7 @@ class GmailService:
             "grant_type": "refresh_token",
         }
 
-        resp = requests.post(GOOGLE_TOKEN_URL, data=data)
+        resp = requests.post(GOOGLE_TOKEN_URL, data=data, timeout=GMAIL_HTTP_TIMEOUT)
         if not resp.ok:
             logger.error("Token refresh failed for %s: %s", account.email_address, resp.text)
             raise RuntimeError(f"Token refresh failed: {resp.text}")
@@ -150,7 +151,7 @@ class GmailService:
         }
         payload = {"raw": raw_message}
 
-        resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers)
+        resp = requests.post(GMAIL_SEND_URL, json=payload, headers=headers, timeout=GMAIL_HTTP_TIMEOUT)
 
         logger.info("Gmail API response: status=%d", resp.status_code)
 

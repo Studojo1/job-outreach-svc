@@ -25,6 +25,7 @@ from api.dependencies import get_current_user
 from core.analytics import capture
 from core import meta_capi
 import services.dodo_payments as dodo_svc
+from services import credits
 
 logger = logging.getLogger(__name__)
 
@@ -304,8 +305,10 @@ async def create_order(
             idempotency_key=idem_key,
         )
         db.add(order)
+        db.flush()  # order.id for the ledger row
         if plan.email_credits:
-            _grant_credits(db, current_user.id, plan.email_credits)
+            _grant_credits(db, current_user.id, plan.email_credits,
+                           reason=credits.GRANT_COUPON, payment_order_id=order.id)
         if coupon_id:
             db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
         _set_plan_on_order(db, outreach_order_id, plan)
@@ -840,15 +843,10 @@ async def get_credits(
     }
 
 
-def _grant_credits(db: Session, user_id: str, amount: int):
-    """Add email credits to user's balance. Creates row if not exists."""
-    credit = db.query(UserCredit).filter_by(user_id=user_id).first()
-    if credit:
-        credit.total_credits += amount
-        credit.updated_at = datetime.utcnow()
-    else:
-        credit = UserCredit(user_id=user_id, total_credits=amount)
-        db.add(credit)
+def _grant_credits(db: Session, user_id: str, amount: int,
+                   reason: str = credits.GRANT_PAYMENT, payment_order_id: int | None = None):
+    """Add email credits to user's balance (ledgered). Creates row if not exists."""
+    credits.grant(db, user_id, amount, reason, payment_order_id=payment_order_id)
 
 
 def _set_plan_on_order(db: Session, outreach_order_id: int | None, plan) -> None:
@@ -927,8 +925,20 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
 
     order.credits_granted = email_credits
 
+    # Link the payment to the user's active order before anything reads the
+    # link. A payment with no order link used to skip the safety net below
+    # entirely (audit P12: 30 payments, 24 paying users).
+    from services.stage_tracking import get_or_create_active_order, promote_paid_order
+    if not order.outreach_order_id:
+        try:
+            active = get_or_create_active_order(db, str(order.user_id))
+            order.outreach_order_id = active.id
+            logger.info("[PAYMENT] linked unlinked payment %s to outreach_order %s", order.id, active.id)
+        except Exception:
+            logger.exception("[PAYMENT] could not link payment %s to an outreach order", order.id)
+
     if email_credits:
-        _grant_credits(db, order.user_id, email_credits)
+        _grant_credits(db, order.user_id, email_credits, payment_order_id=order.id)
 
     if linkedin_credits and order.outreach_order_id:
         oo = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
@@ -938,7 +948,6 @@ def _finalize_credits(db: Session, order: PaymentOrder) -> None:
 
     # Safety net: a paid order must never stay frozen behind the payment step.
     if order.outreach_order_id:
-        from services.stage_tracking import promote_paid_order
         oo2 = db.query(OutreachOrder).filter_by(id=order.outreach_order_id).first()
         promote_paid_order(oo2, "status was frozen behind payment")
 
@@ -953,20 +962,19 @@ def _order_plan_type(order: PaymentOrder) -> str:
     return "email"
 
 
-def deduct_credits(db: Session, user_id: str, amount: int) -> bool:
-    """Deduct credits from user's balance. Returns False if insufficient."""
-    credit = db.query(UserCredit).filter_by(user_id=user_id).first()
-    if not credit or (credit.total_credits - credit.used_credits) < amount:
-        return False
-    credit.used_credits += amount
-    credit.updated_at = datetime.utcnow()
-    return True
+def deduct_credits(db: Session, user_id: str, amount: int,
+                   reason: str = credits.RESERVE_ENRICHMENT) -> bool:
+    """Deduct credits from user's balance. Returns False if insufficient.
+
+    Locks the wallet row (credits.reserve), so two concurrent callers can no
+    longer both pass the balance check (audit P31).
+    """
+    if amount <= 0:
+        return True
+    return credits.reserve(db, user_id, amount, reason) is not None
 
 
-def refund_credits(db: Session, user_id: str, amount: int):
-    """Refund credits back to user's balance (e.g. enrichment failed)."""
-    credit = db.query(UserCredit).filter_by(user_id=user_id).first()
-    if credit and amount > 0:
-        credit.used_credits = max(0, credit.used_credits - amount)
-        credit.updated_at = datetime.utcnow()
-        logger.info("[PAYMENT] Refunded %d credits to user %s", amount, user_id)
+def refund_credits(db: Session, user_id: str, amount: int,
+                   reason: str = credits.RELEASE_ENRICHMENT_UNUSED, campaign=None) -> int:
+    """Give reserved credits back (e.g. enrichment failed). Returns the amount released."""
+    return credits.release(db, user_id, amount, reason, campaign=campaign)

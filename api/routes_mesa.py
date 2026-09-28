@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from api.dependencies import get_current_user
+from api.dependencies import get_current_user, require_internal_caller
 from database.mesa_models import MesaJob, MesaSearch
 from database.models import User
 from database.session import SessionLocal, get_db
@@ -254,10 +254,10 @@ async def enrich_signals(
     return {"status": "started", "enriching": len(ranked)}
 
 
-# ── Internal: daily sweep (cluster-only, no auth — called by the CronJob) ─────────
-@router.post("/worker/run-due")
+# ── Internal: daily sweep (shared-secret auth — called by the CronJob) ───────────
+@router.post("/worker/run-due", dependencies=[Depends(require_internal_caller)])
 def worker_run_due(db: Session = Depends(get_db)):
-    """Run all active searches due for a refresh. No auth: only reachable in-cluster."""
+    """Run all active searches due for a refresh. Requires the x-studojo-internal secret."""
     try:
         return run_due_searches(db)
     except Exception as e:  # noqa: BLE001
