@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from database.models import (
     Base, Campaign, Candidate, CreditLedger, EmailAccount, EmailSent, Lead, LeadScore,
-    OutreachOrder, User, UserCredit,
+    OutreachOrder, SuppressedEmail, User, UserCredit,
 )
 from services import credits
 from services.email_campaign import campaign_worker, outcomes
@@ -47,7 +47,7 @@ def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[t.__table__ for t in (
         User, Candidate, Lead, LeadScore, Campaign, EmailAccount, EmailSent, OutreachOrder,
-        UserCredit, CreditLedger)])
+        UserCredit, CreditLedger, SuppressedEmail)])
     session = sessionmaker(bind=engine)()
     session.add_all([
         User(id="u", email="u@x.com", name="U", email_verified=True, created_at=NOW, updated_at=NOW),

@@ -151,7 +151,8 @@ def add_replacement_lead(
         return None
 
     initial_size = _campaign_initial_size(db, campaign_id)
-    cap = math.ceil(initial_size * REPLACEMENT_CAP_PERCENT)
+    # floor, not ceil: ceil gave 50-credit plans 13 replacements, 26% (audit P45).
+    cap = math.floor(initial_size * REPLACEMENT_CAP_PERCENT)
     used = _campaign_replacements_used(db, campaign_id)
     if used >= cap:
         logger.info(

@@ -4,6 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import case, func, select as sa_select
 from sqlalchemy.orm import Session
 
@@ -1554,3 +1555,30 @@ async def paid_funnel(
     # Sort: most recently paid first
     result.sort(key=lambda r: r["paid_at"], reverse=True)
     return {"users": result, "total": len(result)}
+
+class RefundRequest(BaseModel):
+    reason: str
+    confirm: bool = False
+
+
+@router.post("/payments/{payment_id}/refund")
+async def refund_payment_admin(
+    payment_id: int,
+    body: RefundRequest,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Refund a payment in full through Razorpay/Dodo and settle it (audit P05).
+
+    confirm must be true: this moves real money. Cancels the user's unfinished
+    campaigns, marks the payment refunded and revokes the credits it bought.
+    """
+    from services.refunds import RefundError, refund_payment
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Set confirm=true to refund real money.")
+    if not body.reason.strip():
+        raise HTTPException(status_code=400, detail="A reason is required.")
+    try:
+        return await refund_payment(db, payment_id, actor=str(admin.id), reason=body.reason.strip())
+    except RefundError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

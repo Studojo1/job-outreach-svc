@@ -273,6 +273,24 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
 
 # ── JIT Phase 1: Enrich Upcoming Leads ──────────────────────────────────────
 
+def _skip_suppressed(db, email, address) -> bool:
+    """A lead whose address bounced before is treated like no email found:
+    the row is skipped, a replacement lead takes the slot where the cap
+    allows, and otherwise the credit comes back (audit P18)."""
+    from services.email_campaign.suppression import is_suppressed
+    if not is_suppressed(db, address):
+        return False
+    email.enrichment_status = "skipped"
+    replaced = False
+    if email.replacement_for_id is None:
+        from services.email_campaign.replenishment import add_replacement_lead
+        replaced = add_replacement_lead(db, email.campaign_id, email.id, reason="enrichment_exhausted") is not None
+    outcomes.fail(db, email, "Apollo could not find email for this contact (address bounced before)",
+                  replaced=replaced)
+    db.commit()
+    return True
+
+
 def _enrich_upcoming(db) -> int:
     """Enrich leads scheduled within the lookahead window.
 
@@ -318,6 +336,8 @@ def _enrich_upcoming(db) -> int:
         # Lead already enriched (e.g., by preview enrichment) — reuse the email.
         # Credits are reserved up-front at campaign creation; no per-send deduction.
         if lead.email and lead.email_verified:
+            if _skip_suppressed(db, email, lead.email):
+                continue
             email.to_email = lead.email
             email.enrichment_status = "enriched"
             db.commit()
@@ -326,6 +346,8 @@ def _enrich_upcoming(db) -> int:
 
         result = enrich_single_lead_classified(lead)
 
+        if result.success and _skip_suppressed(db, email, result.data["email"]):
+            continue
         if result.success:
             lead.email = result.data["email"]
             if result.data.get("name"):
@@ -624,6 +646,30 @@ def _send_ready(db) -> tuple:
             failed_count += 1
             continue
 
+        # Per-mailbox daily budget for first touches (P37). The schedule paces a
+        # single campaign; two campaigns on one Gmail used to double it.
+        if not email.is_test and (email.followup_number or 0) == 0:
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if _mailbox_sends_today(db, campaign.email_account_id, day_start, followups=False) >= _daily_target(campaign):
+                # Move it to the mailbox's next sending window. Leaving it due
+                # would keep it at the head of this query every cycle and
+                # starve every other mailbox's emails behind it.
+                try:
+                    tz = pytz.timezone(campaign.user_timezone or "Asia/Kolkata")
+                except pytz.UnknownTimeZoneError:
+                    tz = pytz.timezone("Asia/Kolkata")
+                email.scheduled_at = _push_to_business_hours(day_start + timedelta(days=1), tz)
+                db.commit()
+                continue
+
+        # Never email an address that has bounced before (audit P18).
+        from services.email_campaign.suppression import is_suppressed
+        if not email.is_test and is_suppressed(db, email.to_email):
+            outcomes.fail(db, email, "Address is suppressed: it bounced before")
+            db.commit()
+            failed_count += 1
+            continue
+
         # Nothing to send yet (a NULL body reached here 6 times and failed with
         # "'NoneType' object has no attribute 'encode'"). Send it back through
         # generation instead of burning the slot.
@@ -752,46 +798,57 @@ def _pace_followups(db, pending: list, now) -> list:
 
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     allowed = []
+    rescheduled = False
     per_campaign_today: dict = {}
     last_sent_at: dict = {}
 
     for fu in pending:
-        cid = fu.campaign_id
-        if cid not in per_campaign_today:
-            campaign = db.query(Campaign).filter_by(id=cid).first()
+        campaign = db.query(Campaign).filter_by(id=fu.campaign_id).first()
+        # Budgets are per MAILBOX (P37): every campaign on one Gmail shares it.
+        key = campaign.email_account_id if campaign else ("c", fu.campaign_id)
+        if key not in per_campaign_today:
             limit = _daily_target(campaign) if campaign else DAILY_LIMIT_MAX
-            # Count follow-ups only. Counting every send would mean a campaign
+            # Count follow-ups only. Counting every send would mean a mailbox
             # that has used its daily limit on first touches never sends a
             # follow-up at all, and the backlog would grow forever.
             already = (
-                db.query(_func.count(EmailSent.id))
-                .filter(
-                    EmailSent.campaign_id == cid,
-                    EmailSent.sent_at.isnot(None),
-                    EmailSent.sent_at >= day_start,
-                    EmailSent.followup_number > 0,
-                )
-                .scalar()
-            ) or 0
-            per_campaign_today[cid] = [already, limit]
-            last_sent_at[cid] = (
-                db.query(_func.max(EmailSent.sent_at))
-                .filter(EmailSent.campaign_id == cid, EmailSent.sent_at.isnot(None))
-                .scalar()
+                _mailbox_sends_today(db, campaign.email_account_id, day_start, followups=True)
+                if campaign else 0
             )
+            per_campaign_today[key] = [already, limit]
+            last_sent_at[key] = (
+                db.query(_func.max(EmailSent.sent_at))
+                .join(Campaign, Campaign.id == EmailSent.campaign_id)
+                .filter(Campaign.email_account_id == campaign.email_account_id,
+                        EmailSent.sent_at.isnot(None))
+                .scalar()
+            ) if campaign else None
 
-        count, limit = per_campaign_today[cid]
+        count, limit = per_campaign_today[key]
+        # Held-back follow-ups are moved, not just skipped: the pending query
+        # takes the oldest few, so a held row left due would sit at its head
+        # every cycle and starve every other mailbox.
         if count >= limit:
-            continue  # campaign has had its day's worth, try again tomorrow
+            try:
+                tz = pytz.timezone((campaign.user_timezone if campaign else None) or "Asia/Kolkata")
+            except pytz.UnknownTimeZoneError:
+                tz = pytz.timezone("Asia/Kolkata")
+            fu.scheduled_at = _push_to_business_hours(day_start + timedelta(days=1), tz)
+            rescheduled = True
+            continue  # mailbox has had its day's worth
 
-        last = last_sent_at.get(cid)
+        last = last_sent_at.get(key)
         if last and (now - last).total_seconds() < FOLLOWUP_MIN_GAP_SECONDS:
-            continue  # too soon after the previous send on this campaign
+            fu.scheduled_at = last + timedelta(seconds=FOLLOWUP_MIN_GAP_SECONDS)
+            rescheduled = True
+            continue  # too soon after the previous send from this mailbox
 
         allowed.append(fu)
-        per_campaign_today[cid][0] = count + 1
-        last_sent_at[cid] = now
+        per_campaign_today[key][0] = count + 1
+        last_sent_at[key] = now
 
+    if rescheduled:
+        db.commit()
     if len(allowed) < len(pending):
         logger.info("[FOLLOWUP] Paced %d of %d follow-ups to respect daily limits and spacing",
                     len(pending) - len(allowed), len(pending))
@@ -858,8 +915,29 @@ def _process_followups(db) -> tuple:
             failed_count += 1
             continue
 
+        # A reply or bounce on ANY row of the thread counts, not just Touch 1:
+        # Touch 3 used to go out after Touch 2 had bounced (audit P19).
+        thread_rows = db.query(EmailSent).filter(
+            (EmailSent.parent_email_id == parent.id) | (EmailSent.id == parent.id),
+            EmailSent.id != fu.id,
+        ).all()
+        if any(r.status == "bounced" for r in thread_rows):
+            fu.status = "cancelled_reply"
+            fu.error_message = "An earlier email in this thread bounced"
+            db.commit()
+            cancelled_count += 1
+            continue
+        from services.email_campaign.suppression import is_suppressed
+        if is_suppressed(db, fu.to_email):
+            fu.status = "cancelled_reply"
+            fu.error_message = "Address is suppressed (bounced before)"
+            db.commit()
+            cancelled_count += 1
+            continue
+
         # If a reply came in on the thread, cancel this follow-up
-        if parent.reply_received_at is not None or parent.status == "replied":
+        if (parent.reply_received_at is not None or parent.status == "replied"
+                or any(r.reply_received_at is not None or r.status == "replied" for r in thread_rows)):
             fu.status = "cancelled_reply"
             db.commit()
             cancelled_count += 1
@@ -1199,11 +1277,24 @@ def _check_replies(db):
                         .filter(
                             EmailSent.campaign_id.in_(campaign_ids),
                             EmailSent.thread_id.isnot(None),
-                            EmailSent.status.in_(["sent", "replied"]),
+                            EmailSent.status.in_(["sent", "replied", "bounced"]),
                         )
                         .all()
                     )
-                    sent_emails_by_thread = {e.thread_id: e for e in sent_emails}
+                    # Every row of a thread (Touch 1 and its follow-ups) shares
+                    # its thread_id. Keying on it let a reply land on whichever
+                    # row won, usually a follow-up, so the next follow-up still
+                    # went to someone who had answered (audit P19: 89 replies on
+                    # follow-ups, 48 chasers sent after a reply). Map each thread
+                    # to its Touch 1 row, where the cancellation logic looks.
+                    by_id = {e.id: e for e in sent_emails}
+                    for e in sent_emails:
+                        root = e
+                        if (e.followup_number or 0) > 0 and e.parent_email_id:
+                            root = by_id.get(e.parent_email_id) or db.get(EmailSent, e.parent_email_id) or e
+                        current = sent_emails_by_thread.get(e.thread_id)
+                        if current is None or (root.followup_number or 0) == 0:
+                            sent_emails_by_thread[e.thread_id] = root
 
                 if not sent_emails_by_thread:
                     account.last_reply_check_at = datetime.utcnow()
@@ -1231,7 +1322,10 @@ def _check_replies(db):
                     # Check for bounce
                     if is_bounce_message(detail["from_email"]):
                         email_row.status = "bounced"
+                        email_row.status_changed_at = datetime.utcnow()
                         email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
+                        from services.email_campaign.suppression import suppress
+                        suppress(db, email_row.to_email, f"bounce: {(email_row.bounce_reason or '')[:200]}")
                         if email_row.replacement_for_id is None:
                             from services.email_campaign.replenishment import add_replacement_lead
                             add_replacement_lead(db, email_row.campaign_id, email_row.id, reason="bounce")
@@ -1275,6 +1369,63 @@ def _check_replies(db):
 
 # ── Main Cycle ───────────────────────────────────────────────────────────────
 
+_CYCLE_LOCK_KEY = 0x5e7d_c1c1  # arbitrary, fixed
+
+
+def _acquire_cycle_lock(db):
+    """Returns a lock handle, or None if another cycle holds the lock.
+
+    The advisory lock belongs to a database connection, so it is taken on a
+    dedicated connection held for the whole cycle. Taking it through the ORM
+    session did not work: the session hands its connection back to the pool
+    at every commit, and the next session can check out that same connection
+    and "hold" the lock too.
+    """
+    if db.bind.dialect.name != "postgresql":
+        return True
+    from sqlalchemy import text as _text
+    conn = db.bind.connect()
+    got = conn.execute(_text("SELECT pg_try_advisory_lock(:k)"), {"k": _CYCLE_LOCK_KEY}).scalar()
+    conn.commit()
+    if not got:
+        conn.close()
+        return None
+    return conn
+
+
+def _release_cycle_lock(handle) -> None:
+    if handle is None or handle is True:
+        return
+    from sqlalchemy import text as _text
+    try:
+        handle.execute(_text("SELECT pg_advisory_unlock(:k)"), {"k": _CYCLE_LOCK_KEY})
+        handle.commit()
+    except Exception:
+        logger.exception("[CYCLE] could not release the cycle lock")
+    finally:
+        handle.close()
+
+
+def _mailbox_sends_today(db, email_account_id, day_start, followups: bool) -> int:
+    """Sends from one mailbox today, across ALL its campaigns, including ones
+    in flight. Limits were per campaign, so two campaigns on one Gmail got two
+    budgets (audit P37), and in-flight rows were never counted (P35)."""
+    from sqlalchemy import func as _func, or_ as _or, and_ as _and
+    touch = EmailSent.followup_number > 0 if followups else EmailSent.followup_number == 0
+    return (
+        db.query(_func.count(EmailSent.id))
+        .join(Campaign, Campaign.id == EmailSent.campaign_id)
+        .filter(
+            Campaign.email_account_id == email_account_id,
+            touch,
+            EmailSent.is_test.isnot(True),
+            _or(EmailSent.sent_at >= day_start,
+                _and(EmailSent.status == "sending", EmailSent.sent_at.is_(None))),
+        )
+        .scalar()
+    ) or 0
+
+
 def _process_cycle():
     """Run all JIT phases in sequence.
 
@@ -1287,6 +1438,15 @@ def _process_cycle():
     Returns dict with counts from each phase.
     """
     db = SessionLocal()
+    # One cycle at a time across replicas (audit P35). A cycle can outrun the
+    # worker's 30s tick (generation alone is 5-15s per email), and two
+    # overlapping cycles each paced from the same stale count: one campaign
+    # sent 26 follow-ups against a limit of 20, some 6 seconds apart.
+    cycle_lock = _acquire_cycle_lock(db)
+    if not cycle_lock:
+        db.close()
+        logger.info("[CYCLE] previous cycle still running; skipping this tick")
+        return {"skipped": 1}
     result = {
         "enriched": 0, "prewritten": 0, "generated": 0, "sent": 0, "failed": 0,
         "replies": 0, "bounces": 0,
@@ -1331,6 +1491,7 @@ def _process_cycle():
         maybe_sweep(db)
 
     finally:
+        _release_cycle_lock(cycle_lock)
         db.close()
 
     if any(v > 0 for v in result.values()):
