@@ -200,25 +200,3 @@ def add_replacement_lead(
     )
     return new_email.id
 
-
-def requeue_credit_paused(db: Session, campaign_id: Optional[int] = None) -> int:
-    """Reset enrichment_status from 'credit_paused' back to 'pending' so the
-    JIT worker picks the rows up on its next tick.
-
-    Pass campaign_id to scope to a single campaign, or None to scan all running
-    campaigns (used by the periodic recovery sweep in campaign_worker).
-
-    Returns the number of rows updated.
-    """
-    q = db.query(EmailSent).filter(EmailSent.enrichment_status == "credit_paused")
-    if campaign_id is not None:
-        q = q.filter(EmailSent.campaign_id == campaign_id)
-    affected = q.update(
-        {EmailSent.enrichment_status: "pending", EmailSent.error_message: None},
-        synchronize_session=False,
-    )
-    if affected:
-        db.commit()
-        logger.info("[REPLENISH] Requeued %d credit_paused emails (campaign=%s)",
-                    affected, campaign_id or "ALL")
-    return affected

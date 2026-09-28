@@ -118,7 +118,7 @@ def _followup_exists(db, parent_email_id: int, followup_number: int) -> bool:
     )
 
 
-def compute_campaign_schedule(db, campaign_id: int):
+def compute_campaign_schedule(db, campaign_id: int, resume: bool = False):
     """Pre-compute scheduled_at for all pending emails in a campaign.
 
     Called when campaign transitions to 'running'.
@@ -133,6 +133,10 @@ def compute_campaign_schedule(db, campaign_id: int):
          - Each day gets random(5, 7) emails
          - Send times are randomly placed between 9am-6pm (user timezone)
          - Days are consecutive starting from the next business day
+
+    resume=True is for re-spacing a campaign whose sends fell behind (Apollo
+    credit pause): the first email waits for business hours instead of going
+    out at any hour.
     """
     campaign = db.query(Campaign).filter_by(id=campaign_id).first()
     if not campaign:
@@ -171,6 +175,8 @@ def compute_campaign_schedule(db, campaign_id: int):
     # ── First email: 30-180 seconds from now (ignores business hours) ──
     first_delay = random.uniform(30, 180)
     emails[0].scheduled_at = now_utc + timedelta(seconds=first_delay)
+    if resume:
+        emails[0].scheduled_at = _push_to_business_hours(emails[0].scheduled_at, tz)
 
     # ── Remaining emails: sequential with random 40-90 min gaps ──
     remaining = emails[1:]
@@ -375,7 +381,7 @@ def _enrich_upcoming(db) -> int:
             _credit_keywords = (
                 "insufficient credits", "credit limit", "upgrade your plan",
                 "not accessible", "apollo key exhausted", "no valid apollo key",
-                "402", "403",
+                "keys are exhausted", "keys exhausted", "402", "403",
             )
             if any(kw in detail_lower for kw in _credit_keywords):
                 email.enrichment_status = "credit_paused"
@@ -1306,8 +1312,9 @@ def _process_cycle():
         _check_campaign_completion(db)
         _check_credit_exhaustion(db)
 
-        # Phase 5: Re-queue emails paused on Apollo credit exhaustion (throttled)
-        from services.email_campaign.replenishment import requeue_credit_paused
+        # Phase 5: Re-queue emails paused on Apollo credit exhaustion, once
+        # Apollo has a usable key again (see apollo_pause)
+        from services.email_campaign.apollo_pause import requeue_credit_paused
         requeue_credit_paused(db)
 
         # Phase 6: paid-not-launched sweep (hourly, self-throttled via system_events)

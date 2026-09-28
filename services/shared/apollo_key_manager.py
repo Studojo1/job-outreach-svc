@@ -2,10 +2,17 @@
 
 Holds an ordered list of API keys. When a request returns 402 (payment
 required) or 401 (unauthorized), the key is marked exhausted and the next
-key in the list is used. Thread-safe; state resets on pod restart.
+key in the list is used. Thread-safe.
+
+An exhausted key used to stay exhausted until the pod restarted, so topping
+up Apollo recovered nothing on its own. Now a mark expires after
+EXHAUSTED_RETRY_AFTER: the next call is a single probe that either works
+(credits are back) or re-marks the key. reset() clears every mark at once,
+for when the account has just been topped up.
 """
 
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -15,13 +22,22 @@ from core.logger import get_logger
 logger = get_logger(__name__)
 
 _EXHAUSTED_STATUS_CODES = {401, 402, 403}
+EXHAUSTED_RETRY_AFTER = 30 * 60  # seconds before an exhausted key is probed again
+
+
+class ApolloKeysExhausted(RuntimeError, ValueError):
+    """Every Apollo key is out of credits. Recoverable once the account is topped up.
+
+    A RuntimeError so enrichment classifies it as credit_exhausted; still a
+    ValueError because that is what _request used to raise.
+    """
 
 
 class _ApolloKeyManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._keys: list[str] = []
-        self._exhausted: set[str] = set()
+        self._exhausted: dict[str, float] = {}  # key -> monotonic time it was marked
         self._loaded = False
 
     def _load(self) -> None:
@@ -42,12 +58,23 @@ class _ApolloKeyManager:
                     self._load()
                     self._loaded = True
 
+    def _is_exhausted(self, key: str) -> bool:
+        """Caller holds the lock. Drops the mark once it is old enough to re-probe."""
+        marked_at = self._exhausted.get(key)
+        if marked_at is None:
+            return False
+        if time.monotonic() - marked_at >= EXHAUSTED_RETRY_AFTER:
+            del self._exhausted[key]
+            logger.info("[ApolloKeys] Key ...%s: retrying after %ds", key[-6:], EXHAUSTED_RETRY_AFTER)
+            return False
+        return True
+
     def get_key(self) -> Optional[str]:
         """Return the first non-exhausted key, or None if all are exhausted."""
         self._ensure_loaded()
         with self._lock:
             for key in self._keys:
-                if key not in self._exhausted:
+                if not self._is_exhausted(key):
                     return key
         return None
 
@@ -58,7 +85,7 @@ class _ApolloKeyManager:
         with self._lock:
             if key in self._exhausted:
                 return
-            self._exhausted.add(key)
+            self._exhausted[key] = time.monotonic()
             remaining = sum(1 for k in self._keys if k not in self._exhausted)
             logger.warning(
                 "[ApolloKeys] Key ...%s exhausted (HTTP %d). %d key(s) still active.",
@@ -68,6 +95,13 @@ class _ApolloKeyManager:
     def has_valid_key(self) -> bool:
         self._ensure_loaded()
         return self.get_key() is not None
+
+    def reset(self) -> None:
+        """Forget every exhaustion mark (the account was just topped up)."""
+        with self._lock:
+            if self._exhausted:
+                logger.info("[ApolloKeys] Reset %d exhausted key(s)", len(self._exhausted))
+            self._exhausted.clear()
 
 
 apollo_keys = _ApolloKeyManager()
@@ -93,12 +127,12 @@ def _request(method: str, url: str, **kwargs) -> requests.Response:
     while True:
         key = apollo_keys.get_key()
         if key is None:
-            raise ValueError(
+            raise ApolloKeysExhausted(
                 "All Apollo API keys are exhausted. Add more credits or a new key."
             )
         if key in tried:
             # We've looped — shouldn't happen, but guard against infinite loop.
-            raise ValueError("All Apollo API keys exhausted after retry.")
+            raise ApolloKeysExhausted("All Apollo API keys exhausted after retry.")
 
         tried.add(key)
         headers = dict(kwargs.pop("headers", {}) or {})
