@@ -24,7 +24,8 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from database.models import (
-    Base, Campaign, Candidate, EmailAccount, EmailSent, Lead, LeadScore, SystemEvent, User,
+    Base, Campaign, Candidate, CreditLedger, EmailAccount, EmailSent, Lead, LeadScore, SystemEvent, User,
+    UserCredit,
 )
 from services.email_campaign import apollo_pause, campaign_worker
 from services.shared import apollo_key_manager
@@ -56,11 +57,17 @@ def apollo(monkeypatch):
     class Fake:
         status = 402
         calls = 0
+        # With status 200: None finds everyone; a set finds only those first names.
+        findable = None
 
     def request(method, url, headers=None, **kw):
         Fake.calls += 1
         if Fake.status == 200:
-            return _Resp(200, {"person": {"email": "found@co.com", "name": "Found"}})
+            first = (kw.get("json") or {}).get("first_name")
+            if Fake.findable is not None and first not in Fake.findable:
+                return _Resp(200, {"person": {"first_name": first, "email": None}})
+            return _Resp(200, {"person": {"email": "found@co.com", "name": "Found",
+                                          "email_status": "verified"}})
         return _Resp(Fake.status)
 
     monkeypatch.setattr(apollo_key_manager.requests, "request", request)
@@ -68,6 +75,7 @@ def apollo(monkeypatch):
     apollo_keys.reset()
     monkeypatch.setattr(apollo_pause, "_restore_checked", False)
     monkeypatch.setattr(apollo_pause, "_seen_restore_at", None)
+    monkeypatch.setattr(apollo_pause, "_canary_verdict", None)
     yield Fake
     apollo_keys.reset()
 
@@ -76,13 +84,15 @@ def apollo(monkeypatch):
 def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[t.__table__ for t in (
-        User, Candidate, Lead, LeadScore, Campaign, EmailAccount, EmailSent, SystemEvent)])
+        User, Candidate, Lead, LeadScore, Campaign, EmailAccount, EmailSent, SystemEvent,
+        UserCredit, CreditLedger)])
     session = sessionmaker(bind=engine)()
     session.add_all([
         User(id="u", email="u@x.com", name="U", email_verified=True, created_at=NOW, updated_at=NOW),
         Candidate(id=1, user_id="u", resume_text="."),
         EmailAccount(id=5, user_id="u", email_address="u@gmail.com", provider="gmail",
                      access_token="t", refresh_token="r", token_expiry=NOW + timedelta(days=9)),  # noqa: S106
+        UserCredit(user_id="u", total_credits=10, used_credits=10),
         Campaign(id=10, candidate_id=1, email_account_id=5, name="c", status="running",
                  credits_reserved=10, credits_released=0),
     ])
@@ -210,3 +220,60 @@ def test_paused_rows_in_a_paused_campaign_are_not_rescheduled(db, apollo):
     apollo_pause.requeue_credit_paused(db)
 
     assert [db.get(EmailSent, r.id).scheduled_at for r in rows] == before
+
+
+# ── Apollo out of credits but answering "no email" (the 2026-09-27/28 outage) ──
+
+def _found_recently(db, n=2):
+    """Leads Apollo found in the last few days: the canaries."""
+    for i in range(n):
+        lead = Lead(candidate_id=1, name=f"Canary{i} X", company="Co", email=f"c{i}@co.com",
+                    email_verified=True)
+        db.add(lead)
+        db.flush()
+        db.add(EmailSent(campaign_id=10, lead_id=lead.id, status="sent", enrichment_status="enriched",
+                         scheduled_at=datetime.utcnow() - timedelta(hours=5)))
+    db.commit()
+
+
+def _run_until_decided(db, email):
+    for _ in range(campaign_worker.MAX_ENRICHMENT_FAILURES + 1):
+        campaign_worker._enrich_upcoming(db)
+        db.refresh(email)
+        if email.enrichment_status != "pending":
+            return
+
+
+def test_silent_outage_pauses_instead_of_failing(db, apollo):
+    _found_recently(db)
+    (email,) = _pending(db)
+    apollo.status, apollo.findable = 200, set()  # nobody has an email any more
+
+    _run_until_decided(db, email)
+
+    assert email.enrichment_status == "credit_paused"
+    assert email.status == "pending_enrichment"
+    assert db.get(Lead, email.lead_id).enrichment_fail_count == 0
+    assert not apollo_keys.has_valid_key()  # the rest of the queue waits too
+    assert db.query(EmailSent).filter(EmailSent.replacement_for_id == email.id).count() == 0
+
+
+def test_genuine_no_match_still_fails_when_apollo_finds_others(db, apollo):
+    _found_recently(db)
+    (email,) = _pending(db)
+    apollo.status, apollo.findable = 200, {"Canary0", "Canary1"}
+
+    _run_until_decided(db, email)
+
+    assert email.status == "failed"
+    assert email.error_message == "Apollo could not find email for this contact"
+    assert apollo_keys.has_valid_key()
+
+
+def test_no_match_fails_normally_when_there_is_nothing_to_compare(db, apollo):
+    (email,) = _pending(db)
+    apollo.status, apollo.findable = 200, set()
+
+    _run_until_decided(db, email)
+
+    assert email.status == "failed"
