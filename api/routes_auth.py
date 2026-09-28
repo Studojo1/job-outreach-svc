@@ -49,8 +49,6 @@ async def debug_voyager(slug: str = "williamhgates", current_user: User = Depend
     """Debug: attempt Voyager identity lookup and return raw status + any URNs found."""
     import re as _re
     import httpx
-    from sqlalchemy.orm import Session as _Session
-    from database.session import get_db as _get_db
     from database.models import LinkedInToken
     from services.linkedin_outreach.crypto import decrypt, decrypt_second
     from core.config import settings as _settings

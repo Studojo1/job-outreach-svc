@@ -14,7 +14,7 @@ from sqlalchemy import func
 
 from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate, OutreachOrder, PaymentOrder
 from core.logger import get_logger
-from core.metrics import CAMPAIGNS_RUNNING, EMAILS_SENT_TOTAL
+from core.metrics import CAMPAIGNS_RUNNING
 from services.email_campaign.email_generator_service import assign_style
 
 logger = get_logger(__name__)
@@ -294,7 +294,11 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
 
     # Sync order status + record funnel stage timestamps (10/11/12).
     try:
-        from database.models import OutreachOrder
+        # OutreachOrder comes from the module-level import. A local
+        # `from database.models import OutreachOrder` here made the name local
+        # to the WHOLE function, so the earlier read on first launch raised
+        # UnboundLocalError. That was caught and logged, so expires_at was
+        # never set and 8-day plans (email_50) never expired.
         from services.stage_tracking import safe_mark_stage
         order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
         if order:

@@ -100,7 +100,7 @@ def _web_surface(domain: str | None) -> dict:
     pages = [f"https://{dom}", f"https://{dom}/pricing", f"https://{dom}/security"]
     for u in pages:
         try:
-            r = httpx.get(u, headers={"User-Agent": _UA_WEB}, timeout=6.0, verify=False, follow_redirects=True)
+            r = httpx.get(u, headers={"User-Agent": _UA_WEB}, timeout=6.0, verify=False, follow_redirects=True)  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
             if r.status_code != 200:
                 continue
             txt = r.text[:200000]

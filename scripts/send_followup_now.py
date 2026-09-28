@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def main(req_id: int, force: bool = False):
     from database.session import SessionLocal
-    from services.linkedin_outreach.automation_service import send_message
     from services.linkedin_outreach.message_gen import generate_followup_message
     from services.linkedin_outreach.crypto import decrypt, decrypt_second
 

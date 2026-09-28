@@ -120,7 +120,6 @@ def health_check():
 # of seconds of send (proxy prefetch) and count repeats separately.
 import base64 as _b64
 from datetime import datetime as _dt, timedelta as _td
-from fastapi import Response
 from fastapi.responses import Response as _FResponse
 
 # 1x1 transparent GIF

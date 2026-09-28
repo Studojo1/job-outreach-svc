@@ -13,7 +13,6 @@ as an additional scoring dimension (0-15 points normalized from the 1-10 LLM sco
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
 
 from sqlalchemy.orm import Session
 

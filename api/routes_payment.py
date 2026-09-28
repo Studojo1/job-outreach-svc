@@ -19,7 +19,6 @@ from core.config import settings
 from core.pricing import (
     get_plan, get_plans, get_tier_pricing, get_dodo_product_id, apply_coupon,
     is_internal_only_coupon,
-    TIERS, TEST_TIERS,
 )
 from core.geo import detect_country, is_india
 from api.dependencies import get_current_user
@@ -350,7 +349,7 @@ async def create_order(
         try:
             product_id = get_dodo_product_id(settings)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
         return_url = f"{settings.FRONTEND_URL}/enrichment?dodo_return=1"
 
@@ -371,7 +370,7 @@ async def create_order(
             )
         except Exception as e:
             logger.error("[PAYMENT] Dodo checkout creation failed: %s", e)
-            raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
+            raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.") from e
 
         from services.stage_tracking import safe_mark_stage, get_or_create_active_order
         try:
@@ -437,7 +436,7 @@ async def create_order(
         })
     except Exception as e:
         logger.error("[PAYMENT] Razorpay order creation failed: %s", e)
-        raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.")
+        raise HTTPException(status_code=502, detail="Payment gateway error. Please try again.") from e
 
     from services.stage_tracking import safe_mark_stage, get_or_create_active_order
     try:
@@ -661,7 +660,7 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
             )
         except Exception as e:
             logger.error("[DODO_WEBHOOK] Signature verification failed: %s", e)
-            raise HTTPException(status_code=400, detail="Invalid webhook signature")
+            raise HTTPException(status_code=400, detail="Invalid webhook signature") from e
 
     payload = json.loads(body)
     event_type = payload.get("event_type") or payload.get("type", "")

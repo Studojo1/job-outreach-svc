@@ -78,7 +78,7 @@ def _age_days(s, now=None):
     when unparseable so the caller can treat it as neutral, not stale."""
     if not s:
         return None
-    from datetime import datetime, timedelta
+    from datetime import datetime
     now = now or datetime.utcnow()
     txt = str(s).strip().lower()
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", txt)
@@ -189,7 +189,7 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         role_titles[k].append(title)
 
     out = []
-    for k, rec in by_company.items():
+    for rec in by_company.values():
         titles = [r["title"] for r in rec["roles"]]
         texts = [r["_text"] for r in rec["roles"]]
         fams: set = set()

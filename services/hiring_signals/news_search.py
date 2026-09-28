@@ -2,6 +2,8 @@
 
 import logging
 import xml.etree.ElementTree as ET
+
+import defusedxml.ElementTree as DefusedET
 from urllib.parse import quote_plus
 
 import httpx
@@ -37,7 +39,7 @@ async def get_company_news(company_name: str, max_results: int = 8) -> list[dict
             logger.warning("[NewsRSS] Non-200 for company=%r: %d", company_name, resp.status_code)
             return []
 
-        root = ET.fromstring(resp.text)
+        root = DefusedET.fromstring(resp.text)  # third-party feed: no entity expansion
         channel = root.find("channel")
         if channel is None:
             return []

@@ -3,7 +3,6 @@ One-shot script: resolve + send 5 LinkedIn connection requests for campaign 12.
 Bypasses IST time window. Uses Evomi proxy for Voyager resolution.
 """
 import asyncio
-import sys
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")

@@ -62,7 +62,9 @@ async def scrape_company_site(domain: str) -> Optional[Dict[str, str]]:
     if not domain:
         return None
 
-    base = f"https://{domain.strip().lstrip('https://').lstrip('http://').rstrip('/')}"
+    # removeprefix, not lstrip: lstrip('https://') strips any of the characters
+    # h, t, p, s, :, / so "shopify.com" became "opify.com".
+    base = f"https://{domain.strip().removeprefix('https://').removeprefix('http://').rstrip('/')}"
 
     if not await _robots_allows(base):
         logger.info("[SCRAPE] robots.txt disallows %s", base)
@@ -84,7 +86,7 @@ async def scrape_company_site(domain: str) -> Optional[Dict[str, str]]:
         ])
 
     sections: Dict[str, str] = {
-        name: html for name, html in zip(_SECTION_PATHS.keys(), section_results) if html
+        name: html for name, html in zip(_SECTION_PATHS.keys(), section_results, strict=False) if html
     }
     if not sections:
         return None

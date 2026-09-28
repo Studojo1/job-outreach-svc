@@ -262,4 +262,4 @@ def worker_run_due(db: Session = Depends(get_db)):
         return run_due_searches(db)
     except Exception as e:  # noqa: BLE001
         logger.error("[MESA] run-due failed: %s", e, exc_info=True)
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e

@@ -22,12 +22,15 @@ LOOSENING PRIORITY:
     4. Industry → remove filter
 """
 
-from typing import Dict, Any, List, Tuple, Optional, NamedTuple
+import logging
+from typing import Dict, Any, List, Tuple, Optional
 
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
 from services.lead_discovery.apollo_query_builder import build_apollo_query
 from services.lead_discovery.apollo_service import search_people_count
+
+logger = logging.getLogger(__name__)
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -181,7 +184,6 @@ class CalibrationState:
 
     def clone(self) -> "CalibrationState":
         """Deep copy for revert support."""
-        from services.shared.schemas.filter_schema import LeadFilter
         c = CalibrationState.__new__(CalibrationState)
         c.title_tiers = {k: list(v) for k, v in self.title_tiers.items()}
         c.active_tiers = dict(self.active_tiers)
@@ -427,13 +429,13 @@ def calibrate_filters(
             **snap,
         }
 
-        print(f"\n[CALIBRATION ITERATION {i}]")
-        print(f"  titles: {snap['titles_count']} ({snap['tier_status']})")
-        print(f"  locations: {snap['locations']}")
-        print(f"  company_sizes: {snap['company_sizes']}")
-        print(f"  industries: {snap['industries']}")
-        print(f"  results: {total_entries}")
-        print(f"  target range: [{lower_bound}, {upper_bound}]")
+        logger.info(f"\n[CALIBRATION ITERATION {i}]")
+        logger.info(f"  titles: {snap['titles_count']} ({snap['tier_status']})")
+        logger.info(f"  locations: {snap['locations']}")
+        logger.info(f"  company_sizes: {snap['company_sizes']}")
+        logger.info(f"  industries: {snap['industries']}")
+        logger.info(f"  results: {total_entries}")
+        logger.info(f"  target range: [{lower_bound}, {upper_bound}]")
 
         # Update best known state
         if _is_better_result(total_entries, best_entries):
@@ -450,7 +452,7 @@ def calibrate_filters(
         if lower_bound <= total_entries <= upper_bound:
             log_entry["action"] = "ACCEPTED"
             iteration_logs.append(log_entry)
-            print(f"[CALIBRATION COMPLETE] {total_entries} in [{lower_bound}, {upper_bound}]")
+            logger.info(f"[CALIBRATION COMPLETE] {total_entries} in [{lower_bound}, {upper_bound}]")
             return current_filters, total_entries, iteration_logs
 
         # ── Swing detection ──────────────────────────────────────────────
@@ -463,11 +465,11 @@ def calibrate_filters(
             if (was_over and now_under) or (was_under and now_over):
                 swing_count += 1
                 logger.warning("Swing #%d detected: %d → %d", swing_count, prev_count, total_entries)
-                print(f"  ⚠️ SWING #{swing_count}: {prev_count} → {total_entries}")
+                logger.info(f"  ⚠️ SWING #{swing_count}: {prev_count} → {total_entries}")
 
                 # ── DEADLOCK BREAK: after 2+ swings, abandon revert strategy ─
                 if swing_count >= 2:
-                    print(f"  🔧 DEADLOCK DETECTED — breaking cycle with aggressive tightening")
+                    logger.info("  🔧 DEADLOCK DETECTED — breaking cycle with aggressive tightening")
                     logger.warning("Deadlock after %d swings. Breaking cycle.", swing_count)
                     
                     # Use the overshoot state and tighten aggressively
@@ -484,7 +486,7 @@ def calibrate_filters(
                     safe_actions = [a for a in actions if a[2] not in ("ind_add", "ind_narrow")]
                     
                     names = []
-                    for name, impact, aid in safe_actions:
+                    for name, _impact, aid in safe_actions:
                         _apply_tighten(state, aid)
                         names.append(name)
                     
@@ -540,11 +542,11 @@ def calibrate_filters(
             allow_multi = needed > 0.85
             selected = _pick_best_tighten(actions, needed, allow_multi)
             names = []
-            for name, impact, aid in selected:
+            for name, _impact, aid in selected:
                 _apply_tighten(state, aid)
                 names.append(name)
             log_entry["action"] = " + ".join(names)
-            print(f"  → TIGHTEN: {log_entry['action']} (needed reduction: {needed:.0%})")
+            logger.info(f"  → TIGHTEN: {log_entry['action']} (needed reduction: {needed:.0%})")
 
         # ── Too FEW → LOOSEN ─────────────────────────────────────────────
         elif total_entries < lower_bound:
@@ -557,11 +559,11 @@ def calibrate_filters(
 
             selected = _pick_best_loosen(actions)
             names = []
-            for name, impact, aid in selected:
+            for name, _impact, aid in selected:
                 _apply_loosen(state, aid)
                 names.append(name)
             log_entry["action"] = " + ".join(names)
-            print(f"  → LOOSEN: {log_entry['action']}")
+            logger.info(f"  → LOOSEN: {log_entry['action']}")
 
         iteration_logs.append(log_entry)
         prev_count = total_entries
@@ -575,7 +577,7 @@ def calibrate_filters(
 
     final_filters = best_state.to_filters()
     
-    print(f"[CALIBRATION EXHAUSTED] Best results found: {best_entries} after {len(iteration_logs)} iterations")
+    logger.info(f"[CALIBRATION EXHAUSTED] Best results found: {best_entries} after {len(iteration_logs)} iterations")
     logger.info("Calibration exhausted: %d iterations. Best results: %d", len(iteration_logs), best_entries)
     
     return final_filters, best_entries, iteration_logs

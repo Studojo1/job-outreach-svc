@@ -32,7 +32,6 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database.session import SessionLocal

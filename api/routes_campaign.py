@@ -4,8 +4,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -381,10 +380,10 @@ async def api_create_campaign(
         raise
     except ValueError as e:
         _release_create_reservation(db, current_user.id, reserved)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         _release_create_reservation(db, current_user.id, reserved)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 def _release_create_reservation(db: Session, user_id: str, reserved: int) -> None:
@@ -460,9 +459,9 @@ async def preview_email(
         raise HTTPException(
             status_code=503,
             detail="Preview generation timed out. Your campaign will still work — emails are generated fresh per lead just before sending.",
-        )
+        ) from None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}") from e
 
 
 @router.post("/{campaign_id}/transition")
@@ -478,7 +477,7 @@ async def api_transition_campaign(
         result = transition_campaign(db, campaign_id, request.target_status)
         return {"status": "success", **result}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/{campaign_id}/send")
@@ -498,7 +497,7 @@ async def api_start_campaign(
         })
         return {"status": "success", **result}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 class CampaignRescheduleRequest(BaseModel):
@@ -523,7 +522,7 @@ async def api_reschedule_campaign(
     try:
         pytz.timezone(request.user_timezone)
     except pytz.exceptions.UnknownTimeZoneError:
-        raise HTTPException(status_code=400, detail=f"Unknown timezone: {request.user_timezone}")
+        raise HTTPException(status_code=400, detail=f"Unknown timezone: {request.user_timezone}") from None
 
     campaign = db.query(Campaign).filter_by(id=campaign_id).first()
     if not campaign:
@@ -670,7 +669,7 @@ async def get_campaign_analytics(
         metrics = get_campaign_metrics(db, campaign_id)
         return {"status": "success", **metrics}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
 
 class TestEmailOverride(BaseModel):
@@ -734,7 +733,7 @@ async def test_launch_preview(
     db: Session = Depends(get_db),
 ):
     """Preview the 5 test emails without sending. Returns lead info so user can set overrides."""
-    from database.models import Candidate, Lead
+    from database.models import Candidate
     from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
 
     request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
@@ -777,7 +776,7 @@ def _run_test_launch_in_background(
 ):
     """Background thread: send test emails, updating _test_launch_jobs leads in real-time."""
     from database.session import SessionLocal
-    from database.models import Candidate, Lead
+    from database.models import Candidate
     from services.email_campaign.email_generator_service import assign_style, generate_email_for_lead
     from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 
@@ -881,7 +880,7 @@ async def test_launch_campaign(
     and causing health probe failures (which was causing 503 errors).
     Use GET /test-launch/{job_id}/status to poll for results.
     """
-    from database.models import Candidate, Lead
+    from database.models import Candidate
 
     # Validate inputs before spawning background job
     request.candidate_id = _resolve_effective_candidate(db, current_user.id, request.candidate_id)
@@ -918,7 +917,6 @@ async def test_launch_campaign(
         })
 
     # Create job with pre-populated leads and spawn background thread
-    import math
     from datetime import datetime as _dt
     job_id = str(uuid.uuid4())[:8]
     _cleanup_old_test_launch_jobs(db)
@@ -1179,7 +1177,7 @@ def worker_send_ready():
         return result
     except Exception as e:
         logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/worker/apollo-credits", dependencies=[Depends(require_internal_caller)])

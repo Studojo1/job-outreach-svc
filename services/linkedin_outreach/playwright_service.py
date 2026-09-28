@@ -486,7 +486,7 @@ async def playwright_send_invitation(
                             "LinkedIn rejected the session — please reconnect using Email & Password. "
                             "(Extension cookies don't work through our network proxy.)",
                             revoked=True,
-                        )
+                        ) from goto_err
                     raise
                 feed_url = page.url
                 # The /feed bootstrap is the AUTHORITATIVE liveness check: a real

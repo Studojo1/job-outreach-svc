@@ -148,7 +148,7 @@ async def login_with_credentials(
             body.email, body.password, proxy_url=proxy_url
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     if li_at is None:
         from services.linkedin_outreach.login import _pending
@@ -180,7 +180,7 @@ async def verify_pin(
     try:
         li_at, jsessionid, display_name = await linkedin_verify_pin(body.session_key, body.pin)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     _store_token(db, current_user.id, li_at, jsessionid, display_name,
                  proxy_country=_pc, proxy_city=_pcity)
@@ -202,7 +202,7 @@ async def check_phone_tap(
     try:
         result = await linkedin_check_phone_tap(body.session_key)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if result is None:
         return {"ok": False, "still_waiting": True}
     li_at, jsessionid, display_name = result
@@ -268,7 +268,7 @@ async def login_with_cookies(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not validate cookies: {e}") from e
 
     # When the extension sends the full cookie jar, we can use server-side proxy sending.
     # Without the full jar (paste-cookies tab or older extension), extension-login cookies
@@ -825,7 +825,6 @@ async def create_campaign_from_order(
     # Generate per-lead connection notes in the background
     def _gen_notes(camp_id: int, req_ids: list[int]) -> None:
         from database.session import SessionLocal
-        from services.linkedin_outreach.message_gen import generate_connection_message
         bg_db = SessionLocal()
         try:
             for req_id in req_ids:
@@ -1183,7 +1182,7 @@ async def _personalise_leads(
     a one-line match reason. Runs after lead save so the dashboard sees leads immediately."""
     import asyncio as _asyncio
     from database.session import SessionLocal
-    from services.linkedin_outreach.message_gen import generate_connection_message, generate_match_reason
+    from services.linkedin_outreach.message_gen import generate_match_reason
 
     db = SessionLocal()
     try:
@@ -1211,7 +1210,7 @@ async def _personalise_leads(
 
         batch_size = 5
         for i in range(0, len(req_ids), batch_size):
-            batch = list(zip(req_ids, people))[i : i + batch_size]
+            batch = list(zip(req_ids, people, strict=False))[i : i + batch_size]
             results = await _asyncio.gather(*[enrich_one(rid, p) for rid, p in batch])
             for req_id, note, reason in results:
                 req = db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.id == req_id).first()
@@ -1234,7 +1233,6 @@ async def _generate_notes_batch(
 ) -> list[str]:
     """Generate personalised connection notes for up to 60 leads concurrently."""
     import asyncio
-    from services.linkedin_outreach.message_gen import generate_connection_message
 
     async def gen(p: dict) -> str:
         try:
@@ -1326,7 +1324,7 @@ async def send_one_now(
         c.status = "auth_failed"
         c.updated_at = datetime.utcnow()
         db.commit()
-        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn")
+        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn") from None
 
     # Try up to 5 pending requests — skip any that can't be resolved
     candidates = (
@@ -1388,7 +1386,7 @@ async def send_one_now(
             raise HTTPException(
                 status_code=502,
                 detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
-            )
+            ) from e
         if urn:
             req.profile_urn = urn
 
@@ -1405,7 +1403,7 @@ async def send_one_now(
         raise HTTPException(
             status_code=502,
             detail=f"LinkedIn rejected this send: {e}. If this keeps happening, reconnect LinkedIn.",
-        )
+        ) from e
 
     if ok:
         req.status = "sent"
@@ -1437,7 +1435,7 @@ async def retry_errors(
     that failed at the connection POST step, not at profile URL resolution.
     Leads with no profile_urn have a 404/private profile and won't resolve.
     """
-    c = _get_campaign_or_404(campaign_id, current_user.id, db)
+    _get_campaign_or_404(campaign_id, current_user.id, db)  # ownership check; raises 404 if not theirs
     updated = (
         db.query(LinkedInConnectionRequest)
         .filter(
@@ -1823,7 +1821,7 @@ async def inbox_reply(
         li_at = decrypt(token.li_at_enc, token.nonce)
         jsessionid = decrypt_second(token.jsessionid_enc, token.nonce)
     except Exception:
-        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed — reconnect")
+        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed — reconnect") from None
 
     cookies_blob = None
     if getattr(token, "cookies_blob_enc", None) and getattr(token, "cookies_blob_nonce", None):
@@ -1845,7 +1843,7 @@ async def inbox_reply(
         campaign.status = "auth_failed"
         campaign.updated_at = datetime.utcnow()
         db.commit()
-        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect first")
+        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect first") from None
 
     if not ok:
         raise HTTPException(status_code=502, detail="LinkedIn rejected the message. Try again in a minute.")

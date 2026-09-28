@@ -48,7 +48,7 @@ async def linkedin_login_start(
                 continue
             # Bad credentials or second timeout — surface immediately
             if "Timeout" in str(e):
-                raise ValueError("Connection timed out after 2 attempts. The proxy is slow right now — please try again in a moment.")
+                raise ValueError("Connection timed out after 2 attempts. The proxy is slow right now — please try again in a moment.") from e
             raise
     raise last_err
 
@@ -304,7 +304,7 @@ async def _linkedin_login_attempt(
         raise
     except Exception as e:
         await _cleanup()
-        raise ValueError(f"LinkedIn login failed: {e}")
+        raise ValueError(f"LinkedIn login failed: {e}") from e
 
 
 async def linkedin_check_phone_tap(session_key: str) -> tuple[str, str, str | None] | None:
@@ -468,4 +468,4 @@ async def linkedin_verify_pin(session_key: str, pin: str) -> tuple[str, str, str
     except ValueError:
         raise
     except Exception as e:
-        raise ValueError(f"PIN verification failed: {e}")
+        raise ValueError(f"PIN verification failed: {e}") from e

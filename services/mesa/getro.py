@@ -76,7 +76,7 @@ def _iso(epoch) -> str | None:
 def _query_board(cid: int, query: str, filters: dict, page: int) -> list[dict]:
     body = {"query": query or "", "page": page, "filters": filters}
     r = httpx.post(f"https://api.getro.com/api/v2/collections/{cid}/search/jobs",
-                   json=body, headers=_HEADERS, timeout=_TIMEOUT, verify=False)
+                   json=body, headers=_HEADERS, timeout=_TIMEOUT)
     r.raise_for_status()
     return (r.json().get("results") or {}).get("jobs") or []
 

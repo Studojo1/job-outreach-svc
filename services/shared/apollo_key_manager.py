@@ -123,6 +123,11 @@ def _request(method: str, url: str, **kwargs) -> requests.Response:
     """Internal: try each available key in order, rotating on 402/401/403."""
     apollo_keys._ensure_loaded()
     tried: set[str] = set()
+    # Read these once. Popping them inside the loop meant a retry with the next
+    # key lost the caller's headers and timeout.
+    base_headers = dict(kwargs.pop("headers", {}) or {})
+    # No timeout meant a hung Apollo call blocked this worker forever.
+    timeout = kwargs.pop("timeout", 30)
 
     while True:
         key = apollo_keys.get_key()
@@ -135,12 +140,12 @@ def _request(method: str, url: str, **kwargs) -> requests.Response:
             raise ApolloKeysExhausted("All Apollo API keys exhausted after retry.")
 
         tried.add(key)
-        headers = dict(kwargs.pop("headers", {}) or {})
+        headers = dict(base_headers)
         headers["X-Api-Key"] = key
         headers.setdefault("Content-Type", "application/json")
         headers.setdefault("Cache-Control", "no-cache")
 
-        resp = requests.request(method, url, headers=headers, **kwargs)
+        resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
 
         if resp.status_code in _EXHAUSTED_STATUS_CODES:
             apollo_keys.report_failure(key, resp.status_code)

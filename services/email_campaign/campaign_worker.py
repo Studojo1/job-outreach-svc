@@ -29,7 +29,7 @@ from core.analytics import capture as ph_capture
 from database.session import SessionLocal
 from database.models import (
     Campaign, EmailSent, EmailAccount, Lead, LeadScore,
-    Candidate, OutreachOrder, UserCredit, User,
+    Candidate, User,
 )
 from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
 from services.email_campaign import outcomes
@@ -524,9 +524,9 @@ def _generate_pending(db) -> int:
             def _fill(text):
                 return (
                     (text or "")
-                    .replace("{name}", lead.name or "")
-                    .replace("{company}", lead.company or "")
-                    .replace("{title}", lead.title or "")
+                    .replace("{name}", lead.name or "")  # noqa: B023 - called immediately in this iteration
+                    .replace("{company}", lead.company or "")  # noqa: B023 - called immediately in this iteration
+                    .replace("{title}", lead.title or "")  # noqa: B023 - called immediately in this iteration
                 )
 
             email.subject = _fill(campaign.subject_template)

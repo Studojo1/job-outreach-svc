@@ -36,14 +36,14 @@ def get_client_ip(request: Request) -> str:
     if xff:
         # First IP in the chain is the original client
         return xff.split(",")[0].strip()
-    return request.client.host if request.client else "0.0.0.0"
+    return request.client.host if request.client else "0.0.0.0"  # noqa: S104 - string comparison against an address, not a socket bind
 
 
 def detect_country(request: Request) -> str:
     """Return ISO 3166-1 alpha-2 country code (e.g. 'IN', 'US'). Defaults to 'UNKNOWN'."""
     ip = get_client_ip(request)
     # Skip lookups for localhost/private IPs
-    if ip.startswith(("127.", "10.", "172.", "192.168.", "0.0.0.0", "::1")):
+    if ip.startswith(("127.", "10.", "172.", "192.168.", "0.0.0.0", "::1")):  # noqa: S104 - string comparison against an address, not a socket bind
         return "UNKNOWN"
     return _lookup_country(ip)
 
