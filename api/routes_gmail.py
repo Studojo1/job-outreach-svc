@@ -1,7 +1,6 @@
 """Gmail OAuth Routes — Gmail Mailbox OAuth (separate from Login OAuth)."""
 
 import logging
-from urllib.parse import quote
 
 import requests as http_requests
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,7 +14,9 @@ from services.authentication.google_oauth import (
     generate_gmail_auth_url,
     exchange_gmail_code,
     get_google_user_info,
+    verify_gmail_state,
 )
+from pydantic import BaseModel
 from services.authentication.token_manager import store_user_tokens
 from api.dependencies import get_current_user
 from core.analytics import capture
@@ -46,97 +47,86 @@ def gmail_oauth_connect_url(current_user: User = Depends(get_current_user)):
 async def gmail_oauth_callback(
     code: str,
     state: str = "",
+):
+    """Google redirects here (api.studojo.com). Hand the one-time code to the
+    signed-in page, which finishes the connection.
+
+    This used to store tokens for whatever user id `state` held, unsigned
+    (audit N03). The session cookie is host-only on the main site and never
+    reaches this host, so the connection is completed by POST /complete,
+    which checks that the signed-in user is the one who started the flow.
+    Otherwise an attacker could start a flow on their own account and get a
+    victim to approve it, attaching the victim's inbox (read scope) to the
+    attacker's account.
+    """
+    from urllib.parse import urlencode
+    frontend_base = f"{settings.FRONTEND_URL}/connect/gmail"
+    if not state or verify_gmail_state(state) is None:
+        logger.warning("[GmailOAuth] Callback with missing/invalid/expired state")
+        return RedirectResponse(url=f"{frontend_base}?status=error&message=invalid_state")
+    return RedirectResponse(url=f"{frontend_base}?{urlencode({'gmail_code': code, 'gmail_state': state})}")
+
+
+class GmailCompleteRequest(BaseModel):
+    code: str
+    state: str
+
+
+@router.post("/complete")
+async def gmail_oauth_complete(
+    request: GmailCompleteRequest,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Gmail OAuth callback — stores Gmail tokens for the user."""
-    frontend_base = f"{settings.FRONTEND_URL}/connect/gmail"
-    logger.info(f"[GmailOAuth] Callback received, state={state}, code_length={len(code)}")
-    logger.info(f"[GmailOAuth] Will redirect to frontend_base={frontend_base}")
+    """Finish connecting Gmail for the signed-in user who started the flow."""
+    state_user = verify_gmail_state(request.state)
+    if state_user is None:
+        raise HTTPException(status_code=400, detail="This Gmail link expired. Please connect again.")
+    if state_user != str(current_user.id):
+        logger.warning("[GmailOAuth] state user %s != signed-in user %s; refusing", state_user, current_user.id)
+        raise HTTPException(status_code=403, detail="This Gmail connection was started from a different account.")
 
-    if not state:
-        logger.error("[GmailOAuth] Callback missing state parameter")
-        return RedirectResponse(
-            url=f"{frontend_base}?status=error&message=missing_state"
-        )
-
-    user_id = state
+    user_id = state_user
     try:
-        logger.info(f"[GmailOAuth] Step 1: Exchanging code for tokens (user_id={user_id})")
-        token_data = await exchange_gmail_code(code)
-        access_token = token_data.get("access_token")
-        refresh_token = token_data.get("refresh_token")
-        expires_in = token_data.get("expires_in", 3599)
-        granted_scopes = token_data.get("scope", "")
-        logger.info(f"[GmailOAuth] Step 1 OK: got access_token={bool(access_token)}, refresh_token={bool(refresh_token)}, expires_in={expires_in}, scopes={granted_scopes}")
-
-        # Both scopes are required:
-        # - gmail.send: to send outreach emails on the user's behalf
-        # - gmail.readonly: to read inbox and detect replies/bounces
-        # Users can untick individual scopes in Google's consent screen, so
-        # we have to actually verify both came back.
-        missing_scopes = []
-        if "gmail.send" not in granted_scopes:
-            missing_scopes.append("gmail.send")
-        if "gmail.readonly" not in granted_scopes:
-            missing_scopes.append("gmail.readonly")
-
-        if missing_scopes:
-            logger.warning(
-                f"[GmailOAuth] Required scopes missing for user_id={user_id}: %s. Granted: %s",
-                missing_scopes, granted_scopes,
-            )
-            return RedirectResponse(
-                url=f"{frontend_base}?status=error&message=missing_permissions"
-            )
-
-        logger.info(f"[GmailOAuth] Step 2: Fetching Google user info")
-        user_info = await get_google_user_info(access_token)
-        email_address = user_info.get("email")
-        logger.info(f"[GmailOAuth] Step 2 OK: email={email_address}")
-
-        if not email_address:
-            raise ValueError("Email address missing from Google OAuth profile.")
-
-        logger.info(f"[GmailOAuth] Step 3: Storing tokens for user_id={user_id}")
-        await store_user_tokens(
-            db=db,
-            user_id=user_id,
-            email_address=email_address,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_in=expires_in,
-        )
-        logger.info(f"[GmailOAuth] Step 3 OK: tokens stored")
-        capture("gmail_connected", user_id, {
-            "email_address": email_address,
-            "provider": "gmail",
-        })
-
-        # Funnel: stage 7 — link the EmailAccount to the active OutreachOrder.
-        try:
-            from services.stage_tracking import safe_mark_stage
-            from database.models import EmailAccount as _EmailAccount
-            account = db.query(_EmailAccount).filter_by(email_address=email_address, user_id=user_id).first()
-            safe_mark_stage(
-                db, user_id, "gmail_connected",
-                email_account_id=account.id if account else None,
-            )
-        except Exception:
-            logger.exception("[GmailOAuth] Funnel stage marking failed (non-fatal)")
-
-        _resume_auth_paused_campaigns(db, user_id, email_address)
-
-        redirect_url = f"{frontend_base}?status=success"
-        logger.info(f"[GmailOAuth] SUCCESS — redirecting to {redirect_url}")
-        return RedirectResponse(url=redirect_url)
-
+        token_data = await exchange_gmail_code(request.code)
     except Exception as e:
-        error_msg = str(e)[:200]
-        logger.error(f"[GmailOAuth] Callback FAILED for user_id={user_id}: {error_msg}", exc_info=True)
-        encoded_msg = quote(error_msg, safe="")
-        redirect_url = f"{frontend_base}?status=error&message={encoded_msg}"
-        logger.info(f"[GmailOAuth] ERROR — redirecting to {redirect_url}")
-        return RedirectResponse(url=redirect_url)
+        logger.error("[GmailOAuth] Code exchange failed for %s: %s", user_id, e)
+        raise HTTPException(status_code=400, detail="Google did not accept this sign-in. Please connect again.")
+
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 3599)
+    granted_scopes = token_data.get("scope", "")
+
+    # Both scopes are required: gmail.send to send, gmail.readonly to detect
+    # replies and bounces. Users can untick either on Google's consent screen.
+    missing = [s for s in ("gmail.send", "gmail.readonly") if s not in granted_scopes]
+    if missing:
+        logger.warning("[GmailOAuth] Missing scopes for %s: %s", user_id, missing)
+        raise HTTPException(status_code=400, detail="missing_permissions")
+
+    user_info = await get_google_user_info(access_token)
+    email_address = user_info.get("email")
+    if not email_address:
+        raise HTTPException(status_code=400, detail="Google did not share an email address.")
+
+    await store_user_tokens(
+        db=db, user_id=user_id, email_address=email_address,
+        access_token=access_token, refresh_token=refresh_token, expires_in=expires_in,
+    )
+    capture("gmail_connected", user_id, {"email_address": email_address, "provider": "gmail"})
+
+    account = db.query(EmailAccount).filter_by(email_address=email_address, user_id=user_id).first()
+    try:
+        from services.stage_tracking import safe_mark_stage
+        safe_mark_stage(db, user_id, "gmail_connected", email_account_id=account.id if account else None)
+    except Exception:
+        logger.exception("[GmailOAuth] Funnel stage marking failed (non-fatal)")
+
+    _resume_auth_paused_campaigns(db, user_id, email_address)
+    logger.info("[GmailOAuth] Connected %s for %s", email_address, user_id)
+    return {"status": "connected", "email_address": email_address,
+            "email_account_id": account.id if account else None}
 
 
 def _resume_auth_paused_campaigns(db: Session, user_id: str, email_address: str) -> None:

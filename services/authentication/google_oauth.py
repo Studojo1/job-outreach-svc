@@ -27,6 +27,45 @@ GMAIL_SCOPES = [
 ]
 
 
+STATE_TTL_SECONDS = 20 * 60
+_STATE_PURPOSE = "gmail_oauth_state"
+
+
+def _state_key() -> bytes:
+    # Derived from the Gmail client secret: always configured, never sent to
+    # a browser, and specific to this OAuth client.
+    import hashlib
+    return hashlib.sha256(f"{_STATE_PURPOSE}:{GMAIL_CLIENT_SECRET}".encode()).digest()
+
+
+def sign_gmail_state(user_id: str) -> str:
+    """OAuth `state` naming the user who started the flow, signed and short-lived.
+
+    It used to be the bare user id, so anyone could complete Google's consent
+    with their own Gmail and put someone else's id in `state` (audit N03).
+    """
+    import secrets
+    import time
+    import jwt
+    now = int(time.time())
+    return jwt.encode(
+        {"sub": user_id, "purpose": _STATE_PURPOSE, "iat": now,
+         "exp": now + STATE_TTL_SECONDS, "nonce": secrets.token_urlsafe(8)},
+        _state_key(), algorithm="HS256",
+    )
+
+
+def verify_gmail_state(state: str):
+    """The user id a state was signed for, or None if forged, expired or garbled."""
+    import jwt
+    try:
+        claims = jwt.decode(state, _state_key(), algorithms=["HS256"],
+                            options={"require": ["sub", "exp", "purpose"]})
+    except jwt.PyJWTError:
+        return None
+    return claims["sub"] if claims.get("purpose") == _STATE_PURPOSE else None
+
+
 def generate_gmail_auth_url(user_id: str) -> str:
     """Generates the Gmail OAuth consent URL using the Gmail OAuth client."""
     params = urlencode({
@@ -36,7 +75,7 @@ def generate_gmail_auth_url(user_id: str) -> str:
         "scope": " ".join(GMAIL_SCOPES),
         "access_type": "offline",
         "prompt": "consent",
-        "state": user_id,
+        "state": sign_gmail_state(user_id),
     })
     logger.info(f"Generated Gmail OAuth redirect URL for user_id: {user_id}")
     return f"{GOOGLE_AUTH_URL}?{params}"
