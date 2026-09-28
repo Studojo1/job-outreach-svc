@@ -92,7 +92,7 @@ async def gmail_oauth_complete(
         token_data = await exchange_gmail_code(request.code)
     except Exception as e:
         logger.error("[GmailOAuth] Code exchange failed for %s: %s", user_id, e)
-        raise HTTPException(status_code=400, detail="Google did not accept this sign-in. Please connect again.")
+        raise HTTPException(status_code=400, detail="Google did not accept this sign-in. Please connect again.") from e
 
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token")

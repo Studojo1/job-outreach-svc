@@ -194,7 +194,7 @@ async def find_lead(body: FindLeadRequest):
         raise
     except Exception as e:
         logger.error("[MARKETING] Apollo search failed: %s", e)
-        raise HTTPException(status_code=502, detail="Search service is unavailable. Try again in a moment.")
+        raise HTTPException(status_code=502, detail="Search service is unavailable. Try again in a moment.") from e
 
     swapped_used = False
     if not people:
@@ -350,7 +350,7 @@ async def enrich_email(
         resp = apollo_post(APOLLO_MATCH_URL, json=payload, timeout=30)
     except Exception as e:
         logger.error("[MARKETING-ENRICH] Apollo error: %s", e)
-        raise HTTPException(status_code=502, detail="Enrichment service unavailable. No credit was used.")
+        raise HTTPException(status_code=502, detail="Enrichment service unavailable. No credit was used.") from e
 
     if resp.status_code != 200:
         body_text = resp.text[:300]

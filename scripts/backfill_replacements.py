@@ -93,7 +93,6 @@ def run(apply: bool):
 
         # --- APPLY ---
         succeeded = 0
-        capped = 0
         no_pool = 0
 
         for i, email_row in enumerate(candidates):

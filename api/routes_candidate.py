@@ -1,6 +1,5 @@
 """Candidate Routes — Resume upload, profiling chat, and profile retrieval."""
 
-import asyncio
 import json as _json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response, StreamingResponse
@@ -13,7 +12,7 @@ from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
 from services.candidate_intelligence.parser import parse_resume
 from api.dependencies import get_current_user
-from core.analytics import capture, identify
+from core.analytics import capture
 
 import hashlib
 import logging
@@ -597,7 +596,7 @@ async def generate_payload(
         raise HTTPException(
             status_code=500,
             detail="Could not build your profile. Please try again.",
-        )
+        ) from exc
 
     logger.info(
         "[PAYLOAD] Done for candidate %s in %.0fms (deterministic, no LLM)",

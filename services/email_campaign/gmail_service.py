@@ -18,7 +18,7 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - a public OAuth endpoint URL, not a secret
 GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 from services.email_campaign.gmail_send_service import GMAIL_HTTP_TIMEOUT  # noqa: E402
 

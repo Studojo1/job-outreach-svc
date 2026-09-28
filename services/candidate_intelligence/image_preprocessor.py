@@ -269,17 +269,17 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     target_dir = sys.argv[1] if len(sys.argv) > 1 else "."
-    print(f"\n🔍 Scanning images in: {os.path.abspath(target_dir)}")
-    print(f"   Limits: {MAX_WIDTH}×{MAX_HEIGHT} px, {MAX_FILE_SIZE_BYTES/1024/1024:.0f} MB\n")
+    print(f"\n🔍 Scanning images in: {os.path.abspath(target_dir)}")  # noqa: T201 - CLI output
+    print(f"   Limits: {MAX_WIDTH}×{MAX_HEIGHT} px, {MAX_FILE_SIZE_BYTES/1024/1024:.0f} MB\n")  # noqa: T201 - CLI output
 
     result = process_all_images_in_directory(target_dir)
 
-    print(f"\n{'='*50}")
-    print(f"  Scanned: {result['scanned']}")
-    print(f"  Resized: {result['resized']}")
-    print(f"  Already OK: {result['skipped']}")
+    print(f"\n{'='*50}")  # noqa: T201 - CLI output
+    print(f"  Scanned: {result['scanned']}")  # noqa: T201 - CLI output
+    print(f"  Resized: {result['resized']}")  # noqa: T201 - CLI output
+    print(f"  Already OK: {result['skipped']}")  # noqa: T201 - CLI output
     if result['errors']:
-        print(f"  Errors: {len(result['errors'])}")
+        print(f"  Errors: {len(result['errors'])}")  # noqa: T201 - CLI output
         for err in result['errors']:
-            print(f"    - {err['file']}: {err['error']}")
-    print(f"{'='*50}\n")
+            print(f"    - {err['file']}: {err['error']}")  # noqa: T201 - CLI output
+    print(f"{'='*50}\n")  # noqa: T201 - CLI output

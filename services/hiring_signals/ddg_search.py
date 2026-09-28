@@ -45,7 +45,7 @@ async def ddg_search(query: str, max_results: int = 5) -> list[dict]:
             headers=_HEADERS,
             follow_redirects=True,
             timeout=_TIMEOUT,
-            verify=False,
+            verify=False,  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
         ) as client:
             resp = await client.post(_DDG_URL, data={"q": query})
 
@@ -139,7 +139,7 @@ def extract_company_domain(results: list[dict]) -> Optional[str]:
             continue
         try:
             parsed = urlparse(url)
-            domain = parsed.netloc.lower().lstrip("www.")
+            domain = parsed.netloc.lower().removeprefix("www.")  # lstrip("www.") also ate the w of "workday.com"
             if domain and not any(skip in domain for skip in _SKIP_DOMAINS):
                 return domain
         except Exception:

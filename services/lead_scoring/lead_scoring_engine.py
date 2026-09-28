@@ -1,4 +1,3 @@
-import heapq
 from typing import Dict, Any, List
 
 from core.logger import get_logger
@@ -27,7 +26,7 @@ def score_and_select_leads(
     target_industries = [i.lower() for i in role_intelligence.get("industry_expansion", [])]
     target_sizes = [s.lower() for s in role_intelligence.get("company_size_preferences", [])]
     target_departments = [d.lower() for d in role_intelligence.get("departments", [])]
-    target_seniorities = [s.lower() for s in role_intelligence.get("target_seniorities", [])]
+    # role_intelligence["target_seniorities"] is not scored: nothing below reads it.
     
     scored_leads = []
     
