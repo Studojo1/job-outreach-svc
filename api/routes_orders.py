@@ -9,7 +9,7 @@ from typing import Optional
 
 from database.session import get_db
 from database.models import (
-    User, OutreachOrder, Candidate, Campaign, EmailAccount, Lead, LinkedInCampaign,
+    User, OutreachOrder, Candidate, Campaign, EmailAccount, EmailSent, Lead, LinkedInCampaign,
 )
 from sqlalchemy import func
 from api.dependencies import get_current_user
@@ -139,7 +139,38 @@ async def list_orders(
 
     for o in orders:
         _heal_candidate_binding(db, o)
-    return {"orders": [_serialize_order(o) for o in orders]}
+    out = []
+    for o in orders:
+        row = _serialize_order(o)
+        row["order"]["campaign"] = _live_campaign(db, o)
+        out.append(row)
+    return {"orders": out}
+
+
+def _live_campaign(db: Session, order: OutreachOrder):
+    """The campaign this order is really about, with its live status.
+
+    order.status stayed 'campaign_running' through pause and completion, so
+    My Orders showed a green "Campaign Running" for 60 of 69 paying users'
+    campaigns that were paused or finished (audit P23). The badge is drawn
+    from this instead. Prefers a campaign linked to the order, newest first.
+    """
+    c = (
+        db.query(Campaign)
+        .filter(Campaign.outreach_order_id == order.id)
+        .order_by(Campaign.created_at.desc())
+        .first()
+    )
+    if c is None and order.campaign_id:
+        c = db.get(Campaign, order.campaign_id)
+    if c is None:
+        return None
+    sent = (
+        db.query(func.count(EmailSent.id))
+        .filter(EmailSent.campaign_id == c.id, EmailSent.status.in_(("sent", "replied")))
+        .scalar()
+    ) or 0
+    return {"id": c.id, "status": c.status, "pause_reason": c.pause_reason, "sent": sent}
 
 
 @router.get("/next-step")
