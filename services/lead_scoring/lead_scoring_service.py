@@ -146,6 +146,10 @@ def _score_location(lead_location: str, pref_locations: List[str]) -> int:
     return 0
 
 
+_C_LEVEL_RE = re.compile(r"\b(ceo|cto|cfo|coo)\b")
+_VP_RE = re.compile(r"\b[sea]?vp\b")  # VP, SVP, EVP, AVP
+
+
 def _score_seniority_fit(title: str, candidate_seniority: str, company_size: str = "") -> int:
     """Score how well the lead's seniority fits the candidate's level.
 
@@ -157,8 +161,14 @@ def _score_seniority_fit(title: str, candidate_seniority: str, company_size: str
     """
     title_lower = title.lower()
 
-    is_c_level = any(kw in title_lower for kw in ["ceo", "cto", "cfo", "coo", "chief", "founder", "co-founder"])
-    is_vp = any(kw in title_lower for kw in ["vp", "vice president"])
+    # Acronyms are matched as whole words. As bare substrings "cto" matched
+    # "Director" and "Contractor", and "coo" matched "Coordinator", so a
+    # Marketing Coordinator was scored as a COO (1/10 for a student instead of
+    # 4). "chief" and "founder" are safe as substrings.
+    is_c_level = bool(_C_LEVEL_RE.search(title_lower)) or any(
+        kw in title_lower for kw in ["chief", "founder", "co-founder"]
+    )
+    is_vp = bool(_VP_RE.search(title_lower)) or "vice president" in title_lower
     is_director = "director" in title_lower
     is_head = "head" in title_lower
     is_manager = "manager" in title_lower
@@ -167,8 +177,12 @@ def _score_seniority_fit(title: str, candidate_seniority: str, company_size: str
 
     # For seed/tiny companies, founders and C-suite ARE the hiring managers.
     # Apply this override before any candidate-seniority logic.
+    # Directors are included on purpose: at a 1-50 person company a Director
+    # runs a function and hires for it. They used to be caught here only
+    # because "director" contains "cto"; keeping them makes that explicit
+    # rather than silently re-ranking every seed-stage Director.
     is_seed_company = any(k in (company_size or "") for k in ("1-10", "11-50"))
-    if is_seed_company and (is_c_level or is_vp):
+    if is_seed_company and (is_c_level or is_vp or is_director):
         return 10
 
     if candidate_seniority in ["entry", "junior", "intern", "student", "graduate", "grad"]:
