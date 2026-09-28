@@ -1,4 +1,3 @@
-import logging
 from typing import List
 
 from core.logger import get_logger

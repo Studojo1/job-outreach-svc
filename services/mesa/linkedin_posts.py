@@ -156,7 +156,7 @@ def _parse(text: str, links: list[str]) -> dict | None:
           or re.search(r"@\s*([A-Za-z][A-Za-z0-9&.\-]{2,30})", body))
     if cm:
         comp = cm.group(1).strip()
-    external_id = "post_" + hashlib.sha1(f"{author}|{body[:200]}".encode()).hexdigest()[:20]
+    external_id = "post_" + hashlib.sha1(f"{author}|{body[:200]}".encode(), usedforsecurity=False).hexdigest()[:20]
     return {
         "external_id": external_id,
         "title": role or "Hiring post",

@@ -101,7 +101,7 @@ def scrape_jobs(
     empty_streak = 0   # consecutive pages with no parseable cards
     dup_streak = 0     # consecutive pages that added nothing new
     try:
-        with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, verify=False,
+        with httpx.Client(headers=_HEADERS, timeout=_TIMEOUT, verify=False,  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
                           proxy=proxy, follow_redirects=True) as client:
             for page in range(max_pages):
                 q = dict(params, start=page * _PAGE_SIZE)

@@ -1,6 +1,5 @@
 """LinkedIn outreach routes — token storage, search, leads."""
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
@@ -13,7 +12,7 @@ from api.dependencies import get_current_user
 from database.models import User, LinkedInToken, LinkedInSearchJob, LinkedInOutreachLead
 from database.session import get_db
 from services.linkedin_outreach.crypto import encrypt_pair, decrypt, decrypt_second
-from services.linkedin_outreach.voyager import search_people, send_linkedin_message, send_linkedin_connection
+from services.linkedin_outreach.voyager import send_linkedin_message, send_linkedin_connection
 from services.linkedin_outreach.message_gen import generate_messages_for_leads
 
 logger = logging.getLogger(__name__)
@@ -163,10 +162,10 @@ async def send_message(
         result = await send_linkedin_message(li_at, jsessionid, body.profile_url, body.content)
         return result
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("send_message failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Send failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Send failed: {e}") from e
 
 
 @router.post("/connect-request")
@@ -183,10 +182,10 @@ async def send_connection(
         result = await send_linkedin_connection(li_at, jsessionid, body.profile_url, body.note or "")
         return result
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("send_connection failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Send failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Send failed: {e}") from e
 
 
 # ── Search endpoints ───────────────────────────────────────────────────────────

@@ -401,7 +401,7 @@ def _resolve_company_domains(company: str) -> List[str]:
     # and let the name-based check downstream be the (stricter) judge.
     if len(out) > 1:
         exact = [
-            d for d, n in zip(out, names)
+            d for d, n in zip(out, names, strict=False)
             if _normalise_company(n) == _normalise_company(company)
         ]
         if len(exact) == 1:

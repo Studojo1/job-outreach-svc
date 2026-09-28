@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, select as sa_select, text
+from sqlalchemy import case, func, select as sa_select
 from sqlalchemy.orm import Session
 
 from api.dependencies import get_admin_user
@@ -316,7 +316,7 @@ async def outreach_overview(
     from sqlalchemy import or_
     funnel = []
     prev_count: int | None = None
-    for i, (key, label, column) in enumerate(MAIN_FLOW_STAGES):
+    for i, (key, label, _column) in enumerate(MAIN_FLOW_STAGES):
         # "this stage or any later" — covers backfill gaps
         cols_or_later = [getattr(OutreachOrder, c) for _, _, c in MAIN_FLOW_STAGES[i:]]
         cond = or_(*[c.isnot(None) for c in cols_or_later])
@@ -341,7 +341,7 @@ async def outreach_overview(
         # the chart visually separates terminal off-ramps.
         funnel.append(entry)
         if key == "campaign_launched":
-            paused_col = getattr(OutreachOrder, "campaign_paused_at")
+            paused_col = OutreachOrder.campaign_paused_at
             paused_count = (
                 db.query(func.count(func.distinct(OutreachOrder.user_id)))
                 .filter(paused_col.isnot(None))
@@ -931,11 +931,11 @@ async def signups_by_date(
     try:
         start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid start date, expected YYYY-MM-DD")
+        raise HTTPException(status_code=400, detail="Invalid start date, expected YYYY-MM-DD") from None
     try:
         end_dt = (datetime.fromisoformat(end) + timedelta(days=1)).replace(tzinfo=timezone.utc)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid end date, expected YYYY-MM-DD")
+        raise HTTPException(status_code=400, detail="Invalid end date, expected YYYY-MM-DD") from None
 
     total = (
         db.query(func.count(User.id))
@@ -1316,7 +1316,7 @@ async def paid_funnel(
             def _fail_count(condition) -> int:
                 return (
                     db.query(func.count()).select_from(EmailSent)
-                    .filter(EmailSent.campaign_id == best_campaign.id, condition)
+                    .filter(EmailSent.campaign_id == best_campaign.id, condition)  # noqa: B023 - called immediately in this iteration
                     .scalar() or 0
                 )
 

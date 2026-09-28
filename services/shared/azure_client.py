@@ -132,7 +132,7 @@ def generate_json(
                 parsed = json.loads(content)
             except json.JSONDecodeError as e:
                 logger.warning("[AI] Failed to parse JSON response: %s (Response: %s)", e, content)
-                raise ValueError(f"Invalid JSON returned: {e}")
+                raise ValueError(f"Invalid JSON returned: {e}") from e
 
             try:
                 jsonschema.validate(instance=parsed, schema=schema)
@@ -140,7 +140,7 @@ def generate_json(
                 return parsed
             except jsonschema.ValidationError as e:
                 logger.warning("[AI] Schema validation failed: %s", e.message)
-                raise ValueError(f"Schema validation failed: {e.message}")
+                raise ValueError(f"Schema validation failed: {e.message}") from e
 
         except PermanentAPIError:
             raise  # 4xx errors never succeed on retry
@@ -151,6 +151,6 @@ def generate_json(
                 time.sleep(RETRY_DELAY)
             else:
                 logger.error("[AI] All %d attempts failed.", MAX_RETRIES)
-                raise ValueError(f"AI generation failed after {MAX_RETRIES} attempts. Last error: {str(e)}")
+                raise ValueError(f"AI generation failed after {MAX_RETRIES} attempts. Last error: {str(e)}") from e
 
     raise ValueError("AI generation failed unexpectedly.")

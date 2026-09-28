@@ -63,7 +63,7 @@ async def analyze_resume(
     try:
         raw_text, preview = parse_resume(contents, file.filename or "resume.pdf")
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # Run both LLM analyses in parallel
     loop = asyncio.get_event_loop()
@@ -74,7 +74,7 @@ async def analyze_resume(
         )
     except Exception as e:
         logger.error("[leadstest] Resume analysis failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"LLM analysis failed: {e}") from e
 
     current_keys = set(current_result.keys())
     enhanced_keys = set(enhanced_result.keys())
@@ -187,7 +187,7 @@ async def linkedin_enrich(
         # The reason stays in the logs; `detail` is rendered to the user, so it
         # must not carry the provider name or the upstream error text.
         logger.warning("[LEADSTEST] linkedin enrich request failed: %s", e)
-        raise HTTPException(status_code=502, detail="Enrichment request failed.")
+        raise HTTPException(status_code=502, detail="Enrichment request failed.") from e
 
     if not resp.ok:
         raise HTTPException(

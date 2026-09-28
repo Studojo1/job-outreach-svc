@@ -1289,8 +1289,8 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     options.append({"label": chr(65 + len(final_roles)), "text": "Something else"})
 
     msg = (
-        f"Which of these roles feels closest to what you're actually going after? "
-        f"I pulled these from your background"
+        "Which of these roles feels closest to what you're actually going after? "
+        "I pulled these from your background"
         + (f", and '{archetype_label}' is what your profile most reads as" if archetype_label else "")
         + ". If none fit just pick 'Something else'."
     )

@@ -129,7 +129,7 @@ def _fill_logo_domains_free(top_leads: list, lead_id_to_obj: dict) -> int:
         domains = list(pool.map(lambda it: _lookup(it[0]), items))
 
     filled = 0
-    for (name, objs), dom in zip(items, domains):
+    for (_name, objs), dom in zip(items, domains, strict=False):
         dom = _clean_domain(dom)
         if not dom:
             continue
@@ -839,10 +839,10 @@ async def search_leads(
             detail=("We could not reach our contact database just now, so no hiring "
                     "managers could be loaded. This is a problem on our side, not with "
                     "your profile. Your progress is saved — please try again shortly."),
-        )
+        ) from e
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/scoring-ready/{candidate_id}")

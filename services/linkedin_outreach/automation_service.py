@@ -92,7 +92,7 @@ def _varied_daily_cap(campaign_id: int) -> int:
     import hashlib
     seed = f"{datetime.utcnow().date().isoformat()}:{campaign_id}"
     # 13..19 inclusive — varied, never the round 20.
-    return 13 + (int(hashlib.md5(seed.encode()).hexdigest(), 16) % 7)
+    return 13 + (int(hashlib.md5(seed.encode(), usedforsecurity=False).hexdigest(), 16) % 7)
 # Per-campaign poll timestamps — reset on restart, avoids a migration for separate columns
 _last_accept_check: dict[int, float] = {}
 # Consecutive auth-failure count per campaign. Reset on any success.
@@ -353,7 +353,6 @@ async def send_connection_request(
     # If a full cookie jar from the extension is available, use it for the seed GET.
     # That way LinkedIn sees a complete authentic session (bcookie, bscookie, lidc,
     # li_mc, lang, liap, etc.) rather than a bare li_at-only "stolen cookies" request.
-    seed_cookie_header = _build_cookie_header(li_at, jsessionid, cookies_blob)
 
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=False, **_proxy(session_id)) as client:
@@ -814,7 +813,6 @@ def _search_linkedin_leads_sync(
     proxy_url: str = "",
 ) -> list[dict]:
     """Synchronous people search via LinkedIn GraphQL Voyager endpoint."""
-    import re as _re
     import requests
     from urllib.parse import quote
 
@@ -1180,7 +1178,7 @@ class LinkedInAutomationDaemon:
 
     async def _tick(self):
         from database.session import SessionLocal
-        from database.models import LinkedInCampaign, LinkedInConnectionRequest, LinkedInToken
+        from database.models import LinkedInCampaign, LinkedInToken
         from services.linkedin_outreach.crypto import decrypt, decrypt_second
 
         db = SessionLocal()

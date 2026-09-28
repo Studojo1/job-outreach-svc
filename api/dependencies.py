@@ -178,7 +178,7 @@ def _verified_admin_claims(db: Session, token: str) -> dict:
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from None
     keys = _betterauth_public_keys(db)
     kid = header.get("kid")
     candidates = [k for k_id, k in keys if kid and k_id == kid] or [k for _, k in keys]
@@ -189,7 +189,7 @@ def _verified_admin_claims(db: Session, token: str) -> dict:
                 options={"require": ["exp", "sub"], "verify_aud": False},
             )
         except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired or invalid") from None
         except jwt.PyJWTError:
             continue
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")

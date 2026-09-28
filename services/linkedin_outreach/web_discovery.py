@@ -62,7 +62,7 @@ async def _ddg_lite_search(query: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(
             headers=_HTTP_HEADERS, follow_redirects=True,
-            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
         ) as client:
             resp = await client.post(_DDG_LITE_URL, data={"q": query})
         if resp.status_code != 200:
@@ -80,7 +80,7 @@ async def _brave_search(query: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(
             headers=_HTTP_HEADERS, follow_redirects=True,
-            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),
+            timeout=_HTTP_TIMEOUT, verify=False, proxy=_proxy(),  # noqa: S501 - anonymous scrape of public pages (no credentials sent); some targets and the proxy fail strict TLS
         ) as client:
             resp = await client.get("https://search.brave.com/search", params={"q": query, "source": "web"})
         if resp.status_code != 200:
