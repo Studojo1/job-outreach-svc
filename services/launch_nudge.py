@@ -193,6 +193,11 @@ def _digest_due(db: Session, now: datetime) -> bool:
     return last is None or now - last >= DIGEST_EVERY
 
 
+def _env_tag() -> str:
+    """Staging runs this sweep too, on its own test data; say so in the subject."""
+    return "" if "studojo.com" in settings.FRONTEND_URL else "[staging] "
+
+
 def _alert_founders(stuck: list, nudged: list) -> bool:
     """True if at least one founder was emailed."""
     def line(r):
@@ -217,7 +222,7 @@ def _alert_founders(stuck: list, nudged: list) -> bool:
         sent = _send_template({
             "to": to,
             "template": "ops-alert",
-            "subject": f"{len(stuck)} paid user(s) have not launched",
+            "subject": f"{_env_tag()}{len(stuck)} paid user(s) have not launched",
             "message": message,
         }) or sent
     return sent
