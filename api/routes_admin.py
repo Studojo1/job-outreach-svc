@@ -211,8 +211,9 @@ async def outreach_overview(
     leads_contacted_total = (
         db.query(func.count(func.distinct(EmailSent.lead_id)))
         .select_from(EmailSent)
-        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
-        .join(User, User.id == OutreachOrder.user_id)
+        .join(Campaign, Campaign.id == EmailSent.campaign_id)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .join(User, User.id == Candidate.user_id)
         .join(PaymentOrder, PaymentOrder.user_id == User.id)
         .filter(
             EmailSent.followup_number == 0,
@@ -228,8 +229,9 @@ async def outreach_overview(
     leads_replied_total = (
         db.query(func.count(func.distinct(EmailSent.lead_id)))
         .select_from(EmailSent)
-        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
-        .join(User, User.id == OutreachOrder.user_id)
+        .join(Campaign, Campaign.id == EmailSent.campaign_id)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .join(User, User.id == Candidate.user_id)
         .join(PaymentOrder, PaymentOrder.user_id == User.id)
         .filter(
             EmailSent.reply_received_at.isnot(None),
@@ -363,8 +365,9 @@ async def outreach_overview(
             func.to_char(func.min(EmailSent.sent_at), "YYYY-MM").label("cohort_month"),
         )
         .select_from(EmailSent)
-        .join(OutreachOrder, OutreachOrder.campaign_id == EmailSent.campaign_id)
-        .join(User, User.id == OutreachOrder.user_id)
+        .join(Campaign, Campaign.id == EmailSent.campaign_id)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .join(User, User.id == Candidate.user_id)
         .join(PaymentOrder, PaymentOrder.user_id == User.id)
         .filter(
             EmailSent.followup_number == 0,
@@ -430,6 +433,56 @@ async def outreach_overview(
     }
 
 
+def _admin_campaign_row(db: Session, c, order_ids: set, pointed_at: set) -> dict:
+    e_stats = dict(
+        db.query(EmailSent.status, func.count())
+        .filter(EmailSent.campaign_id == c.id)
+        .group_by(EmailSent.status)
+        .all()
+    )
+    last_sent = (
+        db.query(func.max(EmailSent.sent_at)).filter(EmailSent.campaign_id == c.id).scalar()
+    )
+    return {
+        "id": c.id,
+        "name": c.name,
+        "status": c.status,
+        "pause_reason": c.pause_reason,
+        "paused_by": c.paused_by,
+        "daily_limit": c.daily_limit,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "last_sent_at": last_sent.isoformat() if last_sent else None,
+        "order_id": c.outreach_order_id,
+        "orphan": c.id not in pointed_at and c.outreach_order_id not in order_ids,
+        "credits_reserved": c.credits_reserved,
+        "credits_released": c.credits_released,
+        "email_stats": {
+            "sent": e_stats.get("sent", 0) + e_stats.get("replied", 0),
+            "replied": e_stats.get("replied", 0),
+            "bounced": e_stats.get("bounced", 0),
+            "failed": e_stats.get("failed", 0),
+            "unsent": sum(e_stats.get(k, 0) for k in ("pending_enrichment", "queued", "followup_pending")),
+        },
+    }
+
+
+def _campaigns_for_user(db: Session, user_id: str) -> list:
+    """Every campaign a user owns, newest first, found through their candidates.
+
+    Admin views used to reach campaigns through outreach_orders.campaign_id,
+    a single pointer a second campaign overwrote. The first campaign then
+    vanished from every view while it kept sending (audit P08: 7 orphans
+    holding 2,314 delivered emails).
+    """
+    return (
+        db.query(Campaign)
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == user_id)
+        .order_by(Campaign.created_at.desc())
+        .all()
+    )
+
+
 @router.get("/users")
 async def outreach_users(
     limit: int = Query(50, ge=1, le=200),
@@ -489,13 +542,8 @@ async def outreach_users(
         # active_campaign_id below, because a user can have a paused dupe
         # campaign whose order is more recent than the real running campaign
         # (legacy state from before the Apr 22 dupe-block fix).
-        running_campaign = (
-            db.query(Campaign)
-            .join(OutreachOrder, OutreachOrder.candidate_id == Campaign.candidate_id)
-            .filter(OutreachOrder.user_id == u.id, Campaign.status == "running")
-            .order_by(Campaign.created_at.desc())
-            .first()
-        )
+        user_campaigns = _campaigns_for_user(db, u.id)
+        running_campaign = next((c for c in user_campaigns if c.status == "running"), None)
 
         # Payment
         total_paid = (
@@ -508,7 +556,7 @@ async def outreach_users(
         credit = db.query(UserCredit).filter(UserCredit.user_id == u.id).first()
 
         # Email stats via campaigns linked to orders
-        campaign_ids = [o.campaign_id for o in orders if o.campaign_id]
+        campaign_ids = [c.id for c in user_campaigns]
         emails_sent = emails_replied = emails_bounced = 0
         if campaign_ids:
             e_stats = (
@@ -587,9 +635,8 @@ async def outreach_users(
             ),
             "active_order_id": latest_order.id if latest_order else None,
             "active_campaign_id": (
-                running_campaign.id if running_campaign else next(
-                    (o.campaign_id for o in sorted(orders, key=lambda o: o.updated_at or o.created_at, reverse=True) if o.campaign_id),
-                    None,
+                running_campaign.id if running_campaign else (
+                    user_campaigns[0].id if user_campaigns else None
                 )
             ),
             "active_order_updated_at": (
@@ -737,6 +784,10 @@ async def outreach_user_detail(
         .all()
     )
 
+    user_campaigns = _campaigns_for_user(db, user_id)
+    order_ids = {o.id for o in orders}
+    pointed_at = {o.campaign_id for o in orders if o.campaign_id}
+
     orders_data = []
     for order in orders:
         campaign_data = None
@@ -859,6 +910,10 @@ async def outreach_user_detail(
             for p in payments
         ],
         "orders": orders_data,
+        # Every campaign the user owns, including ones no order points at any
+        # more (overwritten pointer, audit P03/P08). `orphan` flags those so
+        # support sees the campaign that is actually sending.
+        "campaigns": [_admin_campaign_row(db, c, order_ids, pointed_at) for c in user_campaigns],
         "lead_summary": lead_summary,
     }
 
@@ -1004,9 +1059,12 @@ async def admin_campaign_emails(
             "open_count": email.open_count or 0,
         })
 
-    # Resolve the campaign owner via the linked order
-    order = db.query(OutreachOrder).filter(OutreachOrder.campaign_id == campaign_id).first()
-    owner = db.query(User).filter(User.id == order.user_id).first() if order else None
+    # Resolve the owner through the candidate. The order pointer misses
+    # orphaned campaigns, which then showed owner "Unknown" (audit P08).
+    owner = (
+        db.query(User).join(Candidate, Candidate.user_id == User.id)
+        .filter(Candidate.id == campaign.candidate_id).first()
+    )
 
     return {
         "campaign": {
@@ -1147,14 +1205,11 @@ async def paid_funnel(
             stage_ts["gmail_connected"] = email_accounts[0].created_at.isoformat()
 
         # ── Collect unique campaigns ───────────────────────────────────────
-        seen_campaign_ids: set[int] = set()
-        all_campaigns: list[Campaign] = []
-        for o in orders:
-            if o.campaign_id and o.campaign_id not in seen_campaign_ids:
-                c = db.query(Campaign).filter(Campaign.id == o.campaign_id).first()
-                if c:
-                    all_campaigns.append(c)
-                    seen_campaign_ids.add(c.id)
+        # Through the candidate, not the order pointer: orphaned campaigns
+        # showed as "0 leads contacted" for a user who had sent 1,309 (P08).
+        all_campaigns: list[Campaign] = sorted(
+            _campaigns_for_user(db, user_id), key=lambda c: c.created_at or datetime.min
+        )
 
         # ── Back-fill ALL missing timestamps from campaign + account facts ─
         #
