@@ -31,7 +31,7 @@ from database.models import (
     Campaign, EmailSent, EmailAccount, Lead, LeadScore,
     Candidate, User,
 )
-from services.email_campaign.gmail_send_service import send_gmail_email, _refresh_token_sync
+from services.email_campaign.gmail_send_service import GmailAuthError, send_gmail_email, _refresh_token_sync
 from services.email_campaign import outcomes
 from services.email_campaign.gmail_inbox_service import (
     list_inbox_messages,
@@ -1354,6 +1354,12 @@ def _check_replies(db):
                 account.last_reply_check_at = datetime.utcnow()
                 db.commit()
 
+            except GmailAuthError as e:
+                # A mailbox whose Google access was revoked. Expected until its
+                # owner reconnects (they are emailed a reconnect link); a full
+                # traceback every 5 minutes per dead mailbox buried real errors.
+                logger.warning("[REPLY_CHECK] Skipping account %d, Gmail needs reconnecting: %s", account_id, e)
+                continue
             except Exception as e:
                 logger.error("[REPLY_CHECK] Error checking account %d: %s", account_id, e, exc_info=True)
                 continue

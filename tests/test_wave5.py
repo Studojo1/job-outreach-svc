@@ -205,3 +205,18 @@ def test_replacement_cap_rounds_down():
     import math
     from services.email_campaign.replenishment import REPLACEMENT_CAP_PERCENT
     assert math.floor(50 * REPLACEMENT_CAP_PERCENT) == 12
+
+
+def test_dead_mailbox_in_reply_check_is_a_warning_not_a_traceback(db, monkeypatch, caplog):
+    import logging
+    from services.email_campaign.gmail_send_service import GmailAuthError
+
+    def dead(account, db_):
+        raise GmailAuthError("Gmail auth expired — u@gmail.com must reconnect their Gmail account")
+    monkeypatch.setattr(campaign_worker, "_refresh_token_sync", dead)
+    monkeypatch.setattr(campaign_worker, "_last_reply_check", 0, raising=False)
+    db.add(EmailSent(campaign_id=10, to_email="l@x.com", status="sent", thread_id="T", sent_at=NOW))
+    db.commit()
+    with caplog.at_level(logging.WARNING):
+        campaign_worker._check_replies(db)
+    assert not any(r.exc_info for r in caplog.records if "REPLY_CHECK" in r.getMessage())
