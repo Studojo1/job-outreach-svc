@@ -750,7 +750,8 @@ def get_candidate_leads(
     scores_by_lead = {}
     if leads:
         score_rows = (
-            db.query(LeadScore.lead_id, LeadScore.overall_score, LeadScore.justification_json)
+            db.query(LeadScore.lead_id, LeadScore.overall_score, LeadScore.justification_json,
+                     LeadScore.title_relevance)
             .join(Lead, Lead.id == LeadScore.lead_id)
             .filter(Lead.candidate_id == candidate_id)
             .order_by(LeadScore.id)
@@ -794,6 +795,10 @@ def get_candidate_leads(
                 "overall": score.overall_score,
                 "justification": score.justification_json,
             } if score else None,
+            # The title shares no word with the student's target roles (the
+            # scorer's -25). About 70% of leads, listed and sold as if they
+            # matched (B2C UC-Q09). The page shows these as broader matches.
+            "broader": _is_broader(score),
         })
 
     # Sort by score descending, lead id ascending as a total-order tiebreak.
@@ -804,6 +809,7 @@ def get_candidate_leads(
     results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] and x["score"].get("overall") is not None else median), x["id"]))
 
     total = len(results)
+    strong_total = sum(1 for r in results if not r.get("broader"))
     if offset or limit is not None:
         results = results[offset: offset + limit if limit is not None else None]
 
@@ -817,15 +823,22 @@ def get_candidate_leads(
     # is CPU-bound on a single-worker pod (800 leads per call), so encoding the
     # body twice, once for the tag and once for the response, doubled the time
     # every other request on the pod spent waiting.
-    content = _json.dumps(
-        {"leads": results, "total": total}, separators=(",", ":"), default=str,
-    ).encode()
+    body = {"leads": results, "total": total}
+    if not light:
+        # Counted before paging, like total.
+        body["strong_total"] = strong_total
+    content = _json.dumps(body, separators=(",", ":"), default=str).encode()
     etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
     headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
     if_none_match = request.headers.get("if-none-match", "")
     if etag in [t.strip() for t in if_none_match.split(",")]:
         return Response(status_code=304, headers=headers)
     return Response(content, media_type="application/json", headers=headers)
+
+
+def _is_broader(score) -> bool:
+    tr = getattr(score, "title_relevance", None) if score else None
+    return tr is not None and tr <= -25
 
 
 class FlexNotesRequest(BaseModel):
