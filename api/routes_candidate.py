@@ -88,6 +88,9 @@ def reset_candidate_for_new_resume(candidate: Candidate, raw_text: str, preview:
     candidate.dream_companies = None
 
 
+MAX_RESUME_BYTES = 10 * 1024 * 1024
+
+
 @router.post("/upload")
 async def upload_resume(
     background_tasks: BackgroundTasks,
@@ -96,7 +99,15 @@ async def upload_resume(
     db: Session = Depends(get_db),
 ):
     """Upload and parse a resume. Returns raw text and metadata preview."""
-    contents = await file.read()
+    # The page promises 10MB. Read at most one byte past that, so a 100MB file
+    # is refused without being held in memory and fed to the parser (UC-Q31).
+    contents = await file.read(MAX_RESUME_BYTES + 1)
+    if len(contents) > MAX_RESUME_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="That file is over 10MB. Please upload a smaller PDF or DOCX, "
+                   "or export your resume again with smaller images.",
+        )
 
     # Only a parse failure is the student's to fix, so only a parse failure is
     # a 400, and its message is written for them. parse_resume raises
