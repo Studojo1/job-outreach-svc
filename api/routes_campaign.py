@@ -306,8 +306,16 @@ async def api_create_campaign(
                 status_code=402,
                 detail=f"Insufficient credits. You need at least {MIN_CAMPAIGN_CREDITS} credits to start a campaign but only have {available} available.",
             )
-        # Cap at available credits — prevents error when setup was done at a higher tier than paid
-        required = min(requested, available)
+        # Size the campaign to everything the user can spend, capped at the
+        # leads they have. The client's lead_limit came from one browser's
+        # localStorage tier, so a 350/500 buyer launching elsewhere got 200
+        # (PS-N05), and refunded leftovers (1-49 credits) could never be
+        # spent on their own (PS-N07). `requested` is kept for the log only.
+        from database.models import Lead as _Lead
+        lead_count = db.query(_Lead.id).filter(_Lead.candidate_id == request.candidate_id).count()
+        required = min(available, lead_count) if lead_count else available
+        logger.info("[CAMPAIGN] sizing: requested=%s available=%s leads=%s -> %s",
+                    requested, available, lead_count, required)
         request.lead_limit = required
         # Reserve credits immediately so concurrent requests see the updated balance.
         # Commit (not flush) so the reservation is durable on its own: the
@@ -358,16 +366,18 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
+        # The campaign exists from here on and its rows hold the reservation,
+        # so the generic error handler must never refund it again (PP-P32).
+        held, reserved = reserved, 0
         # Zero leads: nothing will ever send, so give the credits straight back
         # instead of leaving them on an empty campaign (P27).
         if not result.get("queued_messages"):
             empty = db.get(Campaign, result["campaign_id"])
             credits.attach_campaign(reservation, empty)
-            credits.release(db, current_user.id, reserved, credits.RELEASE_CREATE_FAILED,
+            credits.release(db, current_user.id, held, credits.RELEASE_CREATE_FAILED,
                             campaign=empty, note="campaign had no leads")
             empty.status = "cancelled"
             db.commit()
-            reserved = 0
             raise HTTPException(
                 status_code=400,
                 detail="No leads found for this campaign, so nothing was charged. Run lead discovery first.",
@@ -381,7 +391,6 @@ async def api_create_campaign(
         except Exception:
             db.rollback()
             logger.exception("[CAMPAIGN] could not attach reservation to campaign %s", result["campaign_id"])
-        reserved = 0
         # Funnel: prefer the user's *active* OutreachOrder (created at resume
         # upload) and advance it to campaign_setup. Falls back to creating a
         # new row only if none exists, so we don't fragment a user's history.
@@ -667,18 +676,19 @@ async def get_user_latest_campaign(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the user's most recent campaign (any status). Used to recover after page reload."""
+    """The user's running or paused campaign if there is one, else the most
+    recent (any status). Used to recover after a page reload (PS-N02)."""
     from database.models import Candidate
     # Find campaigns via user's candidates
     candidate_ids = [c.id for c in db.query(Candidate).filter_by(user_id=current_user.id).all()]
     if not candidate_ids:
         return {"campaign": None}
 
+    base = db.query(Campaign).filter(Campaign.candidate_id.in_(candidate_ids))
     campaign = (
-        db.query(Campaign)
-        .filter(Campaign.candidate_id.in_(candidate_ids))
-        .order_by(Campaign.created_at.desc())
-        .first()
+        base.filter(Campaign.status.in_(("running", "paused")))
+        .order_by(Campaign.created_at.desc()).first()
+        or base.order_by(Campaign.created_at.desc()).first()
     )
     if not campaign:
         return {"campaign": None}
