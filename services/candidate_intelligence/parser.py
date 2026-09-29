@@ -25,6 +25,23 @@ _OCR_MAX_PAGES = 5
 _OCR_PAGE_ZOOM = 2.0
 
 
+class UnreadableResumeError(ValueError):
+    """The file is a resume we cannot read. The message is student copy.
+
+    UC-Q29: these raise sites used to put the library's own error in the
+    message ("Could not parse DOCX file: File is not a zip file"), which the
+    upload page showed verbatim. The library error is logged here instead.
+    """
+
+
+# Shown for a file with no usable text layer: a scan, a photo, a Canva export
+# that OCR could not read either.
+NO_TEXT_MESSAGE = (
+    "We could not read any text from that file. If it is a scanned copy or an "
+    "image, please upload a text-based PDF or a Word document instead."
+)
+
+
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract raw text from a PDF.
 
@@ -61,8 +78,11 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         # OCR also yielded nothing useful — return whatever text layer we had.
         return text
     except Exception as e:
-        logger.error(f"Error parsing PDF: {e}")
-        raise ValueError(f"Could not parse PDF file: {str(e)}") from e
+        logger.warning(f"Error parsing PDF: {e}")
+        raise UnreadableResumeError(
+            "We could not open that PDF. It may be damaged or password-protected. "
+            "Please export it again from your editor, or upload a Word document."
+        ) from e
 
 
 def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
@@ -156,8 +176,12 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                 logger.info(f"DOCX parsed: {len(text)} chars")
                 return text
     except Exception as e:
-        logger.error(f"Error parsing DOCX: {e}")
-        raise ValueError(f"Could not parse DOCX file: {str(e)}") from e
+        logger.warning(f"Error parsing DOCX: {e}")
+        # Most often an old binary .doc (not a zip) or a renamed file.
+        raise UnreadableResumeError(
+            "We could not open that Word file. If it is an older .doc file, please "
+            "save it as .docx or PDF and upload that instead."
+        ) from e
 
 
 # Degree tokens, and the words that mean the line is NOT a degree the candidate
@@ -347,7 +371,7 @@ def parse_resume(file_bytes: bytes, filename: str) -> tuple[str, dict]:
         raise ValueError(f"Unsupported file type: .{ext}. Please upload a PDF or DOCX file.")
 
     if not raw_text or len(raw_text.strip()) < 50:
-        raise ValueError("The uploaded file appears to be empty or contains too little text to parse.")
+        raise UnreadableResumeError(NO_TEXT_MESSAGE)
 
     preview = quick_extract_preview(raw_text)
     return raw_text, preview
