@@ -826,7 +826,7 @@ def _dodo_webhook_apply(body: bytes, db: Session):
             "amount_cents": order.amount_cents,
             "currency": order.currency,
             "country": order.geo_country,
-            "source": "webhook",
+            "trigger": "webhook",  # "source" is reserved for source='server' (ST-N09)
         })
 
         from services.stage_tracking import safe_mark_stage
@@ -907,7 +907,7 @@ def _razorpay_webhook_apply(body: bytes, db: Session):
                     "amount_cents": order.amount_cents,
                     "currency": order.currency,
                     "country": order.geo_country,
-                    "source": "webhook",
+                    "trigger": "webhook",  # "source" is reserved for source='server' (ST-N09)
                 })
                 from services.stage_tracking import safe_mark_stage
                 safe_mark_stage(db, str(order.user_id), "payment_made")
