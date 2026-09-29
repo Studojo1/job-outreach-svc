@@ -218,6 +218,22 @@ def _validate_strategy(raw: dict) -> dict:
     return validated
 
 
+def strategy_cache_key(
+    resume_profile: dict,
+    quiz_prefs: dict,
+    preferred_roles: list[str],
+    flex_notes: dict | None = None,
+) -> str:
+    """Hash of everything the strategist's answer depends on (UC-Q32).
+
+    The exact user message plus the system prompt, so any change to the
+    candidate's inputs or to the prompt itself misses the cache.
+    """
+    import hashlib
+    user_message = _build_user_message(resume_profile, quiz_prefs, preferred_roles, flex_notes)
+    return hashlib.sha256(f"{_SYSTEM_PROMPT}\x00{user_message}".encode()).hexdigest()
+
+
 def run_career_strategist(
     resume_profile: dict,
     quiz_prefs: dict,
