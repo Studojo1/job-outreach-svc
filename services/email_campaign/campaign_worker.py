@@ -1299,6 +1299,8 @@ def _check_replies(db):
             account = db.query(EmailAccount).filter_by(id=account_id).first()
             if not account:
                 continue
+            if not account.access_token and not account.refresh_token:
+                continue  # the user disconnected this mailbox; nothing to read with
 
             try:
                 # Refresh access token

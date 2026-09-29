@@ -5,6 +5,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
+from services.gmail_tokens import EncryptedToken
+
 Base = declarative_base()
 
 
@@ -46,8 +48,11 @@ class EmailAccount(Base):
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     email_address = Column(String(255), unique=True, nullable=False)
     provider = Column(String(50), default="gmail", nullable=False)
-    access_token = Column(Text, nullable=False)
-    refresh_token = Column(Text)
+    # Encrypted by the app (services/gmail_tokens.py); the attributes hold
+    # plaintext, the columns hold "enc:v1:..." (legacy rows may be plaintext).
+    # access_token is '' after the user disconnects Gmail.
+    access_token = Column(EncryptedToken, nullable=False)
+    refresh_token = Column(EncryptedToken)
     token_expiry = Column(DateTime)
     daily_send_limit = Column(Integer, default=10, nullable=False)
     last_reply_check_at = Column(DateTime)             # Last time we polled inbox for replies
