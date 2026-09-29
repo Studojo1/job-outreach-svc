@@ -1181,7 +1181,7 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     4. previously generated career_analysis.recommended_roles
     5. Absolute fallback (business-oriented, not tech)
     """
-    from .career_ontology import CAREER_ONTOLOGY, search_ontology
+    from .career_ontology import CAREER_ONTOLOGY, real_title_for, search_ontology
 
     profile = resume_profile or {}
     likely_roles: list[str] = profile.get("likely_roles") or []
@@ -1223,14 +1223,19 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
         first = next(iter(cluster.values()), [])
         return [r for r in first[:limit] if r not in ontology_roles]
 
-    # 1. LLM-extracted likely_roles → match against ontology
+    # 1. LLM-extracted likely_roles → match against ontology. A coined role
+    # with no match used to be offered verbatim; it is now its nearest real
+    # title, or left out when nothing is close (OP-N09), so every option is a
+    # title somebody actually holds.
     if likely_roles:
         for role in likely_roles:
             results = search_ontology(role)
             if results["roles"]:
                 ontology_roles.append(results["roles"][0]["role"])
             else:
-                ontology_roles.append(role)
+                real = real_title_for(role)
+                if real:
+                    ontology_roles.append(real)
 
     # 2. resume_profile.domain → cluster roles
     if len(ontology_roles) < 4 and domain in DOMAIN_TO_CLUSTER:
@@ -1268,13 +1273,11 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
             "Management Consultant (Analyst)",
         ]
 
-    # v2: prepend archetype_label as first option if it isn't already covered
+    # The archetype is a description of the student, not a role (OP-N09). It
+    # was inserted as option A, about half of students picked it, and it went
+    # into Apollo as a job title nobody holds. It is now said once in the
+    # message above the options and never offered as a choice.
     archetype_label: str = (profile.get("archetype_label") or "").strip()
-    if archetype_label:
-        archetype_lower = archetype_label.lower()
-        already_covered = any(archetype_lower in r.lower() or r.lower() in archetype_lower for r in ontology_roles)
-        if not already_covered:
-            ontology_roles.insert(0, archetype_label)
 
     # Deduplicate, cap at 6, add "Something else"
     seen, final_roles = set(), []
@@ -1289,10 +1292,9 @@ def _build_target_role_question(resume_profile: dict, parsed_json: dict) -> dict
     options.append({"label": chr(65 + len(final_roles)), "text": "Something else"})
 
     msg = (
-        "Which of these roles feels closest to what you're actually going after? "
-        "I pulled these from your background"
-        + (f", and '{archetype_label}' is what your profile most reads as" if archetype_label else "")
-        + ". If none fit just pick 'Something else'."
+        (f"Your profile reads as a {archetype_label}. " if archetype_label else "")
+        + "Which of these roles feels closest to what you're actually going after? "
+        "I pulled these from your background. If none fit just pick 'Something else'."
     )
 
     return {
