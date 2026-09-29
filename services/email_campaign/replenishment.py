@@ -29,7 +29,6 @@ from database.models import (
     EmailSent,
     Lead,
     LeadScore,
-    OutreachOrder,
 )
 
 logger = get_logger(__name__)
@@ -112,11 +111,8 @@ def _log_to_order(
     """Append a timestamped event to OutreachOrder.action_log if such an order
     exists. Best-effort: never raises."""
     try:
-        order = (
-            db.query(OutreachOrder)
-            .filter(OutreachOrder.campaign_id == campaign.id)
-            .first()
-        )
+        from services.order_links import order_for_campaign
+        order = order_for_campaign(db, campaign)
         if not order:
             return
         log = list(order.action_log or [])

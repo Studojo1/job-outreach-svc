@@ -32,6 +32,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/payment", tags=["Payment"])
 
 
+def _run_async(fn, *args):
+    """Call an async helper from a sync handler running on FastAPI's
+    threadpool (audit P15: the payment handlers no longer run their
+    synchronous DB work on the one event loop)."""
+    import anyio.from_thread
+    return anyio.from_thread.run(fn, *args)
+
+
+def _already_redeemed(db: Session, coupon_id: int, user_id: str) -> bool:
+    return db.query(PaymentOrder.id).filter(
+        PaymentOrder.coupon_id == coupon_id,
+        PaymentOrder.user_id == user_id,
+        PaymentOrder.status.in_(("paid", "completed")),
+    ).first() is not None
+
+
 def _get_razorpay_client():
     import razorpay
     return razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
@@ -306,6 +322,10 @@ async def create_order(
             # Per-recipient founder coupons are bound to one buyer.
             if coupon.user_id and str(coupon.user_id) != str(current_user.id):
                 valid = False
+            # One redemption per user (audit P14: one user redeemed a 100% code
+            # seven times for 550 credits).
+            if _already_redeemed(db, coupon.id, current_user.id):
+                valid = False
             # Coupons apply to the LinkedIn weekly plan only — never the monthly plan.
             if plan.plan_type == "linkedin" and resolved_plan_id != "linkedin_weekly":
                 valid = False
@@ -320,7 +340,17 @@ async def create_order(
                 })
 
     if amount <= 0:
-        # Fully discounted — grant credits directly
+        # Fully discounted — grant credits directly.
+        # Two simultaneous free redemptions could both pass the checks above
+        # (audit P14). Lock the coupon row and re-check under the lock; nothing
+        # after this point waits on the network, so the lock is short.
+        if coupon_id:
+            locked = db.query(Coupon).filter_by(id=coupon_id).with_for_update().first()
+            if (locked is None or not locked.is_active
+                    or (locked.max_uses is not None and locked.uses >= locked.max_uses)
+                    or _already_redeemed(db, coupon_id, current_user.id)):
+                db.rollback()
+                raise HTTPException(status_code=400, detail="This coupon has already been used.")
         idem_key = str(uuid.uuid4())
         from services.stage_tracking import safe_mark_stage, get_or_create_active_order, promote_paid_order
         try:
@@ -524,7 +554,7 @@ class VerifyPaymentRequest(BaseModel):
 
 
 @router.post("/verify")
-async def verify_payment(
+def verify_payment(
     request: VerifyPaymentRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -589,7 +619,7 @@ async def verify_payment(
     from services.stage_tracking import safe_mark_stage
     safe_mark_stage(db, str(current_user.id), "payment_made")
 
-    await _report_purchase_to_meta(db, order)
+    _run_async(_report_purchase_to_meta, db, order)
 
     return {"status": "verified", "credits": order.credits_granted, "plan_type": _order_plan_type(order)}
 
@@ -601,7 +631,7 @@ class VerifyDodoRequest(BaseModel):
 
 
 @router.post("/verify-dodo")
-async def verify_dodo_payment(
+def verify_dodo_payment(
     request: VerifyDodoRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -633,7 +663,7 @@ async def verify_dodo_payment(
         return {"status": "failed"}
     db.rollback()  # end the read transaction before the network call
 
-    dodo_status = await dodo_svc.get_checkout_status(request.session_id)
+    dodo_status = _run_async(dodo_svc.get_checkout_status, request.session_id)
     logger.info("[PAYMENT] Dodo checkout %s status from API: %s", request.session_id, dodo_status)
 
     order = _load(lock=True)
@@ -667,7 +697,7 @@ async def verify_dodo_payment(
         })
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
-        await _report_purchase_to_meta(db, order)
+        _run_async(_report_purchase_to_meta, db, order)
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):
@@ -703,6 +733,13 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
             logger.error("[DODO_WEBHOOK] Signature verification failed: %s", e)
             raise HTTPException(status_code=400, detail="Invalid webhook signature") from e
 
+    # Signature checked on the raw body above; the DB work runs on the
+    # threadpool so a row lock can never stall the event loop (audit P15).
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_dodo_webhook_apply, body, db)
+
+
+def _dodo_webhook_apply(body: bytes, db: Session):
     payload = json.loads(body)
     event_type = payload.get("event_type") or payload.get("type", "")
     data = payload.get("data", {})
@@ -754,7 +791,7 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
 
-        await _report_purchase_to_meta(db, order)
+        _run_async(_report_purchase_to_meta, db, order)
 
     elif event_type == "payment.failed":
         checkout_id = data.get("checkout_id", "")
@@ -794,6 +831,13 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
         logger.error("[PAYMENT_WEBHOOK] Signature mismatch")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
+    # Signature checked on the raw body above; the DB work runs on the
+    # threadpool so a row lock can never stall the event loop (audit P15).
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(_razorpay_webhook_apply, body, db)
+
+
+def _razorpay_webhook_apply(body: bytes, db: Session):
     payload = json.loads(body)
     event = payload.get("event", "")
 
@@ -826,7 +870,7 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
                 })
                 from services.stage_tracking import safe_mark_stage
                 safe_mark_stage(db, str(order.user_id), "payment_made")
-                await _report_purchase_to_meta(db, order)
+                _run_async(_report_purchase_to_meta, db, order)
 
     elif event == "payment.failed":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})

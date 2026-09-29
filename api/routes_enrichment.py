@@ -26,8 +26,83 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/enrichment", tags=["Enrichment"])
 
-# ── In-memory job tracker (same pattern as _test_launch_jobs) ─────────────────
-_enrichment_jobs: dict = {}
+# ── Job tracker, persisted (audit P31) ───────────────────────────────────────
+# Jobs lived in a module-level dict: another replica could not answer a status
+# poll, and a restart lost the job together with the credits it had reserved.
+# Every assignment to a job's fields now writes through to enrichment_jobs, and
+# services/reconcile.py releases what a job that died mid-run still holds.
+_JOB_FIELDS = {"status", "progress", "enriched", "failed", "total", "error", "reserved", "released"}
+
+
+class _PersistentJob(dict):
+    def __init__(self, job_id: str, data: dict):
+        super().__init__(data)
+        self.job_id = job_id
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key in _JOB_FIELDS:
+            _write_job(self.job_id, {key: value})
+
+
+def _write_job(job_id: str, fields: dict) -> None:
+    from database.models import EnrichmentJob
+    s = SessionLocal()
+    try:
+        row = s.get(EnrichmentJob, job_id)
+        if row is not None:
+            for k, v in fields.items():
+                setattr(row, k, v if k != "error" else (str(v)[:2000] if v else v))
+            row.updated_at = datetime.utcnow()
+            s.commit()
+    except Exception:
+        s.rollback()
+        logger.exception("[ENRICHMENT_JOB] could not persist %s", job_id)
+    finally:
+        s.close()
+
+
+class _JobStore:
+    """dict-like: jobs[job_id] -> a job whose field writes persist."""
+
+    def __setitem__(self, job_id: str, data: dict) -> None:
+        from database.models import EnrichmentJob
+        s = SessionLocal()
+        try:
+            s.merge(EnrichmentJob(
+                id=job_id, user_id=data["user_id"], status=data.get("status", "processing"),
+                reserved=data.get("reserved", 0), released=data.get("released", 0),
+                total=data.get("total", 0), enriched=data.get("enriched", 0), failed=data.get("failed", 0),
+                progress=data.get("progress"), error=data.get("error") or None,
+            ))
+            s.commit()
+        finally:
+            s.close()
+
+    def get(self, job_id: str):
+        from database.models import EnrichmentJob
+        s = SessionLocal()
+        try:
+            row = s.get(EnrichmentJob, job_id)
+            if row is None:
+                return None
+            return _PersistentJob(job_id, {
+                "status": row.status, "progress": row.progress or "", "enriched": row.enriched,
+                "failed": row.failed, "total": row.total, "error": row.error or "",
+                "reserved": row.reserved, "released": row.released, "user_id": row.user_id,
+                "started_at": row.created_at.isoformat() if row.created_at else "",
+            })
+        finally:
+            s.close()
+
+    def __getitem__(self, job_id: str):
+        job = self.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
+
+
+_enrichment_jobs = _JobStore()
 
 
 class EnrichmentRequest(BaseModel):
@@ -131,6 +206,7 @@ def _run_enrichment_in_background(
         if unused > 0 and limit > 5:
             refund_credits(db, user_id, unused)
             db.commit()
+            job["released"] = unused
             logger.info("[ENRICHMENT_JOB] %s: Refunded %d unused credits", job_id, unused)
 
         # Update order
@@ -170,6 +246,7 @@ def _run_enrichment_in_background(
                 if to_refund > 0:
                     refund_credits(db, user_id, to_refund)
                     db.commit()
+                    job["released"] = to_refund
                     logger.info("[ENRICHMENT_JOB] %s: Refunded %d credits after failure", job_id, to_refund)
             except Exception:
                 logger.error("[ENRICHMENT_JOB] %s: Failed to refund credits", job_id, exc_info=True)
@@ -230,6 +307,8 @@ async def enrich_leads(
     # Create background job
     job_id = str(uuid.uuid4())[:8]
     _enrichment_jobs[job_id] = {
+        "user_id": str(current_user.id),
+        "reserved": effective_limit if effective_limit > 5 else 0,
         "status": "processing",
         "progress": "Starting enrichment...",
         "enriched": 0,
@@ -263,10 +342,13 @@ async def enrich_leads(
 
 
 @router.get("/{job_id}/status")
-async def enrichment_status(job_id: str):
-    """Poll for enrichment job progress."""
+def enrichment_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll for enrichment job progress. Only the job's owner may read it."""
     job = _enrichment_jobs.get(job_id)
-    if not job:
+    if not job or job.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=404, detail="Job not found")
 
     return {

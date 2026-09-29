@@ -387,8 +387,9 @@ async def api_create_campaign(
             from services.stage_tracking import get_or_create_active_order, safe_mark_stage
             order = get_or_create_active_order(db, str(current_user.id), candidate_id=request.candidate_id)
             order.candidate_id = order.candidate_id or request.candidate_id
-            order.campaign_id = result["campaign_id"]
-            # The order -> campaigns link that a later campaign cannot overwrite.
+            # Link through campaigns.outreach_order_id only: the old single
+            # pointer (outreach_orders.campaign_id) is what a second campaign
+            # overwrote (audit P03), so it is no longer written.
             created = db.get(Campaign, result["campaign_id"])
             if created is not None:
                 created.outreach_order_id = order.id

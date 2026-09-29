@@ -109,6 +109,60 @@ def _tell_founders(subject: str, message: str) -> None:
         _send_template({"to": to, "template": "ops-alert", "subject": f"{_env_tag()}{subject}", "message": message})
 
 
+ENRICHMENT_JOB_DEAD_AFTER = timedelta(hours=1)
+
+
+def release_dead_enrichment_jobs(db: Session, now: datetime) -> int:
+    """A job still 'processing' after an hour died with its process (restart or
+    deploy mid-run, audit P31). Release whatever it reserved and did not use."""
+    from database.models import EnrichmentJob
+    jobs = (db.query(EnrichmentJob)
+            .filter(EnrichmentJob.status == "processing",
+                    EnrichmentJob.updated_at < now - ENRICHMENT_JOB_DEAD_AFTER).all())
+    total = 0
+    for j in jobs:
+        owed = max(0, (j.reserved or 0) - (j.enriched or 0) - (j.released or 0))
+        if owed:
+            total += credits.release(db, j.user_id, owed, credits.RELEASE_ENRICHMENT_UNUSED,
+                                     actor=ACTOR, note=f"enrichment job {j.id} died mid-run")
+            j.released = (j.released or 0) + owed
+        j.status = "failed"
+        j.error = "Stopped mid-run (process restarted); unused credits returned"
+    db.commit()
+    return total
+
+
+LEDGER_ALERT_EVERY = timedelta(hours=24)
+
+
+def check_ledger(db: Session, now: datetime) -> int:
+    """Every wallet must equal the sum of its ledger rows (audit P29). A
+    mismatch means something changed user_credits without services/credits.py.
+    Reported to the founders at most daily; never auto-corrected, because the
+    ledger cannot tell which side is right."""
+    from sqlalchemy import text
+    from database.models import SystemEvent
+    rows = db.execute(text("""
+        SELECT w.user_id, w.total_credits, w.used_credits,
+               COALESCE(SUM(l.delta_total), 0) AS lt, COALESCE(SUM(l.delta_used), 0) AS lu
+        FROM user_credits w LEFT JOIN credit_ledger l ON l.user_id = w.user_id
+        GROUP BY w.user_id, w.total_credits, w.used_credits
+        HAVING w.total_credits <> COALESCE(SUM(l.delta_total), 0)
+            OR w.used_credits <> COALESCE(SUM(l.delta_used), 0)
+    """)).fetchall()
+    if not rows:
+        return 0
+    last = (db.query(func.max(SystemEvent.created_at))
+            .filter(SystemEvent.event_type == "ledger_drift_alert").scalar())
+    if last is None or now - last >= LEDGER_ALERT_EVERY:
+        lines = [f"- {r.user_id}: wallet {r.total_credits}/{r.used_credits}, ledger {r.lt}/{r.lu}" for r in rows[:50]]
+        _tell_founders(f"{len(rows)} wallet(s) out of step with the credit ledger",
+                       "total/used per wallet vs ledger sums:\n" + "\n".join(lines))
+        db.add(SystemEvent(event_type="ledger_drift_alert", created_at=now, meta={"wallets": len(rows)}))
+        db.commit()
+    return len(rows)
+
+
 def link_orphan_campaigns(db: Session, now: datetime) -> int:
     orphans = db.query(Campaign).filter(Campaign.outreach_order_id.is_(None)).all()
     n = 0
@@ -155,6 +209,8 @@ def run(db: Session, now: datetime = None) -> dict:
     for name, fn in (("drafts_cancelled", sweep_stale_drafts),
                      ("payments_credited", grant_paid_without_credits),
                      ("campaigns_linked", link_orphan_campaigns),
+                     ("ledger_drift", check_ledger),
+                     ("enrichment_credits_released", release_dead_enrichment_jobs),
                      ("orders_reset", reset_orders_without_campaign),
                      ("credits_released", release_orphan_reservations)):
         try:
