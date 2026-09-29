@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
-from services.candidate_intelligence.parser import parse_resume
+from services.candidate_intelligence.parser import NO_TEXT_MESSAGE, UnreadableResumeError, parse_resume
 from api.dependencies import get_current_user
 from core.analytics import capture
 
@@ -137,6 +137,12 @@ async def upload_resume(
     # outages included, and showed the raw Python error to the student.
     try:
         raw_text, preview = parse_resume(contents, file.filename)
+    except UnreadableResumeError as e:
+        # A corrupt file or one with no text (UC-Q29): 422 with copy that says
+        # what to do. The library's error was logged by the parser.
+        logger.info("[UPLOAD] Unreadable resume from user %s (%s, %d bytes): %s",
+                    current_user.id, file.filename, len(contents), e)
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except ValueError as e:
         logger.info("[UPLOAD] Could not parse resume from user %s (%s): %s",
                     current_user.id, file.filename, e)
@@ -165,14 +171,7 @@ async def upload_resume(
             "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
             current_user.id, file.filename, len(contents),
         )
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "We could not read any text from that file. If it is a "
-                "scanned copy or an image, please upload a text-based PDF "
-                "or a Word document instead."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=NO_TEXT_MESSAGE)
 
     try:
         new_candidate = find_reusable_candidate(db, current_user.id)
