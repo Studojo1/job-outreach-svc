@@ -137,3 +137,19 @@ def test_route_requires_typed_confirmation():
     with pytest.raises(HTTPException) as exc:
         delete_my_account(DeleteAccountRequest(confirm="yes"), current_user=_U(), db=None)
     assert exc.value.status_code == 400
+
+
+def test_every_model_with_a_user_id_is_classified():
+    """A new table with user_id must be put in KEEP or DELETE in the same PR.
+
+    Otherwise self-serve deletion refuses everyone in production until someone
+    notices (enrichment_jobs, migration 053, 29 Sep).
+    """
+    from database.models import Base
+
+    known = account_deletion.KEEP | set(account_deletion.DELETE) | {"user"}
+    missing = sorted(
+        t.name for t in Base.metadata.tables.values()
+        if "user_id" in t.columns and t.name not in known
+    )
+    assert missing == [], f"classify these in services/account_deletion.py: {missing}"
