@@ -269,6 +269,13 @@ async def update_order(
         from services.stage_tracking import promote_paid_order
         promote_paid_order(order, "covered by existing credits")
 
+    # Campaign setup is the paid part of the flow, and entering it starts
+    # paid Apollo reveals below. An unpaid user must not get there by URL or
+    # by calling this API (audit PS-N08).
+    order_is_paid = order.payment_made_at is not None or _has_paid_credits(db, order.user_id)
+    if request.status == "campaign_setup" and order.status != "campaign_setup" and not order_is_paid:
+        raise HTTPException(status_code=402, detail="Choose a plan before setting up your campaign.")
+
     if request.status and request.status != order.status:
         allowed = VALID_TRANSITIONS.get(order.status, [])
         if request.status not in allowed:
@@ -303,7 +310,7 @@ async def update_order(
 
     # Trigger preview enrichment when in campaign_setup (new or existing orders).
     # Guard: only fires if fewer than 5 leads are enriched, preventing redundant Apollo calls.
-    if order.status == "campaign_setup" and order.candidate_id:
+    if order.status == "campaign_setup" and order.candidate_id and order_is_paid:
         from database.models import Lead as _Lead
         already_enriched = db.query(_Lead).filter(
             _Lead.candidate_id == order.candidate_id,
