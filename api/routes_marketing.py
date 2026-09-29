@@ -382,6 +382,11 @@ async def enrich_email(
     person = data.get("person") or {}
     email = person.get("email")
     email_status = person.get("email_status")  # "verified" / "guessed" / "unavailable"
+    # Suppressed addresses (bounced, or asked to be removed) are never handed
+    # out (Privacy Policy §5).
+    from services.enrichment.enrichment_service import _is_suppressed_address
+    if email and _is_suppressed_address(email):
+        email, email_status = None, "unavailable"
 
     logger.info(
         "[MARKETING-ENRICH] user=%s person=%s email_status=%s email_found=%s",
