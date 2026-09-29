@@ -50,6 +50,12 @@ def list_inbox_messages(
                 params=params,
                 timeout=10,
             )
+            if resp.status_code == 403 and "insufficient" in resp.text.lower():
+                # The mailbox was connected without read access. That does not
+                # fix itself, so it is an auth problem for the caller to mark,
+                # not a transient failure to retry every 5 minutes.
+                from services.email_campaign.gmail_send_service import GmailAuthError
+                raise GmailAuthError("Gmail did not grant read access; the user must reconnect")
             if not resp.ok:
                 logger.error("[INBOX] Gmail list messages failed: %d %s", resp.status_code, resp.text[:200])
                 return None
@@ -62,6 +68,9 @@ def list_inbox_messages(
         logger.info("[INBOX] Found %d inbox messages after epoch %d", len(messages), after_epoch)
         return messages  # Each item: {id, threadId}
     except Exception as e:
+        from services.email_campaign.gmail_send_service import GmailAuthError
+        if isinstance(e, GmailAuthError):
+            raise
         logger.error("[INBOX] Gmail list messages error: %s", e)
         return None
 
