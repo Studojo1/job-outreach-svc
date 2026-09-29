@@ -261,7 +261,9 @@ class OutreachOrder(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
-    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    # Legacy single pointer, no longer written (audit P03; see services/order_links.py).
+    # NO ACTION since migration 053 (P44): a campaign cannot be hand-deleted from under it.
+    campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=True)
     email_account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True)
 
     status = Column(String(50), default="created", nullable=False)
