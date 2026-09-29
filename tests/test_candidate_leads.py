@@ -138,3 +138,23 @@ def test_broader_matches_are_flagged_and_strong_total_counts_the_rest(db):
     paged = _call(db, limit=1, offset=0)
     assert paged["strong_total"] == 4  # counted before paging, like total
     assert "strong_total" not in _call(db, fields="justification")  # the cheap poll stays cheap
+
+
+# ── UC-Q25: a stale candidate id is told where the student's leads are ──
+
+def test_empty_candidate_names_the_one_with_leads(db):
+    from database.models import OutreachOrder
+    Base.metadata.create_all(db.get_bind(), tables=[OutreachOrder.__table__])
+    db.add(Candidate(id=2, user_id="u1", resume_text="newer upload"))  # no leads
+    db.commit()
+    resp = json.loads(get_candidate_leads(
+        SimpleNamespace(headers={}), 2, limit=None, offset=0, fields=None, current_user=USER, db=db,
+    ).body)
+    assert resp["total"] == 0
+    assert resp["active_candidate_id"] == 1
+
+
+def test_candidate_with_leads_gets_no_redirect_field(db):
+    from database.models import OutreachOrder
+    Base.metadata.create_all(db.get_bind(), tables=[OutreachOrder.__table__])
+    assert "active_candidate_id" not in _call(db)
