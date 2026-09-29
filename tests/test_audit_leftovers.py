@@ -111,6 +111,12 @@ def test_second_redemption_of_a_coupon_is_refused(db):
     db.commit()
     assert _already_redeemed(db, 3, "u") is True
     assert _already_redeemed(db, 3, "someone-else") is False
+    # Google's reviewers' coupon stays usable by the same account (cap still applies).
+    db.add(Coupon(id=4, code="OAuth100", discount_type="percent", discount_value=100, max_uses=32, uses=22, is_active=True))
+    db.add(PaymentOrder(id=2, user_id="u", status="paid", provider="coupon", amount_cents=0, currency="INR",
+                        tier=200, coupon_id=4))
+    db.commit()
+    assert _already_redeemed(db, 4, "u") is False
 
 
 # P24
