@@ -21,6 +21,7 @@ from api.routes_mesa import router as mesa_router
 from api.routes_extension import router as extension_router
 from api.routes_account import router as account_router
 from api.routes_connections import router as connections_router
+from api.routes_privacy_admin import router as privacy_admin_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware
@@ -85,6 +86,7 @@ app.include_router(mesa_router, prefix="/api/v1")
 app.include_router(extension_router, prefix="/api/v1")
 app.include_router(account_router, prefix="/api/v1")
 app.include_router(connections_router, prefix="/api/v1")
+app.include_router(privacy_admin_router, prefix="/api/v1")
 
 
 @app.on_event("startup")

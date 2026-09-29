@@ -21,7 +21,7 @@ sentry-sdk[fastapi]==2.19.2
 posthog>=3.0.0
 prometheus-client==0.21.1
 razorpay==1.4.2
-dodopayments>=0.11.0
+dodopayments>=1.118.0,<2
 standardwebhooks>=1.0.0
 pytz==2024.1
 cryptography==43.0.3
@@ -30,3 +30,4 @@ lxml==5.3.0
 linkedin-api==2.3.1
 playwright==1.49.1
 defusedxml==0.7.1
+azure-storage-blob>=12.19,<13
