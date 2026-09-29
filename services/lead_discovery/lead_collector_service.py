@@ -268,10 +268,60 @@ def _probe_batch(filters: LeadFilter) -> list[dict]:
     return [parse_apollo_person(p) for p in people if p.get("id")]
 
 
+def _probe_effective_stage(filters: LeadFilter) -> tuple[int, list[dict]]:
+    """Probe the filter set collection will actually get leads from.
+
+    UC-Q07: the original filters return nothing on most runs (collection only
+    fills at a loosening stage), so probing them skipped the quality check on
+    5 of 6 production runs. Walk the same ladder collect_leads walks and
+    return (stage, probe) for the first stage with results; stage 0 is the
+    original filters. (-1, []) when every stage is empty.
+    """
+    probe = _probe_batch(filters)
+    if probe:
+        return 0, probe
+    for idx, stage_filters in enumerate(_build_loosening_stages(filters), 1):
+        probe = _probe_batch(stage_filters)
+        if probe:
+            return idx, probe
+    return -1, []
+
+
+LOW_QUALITY_EVENT = "lead_quality_low"
+
+
+def _alert_low_quality(candidate_id: int | None, quality_score: int, main_issue, stage: int) -> None:
+    """Page ops on a batch the probe judged poor (UC-Q07).
+
+    Collection still proceeds (a poor batch beats none), but it used to do so
+    silently. The error log carries a fixed tag for log alerts, and the
+    system_events row makes it countable without log access. Never raises.
+    """
+    logger.error(
+        "[QualityProbe] LOW_QUALITY candidate=%s quality=%d/10 stage=%d issue=%r; proceeding",
+        candidate_id, quality_score, stage, main_issue,
+    )
+    try:
+        from database.models import SystemEvent
+        from database.session import SessionLocal
+        db = SessionLocal()
+        try:
+            db.add(SystemEvent(event_type=LOW_QUALITY_EVENT, meta={
+                "candidate_id": candidate_id, "quality_score": quality_score,
+                "stage": stage, "main_issue": main_issue,
+            }))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("[QualityProbe] could not record %s event: %s", LOW_QUALITY_EVENT, e)
+
+
 def quality_probe_loop(
     filters: LeadFilter,
     candidate_prefs: dict,
     max_iterations: int = 3,
+    candidate_id: int | None = None,
 ) -> tuple[LeadFilter, list[str]]:
     """Probe Apollo, evaluate quality with LLM, adjust filters if needed. Max 3 rounds.
 
@@ -294,13 +344,15 @@ def quality_probe_loop(
     from services.candidate_intelligence.career_strategist import APOLLO_VALID_SIZE_RANGES
 
     all_exclusions: list[str] = []
+    quality_score = None
+    stage = -1
 
     for iteration in range(max_iterations + 1):
-        probe = _probe_batch(filters)
-        logger.info("[QualityProbe] iter=%d probe_size=%d", iteration, len(probe))
+        stage, probe = _probe_effective_stage(filters)
+        logger.info("[QualityProbe] iter=%d stage=%d probe_size=%d", iteration, stage, len(probe))
 
         if not probe:
-            logger.info("[QualityProbe] Empty probe — skipping quality check, proceeding")
+            logger.warning("[QualityProbe] No loosening stage returns anyone — skipping quality check")
             break
 
         result = evaluate_probe_with_llm(probe, candidate_prefs)
@@ -371,9 +423,10 @@ def quality_probe_loop(
             logger.info("[QualityProbe] No actionable adjustments from LLM — stopping early")
             break
 
-    return filters, all_exclusions
+    if quality_score is not None and quality_score < 7:
+        _alert_low_quality(candidate_id, quality_score, main_issue, stage)
 
-    return filters
+    return filters, all_exclusions
 
 
 def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:

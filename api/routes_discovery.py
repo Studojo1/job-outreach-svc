@@ -802,6 +802,7 @@ async def search_leads(
                 filters,
                 candidate_prefs_for_probe,
                 1,  # max_iterations — 1 probe is enough; 3 added ~26s of sync latency
+                candidate.id,
             )
             logger.info(
                 f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms "
