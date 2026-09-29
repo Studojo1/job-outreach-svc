@@ -10,6 +10,7 @@ from sqlalchemy import func
 from typing import List, Optional
 
 from services.lead_discovery.domain_utils import clean_domain as _clean_domain
+from services.company_intelligence.lead_backfill import backfill_leads_from_cache, fill_lead_from_profile
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
@@ -205,6 +206,12 @@ def _score_candidate_leads(
     if not unscored:
         return 0
 
+    # UC-Q03: fill blank industry / size / description / domain from the
+    # company_profiles cache before scoring, so the scorer and the lead cards
+    # see them. Covers leads stored before this ran and companies the cache
+    # learned since. Cache-only (no research calls), best-effort.
+    backfill_leads_from_cache(db, unscored)
+
     # Convert to dicts for scoring service
     lead_dicts = []
     lead_id_map = {}
@@ -376,6 +383,11 @@ def _score_candidate_leads(
                 if not lead_obj:
                     continue
                 profile = profiles.get(lead_obj.company)  # name-keyed lookup
+                # UC-Q03: the top leads' companies were just researched, so
+                # fill the other blank company fields from the fresh profile.
+                fill_lead_from_profile(
+                    lead_obj, profile or profiles.get((lead_obj.company_domain or "").lower()),
+                )
                 if not (profile and profile.domain):
                     continue
                 if profile.domain == (lead_obj.company or "").lower():
