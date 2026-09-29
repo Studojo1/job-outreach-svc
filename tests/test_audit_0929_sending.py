@@ -286,3 +286,14 @@ def test_a_send_in_flight_is_not_reaped(db, monkeypatch):
                      status_changed_at=datetime.utcnow() - timedelta(minutes=2)))
     db.commit()
     assert campaign_worker._reap_stuck_sending(db) == 0
+
+
+def test_mailbox_without_read_scope_is_marked_not_retried(db, monkeypatch):
+    # Prod 29 Sep: "403 insufficient authentication scopes" every 5 minutes.
+    monkeypatch.setattr(gmail_inbox_service.requests, "get",
+                        lambda *a, **k: type("R", (), {"ok": False, "status_code": 403,
+                                                       "text": '{"error": "Request had insufficient authentication scopes."}'})())
+    monkeypatch.setattr(campaign_worker, "_refresh_token_sync", lambda a, d: "tok")
+    monkeypatch.setattr(campaign_worker, "_last_reply_check", 0.0)
+    campaign_worker._check_replies(db)
+    assert db.get(EmailAccount, 5).token_invalid_at is not None
