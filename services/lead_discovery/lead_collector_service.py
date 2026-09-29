@@ -25,6 +25,7 @@ from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
 from services.lead_discovery.apollo_query_builder import build_apollo_query
 from services.lead_discovery.apollo_service import search_people_chunked
+from database.conflict import insert_ignore
 from database.models import Lead
 from core.logger import get_logger
 
@@ -630,7 +631,11 @@ def _store_people(
             from services.email_campaign.suppression import is_suppressed
             if is_suppressed(db, apollo_email):
                 apollo_email = None
-        new_lead = Lead(
+        # ON CONFLICT DO NOTHING: a concurrent run for this candidate can insert
+        # the same person between the check above and this insert, and the
+        # unique index on (candidate_id, apollo_id) then skips it rather than
+        # failing the page (UC-Q36). Only a real insert counts as collected.
+        inserted = insert_ignore(db, Lead, [dict(
             candidate_id=candidate_id,
             apollo_id=apollo_id,
             name=parsed_data.get("name"),
@@ -645,11 +650,11 @@ def _store_people(
             email=apollo_email,
             email_verified=bool(apollo_email),
             status="discovered",
-        )
-        db.add(new_lead)
-        db.flush()
+        )], returning=[Lead.id])
+        if not inserted:
+            continue
         if in_location_ids is not None:
-            in_location_ids.add(new_lead.id)
+            in_location_ids.add(inserted[0].id)
         leads_collected += 1
         company_counts[company_key] = company_counts.get(company_key, 0) + 1
 
