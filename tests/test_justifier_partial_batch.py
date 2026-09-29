@@ -35,3 +35,33 @@ def test_bad_lead_is_dropped_alone():
          mock.patch.object(j, "_build_company_snapshot", return_value=""):
         out = j._justify_batch({}, leads, {})
     assert set(out) == {1}
+
+
+def test_banned_phrase_leads_are_retried_once():
+    """UC-Q22: a lead dropped for a banned phrase gets one more draw."""
+    leads = [{"id": 1, "company": "Acme"}, {"id": 2, "company": "Beta"}]
+    banned = {**GOOD, "headline": "Acme is a strong fit for your skills"}
+    calls = []
+
+    def fake(prompt, schema, **kw):
+        calls.append(sorted(schema["properties"]))
+        # First call: lead 2 trips the filter. Retry: clean.
+        return {"1": GOOD, "2": banned} if len(calls) == 1 else {"2": GOOD}
+
+    with mock.patch.object(j, "generate_json", side_effect=fake), \
+         mock.patch.object(j, "_build_batch_prompt", return_value="p"), \
+         mock.patch.object(j, "_build_company_snapshot", return_value=""):
+        out = j._justify_batch({}, leads, {})
+    assert set(out) == {1, 2}
+    assert calls == [["1", "2"], ["2"]]  # the retry asks only for the dropped lead
+
+
+def test_banned_phrase_twice_is_not_retried_forever():
+    leads = [{"id": 1, "company": "Acme"}]
+    banned = {**GOOD, "headline": "Acme is a strong fit for your skills"}
+    with mock.patch.object(j, "generate_json", return_value={"1": banned}) as gen, \
+         mock.patch.object(j, "_build_batch_prompt", return_value="p"), \
+         mock.patch.object(j, "_build_company_snapshot", return_value=""):
+        out = j._justify_batch({}, leads, {})
+    assert out == {}
+    assert gen.call_count == 2
