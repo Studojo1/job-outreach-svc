@@ -650,8 +650,18 @@ async def search_leads(
         .filter(Lead.created_at >= datetime.utcnow() - timedelta(minutes=5))
         .count()
     )
-    if recent_lead_count >= 100:
-        total_count = db.query(Lead).filter(Lead.candidate_id == candidate.id).count()
+    total_count = db.query(Lead).filter(Lead.candidate_id == candidate.id).count()
+    # Already has a full set, however old: reuse it. A second run added 800
+    # more leads from looser filters on top (candidates with 1,600 and 3,200
+    # leads, B2C UC-Q37). Unless the quiz was re-answered after those leads
+    # were found: then the targeting changed and a fresh search is right.
+    has_full_set = total_count >= request.target_leads
+    if has_full_set and candidate.quiz_answers_updated_at:
+        newest_lead = db.query(func.max(Lead.created_at)).filter(Lead.candidate_id == candidate.id).scalar()
+        if newest_lead and candidate.quiz_answers_updated_at > newest_lead:
+            logger.info("[DISCOVERY] candidate %s re-answered the quiz after its leads; searching again", candidate.id)
+            has_full_set = False
+    if recent_lead_count >= 100 or has_full_set:
         scored_count = (
             db.query(LeadScore)
             .join(Lead, LeadScore.lead_id == Lead.id)
@@ -659,9 +669,9 @@ async def search_leads(
             .count()
         )
         logger.info(
-            "[DISCOVERY] idempotency hit — candidate %s has %d leads in last 5min, "
+            "[DISCOVERY] idempotency hit — candidate %s has %d leads (%d in last 5min), "
             "returning early without re-running pipeline",
-            candidate.id, recent_lead_count,
+            candidate.id, total_count, recent_lead_count,
         )
         safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
         return {
