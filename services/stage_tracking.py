@@ -265,11 +265,44 @@ def mark_stage(
     return order
 
 
+STAGE_FAILED_EVENT = "stage_tracking_failed"
+
+
+def _record_stage_failure(user_id: str, stage: str, error: Exception) -> None:
+    """Leave an ops-visible row for a failed stage write (UC-Q16).
+
+    On 23 Sep a schema drop made every upload's order write fail for 8 hours
+    and 9 students were lost with only a swallowed log line. The row is
+    written in a fresh session because the caller's may be the broken one.
+    Never raises.
+    """
+    try:
+        from database.models import SystemEvent
+        from database.session import SessionLocal
+        s = SessionLocal()
+        try:
+            s.add(SystemEvent(event_type=STAGE_FAILED_EVENT, user_id=user_id,
+                              meta={"stage": stage, "error": f"{type(error).__name__}: {error}"[:500]}))
+            s.commit()
+        finally:
+            s.close()
+    except Exception:
+        logger.exception("[STAGE_ALERT] could not record %s event", STAGE_FAILED_EVENT)
+
+
 def safe_mark_stage(db: Session, user_id: str, stage: str, **kwargs) -> None:
     """Fire-and-forget version. Swallows any exception so instrumentation
     can never break a user-facing flow. Use this from inside request
-    handlers where the primary operation has already succeeded."""
+    handlers where the primary operation has already succeeded.
+
+    Swallowed, not silent: a failure is logged with the [STAGE_ALERT] tag
+    and recorded as a stage_tracking_failed system event (UC-Q16)."""
     try:
         mark_stage(db, user_id, stage, **kwargs)
-    except Exception:
-        logger.exception("[STAGE] safe_mark_stage failed (swallowed) stage=%s user=%s", stage, user_id)
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception("[STAGE_ALERT] safe_mark_stage failed (swallowed) stage=%s user=%s", stage, user_id)
+        _record_stage_failure(user_id, stage, e)
