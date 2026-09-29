@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Two merges a minute apart used to run two deploys at once, and the older
+# build could finish last and go live. The newest push wins now.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: read
