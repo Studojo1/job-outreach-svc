@@ -35,7 +35,7 @@ KEEP = frozenset({
 DELETE = (
     "scheduled_emails", "email_send_log", "email_opens", "email_preferences",
     "launch_nudges", "campaign_notices", "system_events", "tickets", "user_attribution", "tool_used",
-    "consultation_signups", "extension_drafts", "job_queue", "api_keys",
+    "consultation_signups", "extension_drafts", "job_queue", "api_keys", "enrichment_jobs",
     "outreach_orders", "outreach_campaigns", "outreach_contacts",
     "linkedin_connection_requests", "linkedin_outreach_leads", "linkedin_search_jobs",
     "linkedin_campaigns", "linkedin_tokens", "user_linkedin_sessions",
