@@ -31,9 +31,14 @@ class RefundError(Exception):
     pass
 
 
-async def _provider_refund(order: PaymentOrder, reason: str) -> str:
-    """Full refund at the provider. Returns the provider's refund id."""
+async def _provider_refund(order: PaymentOrder, reason: str, amount_cents: int | None = None) -> str:
+    """Refund at the provider. amount_cents=None refunds whatever is still
+    unrefunded on the payment. Returns the provider's refund id."""
+    remaining = order.amount_cents - (order.refunded_cents or 0)
+    partial = amount_cents is not None and amount_cents < remaining
     if order.provider == "dodo":
+        if partial or order.refunded_cents:
+            raise RefundError("Partial refunds through Dodo Payments aren't automated. Refund it in the Dodo dashboard.")
         if not order.dodo_payment_id:
             raise RefundError("This Dodo order has no payment id to refund.")
         from services.dodo_payments import _get_client
@@ -46,7 +51,7 @@ async def _provider_refund(order: PaymentOrder, reason: str) -> str:
         client = _get_razorpay_client()
         refund = await asyncio.to_thread(
             client.payment.refund, order.razorpay_payment_id,
-            {"amount": order.amount_cents, "notes": {"reason": reason[:200], "order": str(order.id)}},
+            {"amount": amount_cents if partial else remaining, "notes": {"reason": reason[:200], "order": str(order.id)}},
         )
         return str(refund.get("id", ""))
     raise RefundError(f"Cannot refund a '{order.provider}' order through a provider.")
@@ -98,4 +103,63 @@ async def refund_payment(db: Session, order_id: int, *, actor: str, reason: str)
         "campaigns_cancelled": [c.id for c in live],
         "credits_revoked": revoked,
         "credits_already_used": bought - revoked,
+    }
+
+
+async def refund_campaign_unsent(db: Session, campaign_id: int, *, reported_on, actor: str, reason: str) -> dict:
+    """Refund Policy v3.0 §3.3: refund the credits a failed campaign never sent.
+
+    Recomputes the §3.3 check server-side and refuses unless conditions 1, 2,
+    3, 5 and 6 all hold (condition 4, "our fault", is the admin's call, which
+    they make by pressing the button). Then, in order:
+      1. refunds unsent credits x price paid per credit at the provider;
+      2. cancels the campaign, which releases its unsent reserved credits;
+      3. revokes those credits, so the money and the credits aren't both kept;
+      4. records the amount on the payment (status stays 'paid' until the
+         whole payment has been refunded).
+    """
+    from services.email_campaign.campaign_worker import finish_campaign
+    from services.refund_check import campaign_refund_check
+
+    check = campaign_refund_check(db, campaign_id, reported_on=reported_on)
+    if check["verdict"] != "met":
+        failing = [c["label"] for c in check["conditions"] if c["n"] != 4 and c["result"] != "yes"]
+        raise RefundError("Refund Policy §3.3 is not met: " + "; ".join(failing))
+    info = check["refund"]
+    if not info or info["amount_cents"] <= 0:
+        raise RefundError("No paid, unrefunded payment is linked to this campaign.")
+    order = db.get(PaymentOrder, info["payment_id"])
+    if order.status == "refunded":
+        raise RefundError("This payment is already refunded.")
+
+    refund_id = await _provider_refund(order, reason, amount_cents=info["amount_cents"])
+
+    campaign = db.get(Campaign, campaign_id)
+    if campaign.status in ("draft", "running", "paused"):
+        finish_campaign(db, campaign, reason=f"§3.3 refund of payment {order.id}", final_status="cancelled")
+    # finish_campaign only releases credits behind queued email rows. A
+    # stalled campaign can still hold reservations with no row behind them,
+    # so hand back whatever it holds beyond what was actually sent.
+    still_held = ((campaign.credits_reserved or 0) - (campaign.credits_released or 0)
+                  - check["campaign"]["first_touch_sent"])
+    if still_held > 0:
+        credits.release(db, order.user_id, still_held, credits.RELEASE_ADMIN, campaign=campaign,
+                        actor=actor, note=f"§3.3 refund of payment {order.id}")
+    revoked = credits.revoke(db, order.user_id, info["unsent_credits"], credits.REVOKE_REFUND,
+                             payment_order_id=order.id, actor=actor, note=reason[:200])
+
+    now = datetime.utcnow()
+    order.refunded_cents = (order.refunded_cents or 0) + info["amount_cents"]
+    order.refunded_at = now
+    order.refund_id = refund_id
+    order.updated_at = now
+    if order.refunded_cents >= order.amount_cents:
+        order.status = "refunded"
+    db.commit()
+    logger.info("[REFUND] campaign %s: %s cents of payment %s refunded by %s (§3.3), %s credits revoked, refund_id=%s",
+                campaign_id, info["amount_cents"], order.id, actor, revoked, refund_id)
+    return {
+        "campaign_id": campaign_id, "payment_id": order.id, "refunded_cents": info["amount_cents"],
+        "currency": order.currency, "refund_id": refund_id, "credits_revoked": revoked,
+        "payment_status": order.status,
     }
