@@ -1587,3 +1587,80 @@ async def refund_payment_admin(
         return await refund_payment(db, payment_id, actor=str(admin.id), reason=body.reason.strip())
     except RefundError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ── Refund Policy v3.0 §3.3: campaign refund check ────────────────────────────
+# Backs the admin panel's "Campaign refund check" page. The page, the restart
+# and the refund all go through services/refund_check.py, so they can't disagree.
+
+def _parse_day(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="reported_on must be YYYY-MM-DD") from e
+
+
+@router.get("/campaign/{campaign_id}/refund-check")
+def campaign_refund_check_admin(
+    campaign_id: int,
+    reported_on: str | None = Query(None, description="Date the user reported the problem, YYYY-MM-DD"),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    from services.refund_check import RefundCheckError, campaign_refund_check
+    try:
+        return campaign_refund_check(db, campaign_id, reported_on=_parse_day(reported_on))
+    except RefundCheckError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.post("/campaign/{campaign_id}/restart")
+def campaign_restart_admin(
+    campaign_id: int,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Resume a paused campaign (the §3.3 fix). A running campaign is left as
+    it is. A Gmail pause will come straight back until the user reconnects."""
+    campaign = db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found.")
+    if campaign.status != "paused":
+        raise HTTPException(status_code=400, detail=f"Only a paused campaign can be restarted; this one is {campaign.status}.")
+    was = campaign.pause_reason
+    campaign.status = "running"
+    campaign.pause_reason = None
+    campaign.paused_at = None
+    campaign.paused_by = None
+    db.commit()
+    return {"campaign_id": campaign.id, "status": campaign.status, "previous_pause_reason": was,
+            "restarted_by": str(admin.id)}
+
+
+class CampaignRefundRequest(BaseModel):
+    reported_on: str
+    reason: str
+    confirm: bool = False
+
+
+@router.post("/campaign/{campaign_id}/refund-unsent")
+async def campaign_refund_unsent_admin(
+    campaign_id: int,
+    body: CampaignRefundRequest,
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Refund the unsent credits of a campaign that meets Refund Policy §3.3.
+    confirm must be true: this moves real money."""
+    from services.refunds import RefundError, refund_campaign_unsent
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Set confirm=true to refund real money.")
+    if not body.reason.strip():
+        raise HTTPException(status_code=400, detail="A reason is required.")
+    try:
+        return await refund_campaign_unsent(db, campaign_id, reported_on=_parse_day(body.reported_on),
+                                            actor=str(admin.id), reason=body.reason.strip())
+    except RefundError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
