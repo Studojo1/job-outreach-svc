@@ -141,3 +141,34 @@ def test_discovery_scoring_stores_location_for_leads_found_in_city(db, monkeypat
     rd._score_candidate_leads(db, cand, in_location_ids={1})
     loc = {s.lead_id: s.location_relevance for s in db.query(LeadScore)}
     assert loc == {1: 10, 2: 0}
+
+
+def test_leads_generated_is_stamped_before_the_justification_pass(db, monkeypatch):
+    """UC-Q17: the funnel stamp lands with the Phase 1 scores, not after the LLM."""
+    from api import routes_discovery as rd
+    from database.models import LeadScore, OutreachOrder
+    engine = db.get_bind()
+    Base.metadata.create_all(engine, tables=[LeadScore.__table__, OutreachOrder.__table__])
+    other = sessionmaker(bind=engine)
+    db.add(OutreachOrder(id=1, user_id="u1", candidate_id=1, status="leads_generating"))
+    db.add(Lead(id=1, candidate_id=1, name="a", title="Product Manager", company="A"))
+    db.commit()
+    for name in ("bulk_enrich_top_companies", "_launch_web_research_bg", "_fill_logo_domains_free"):
+        monkeypatch.setattr(rd, name, lambda *a, **k: {})
+    seen = {}
+
+    def fake_justify(**kw):
+        s = other()
+        seen["stamp"] = s.get(OutreachOrder, 1).leads_generated_at
+        s.close()
+        return {}
+    monkeypatch.setattr(rd, "justify_leads", fake_justify)
+    import database.session as dbs
+    monkeypatch.setattr(dbs, "SessionLocal", other)
+
+    cand = db.get(Candidate, 1)
+    cand.target_roles = ["Product Manager"]
+    db.commit()
+    rd._score_candidate_leads(db, cand)
+    assert "stamp" in seen, "justification pass did not run"
+    assert seen["stamp"] is not None
