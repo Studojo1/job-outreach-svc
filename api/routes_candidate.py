@@ -782,8 +782,12 @@ def get_candidate_leads(
             } if score else None,
         })
 
-    # Sort by score descending, lead id ascending as a total-order tiebreak
-    results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] else 0), x["id"]))
+    # Sort by score descending, lead id ascending as a total-order tiebreak.
+    # An unscored lead ranks at the candidate's median, not 0: at 0 it sank
+    # to the last page and the end of the campaign queue (B2C UC-Q35).
+    scored = sorted(x["score"]["overall"] for x in results if x["score"] and x["score"].get("overall") is not None)
+    median = scored[len(scored) // 2] if scored else 0
+    results.sort(key=lambda x: (-(x["score"]["overall"] if x["score"] and x["score"].get("overall") is not None else median), x["id"]))
 
     total = len(results)
     if offset or limit is not None:
