@@ -189,6 +189,34 @@ class SendOneResponse(BaseModel):
     found_by_search: bool = False
 
 
+def _insert_or_reuse_lead(db: Session, lead: Lead) -> Lead:
+    """Commit a new extension lead, or return the discovered lead for the same person.
+
+    leads(candidate_id, apollo_id) is unique (migration 059, UC-Q36). The
+    lookups above only match extension statuses, so a person who is already a
+    discovered lead for this candidate would be refused by the index. Reusing
+    that row is right: it is the same person, and marking it sent later keeps
+    the campaign from emailing them a second time.
+    """
+    from sqlalchemy.exc import IntegrityError
+    try:
+        with db.begin_nested():
+            db.add(lead)
+            db.flush()
+    except IntegrityError:
+        existing = (
+            db.query(Lead)
+            .filter(Lead.candidate_id == lead.candidate_id, Lead.apollo_id == lead.apollo_id)
+            .first()
+        )
+        if existing is None:
+            raise
+        lead = existing
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+
 def _resolve_candidate(db: Session, user_id: str) -> Optional[Candidate]:
     """The student's active candidate row.
 
@@ -635,7 +663,7 @@ def check_contact(
     # send-one: a rollback here would discard it and the next attempt would pay
     # Apollo again for the same person.
     if lead is None:
-        lead = Lead(
+        lead = _insert_or_reuse_lead(db, Lead(
             candidate_id=candidate.id,
             apollo_id=contact.get("apollo_id"),
             name=contact["name"],
@@ -643,10 +671,7 @@ def check_contact(
             company=request.company,
             linkedin_url=contact.get("linkedin_url"),
             status="extension_pending",
-        )
-        db.add(lead)
-        db.commit()
-        db.refresh(lead)
+        ))
 
     result = enrich_single_lead_classified(lead)
 
@@ -809,15 +834,14 @@ def send_one_email(
             email_verified=bool(contact.get("email")),
             status="extension_pending",
         )
-        db.add(lead)
+        lead = _insert_or_reuse_lead(db, lead)
         # COMMIT before the Apollo call, not flush. Everything below can fail,
         # and a rollback would discard this row — so the next attempt would
         # insert a fresh lead and pay Apollo again for the same person. That is
         # worst for `no_match`: Apollo charges for a lookup that finds nothing,
         # so a student retrying a contact with no findable address would burn a
         # credit every time. Persisting first makes the dedupe above real.
-        db.commit()
-        db.refresh(lead)
+        # (_insert_or_reuse_lead commits.)
 
     # ── Resolve the email address ────────────────────────────────────────
     # The only step that costs an Apollo credit, and it is skipped entirely
