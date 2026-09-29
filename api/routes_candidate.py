@@ -91,6 +91,25 @@ def reset_candidate_for_new_resume(candidate: Candidate, raw_text: str, preview:
 MAX_RESUME_BYTES = 10 * 1024 * 1024
 
 
+
+def merge_quiz_answers(db: Session, candidate, answers: dict) -> bool:
+    """Merge this turn's replayed answers into candidate.quiz_answers and commit.
+
+    Merge, never replace: a shorter replay (a client that lost history, a retry
+    that dropped a turn) must not erase keys the server already holds. Returns
+    True when this is the candidate's first stored answer, which drives the
+    quiz_started stage (quiz audit Q04/Q06/Q07). Tests call this function, so
+    the endpoint and its tests cannot drift apart.
+    """
+    stored = candidate.quiz_answers if isinstance(candidate.quiz_answers, dict) else {}
+    merged = {**stored, **answers}
+    if merged == stored:
+        return False
+    candidate.quiz_answers = merged
+    candidate.quiz_answers_updated_at = datetime.utcnow()
+    db.commit()
+    return not stored
+
 @router.post("/upload")
 async def upload_resume(
     background_tasks: BackgroundTasks,
@@ -350,13 +369,7 @@ def _chat_stream_turn(
     is_first_answer = False
     if answers:
         try:
-            stored = candidate.quiz_answers if isinstance(candidate.quiz_answers, dict) else {}
-            merged = {**stored, **answers}
-            if merged != stored:
-                is_first_answer = not stored
-                candidate.quiz_answers = merged
-                candidate.quiz_answers_updated_at = datetime.utcnow()
-                db.commit()
+            is_first_answer = merge_quiz_answers(db, candidate, answers)
         except Exception as persist_err:
             # A failed answer write must never cost the user their quiz turn —
             # the replay path still works without it, exactly as it did before.
