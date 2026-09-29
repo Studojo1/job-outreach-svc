@@ -91,6 +91,32 @@ def _launchable_candidate(db: Session, user_id: str, preferred: Optional[int]) -
     return ok[0] if ok else None
 
 
+def _candidate_with_leads(db: Session, user_id: str, preferred: Optional[int]) -> Optional[int]:
+    """The order's candidate if it has leads, else the newest one that does."""
+    rows = (
+        db.query(Candidate.id, func.count(Lead.id))
+        .outerjoin(Lead, Lead.candidate_id == Candidate.id)
+        .filter(Candidate.user_id == user_id)
+        .group_by(Candidate.id)
+        .order_by(Candidate.created_at.desc())
+        .all()
+    )
+    with_leads = [cid for cid, n in rows if n]
+    if preferred in with_leads:
+        return preferred
+    return with_leads[0] if with_leads else None
+
+
+def _not_paid(db: Session, user_id: str, order, available: int, has_launched: bool) -> NextStep:
+    """Unpaid. If they already have leads, point them at those, not at a new
+    upload: /outreach used to restart upload, which then hid the leads they
+    had behind a resume with none (audit OP-N03)."""
+    cid = _candidate_with_leads(db, user_id, order.candidate_id if order else None)
+    return NextStep(NOT_PAID, "/leads/results" if cid else None, available,
+                    order_id=order.id if order else None, candidate_id=cid,
+                    has_launched=has_launched)
+
+
 def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextStep:
     """Decide where the user goes next. With heal=True, also repair the active
     order a paid user is stuck behind (status, mailbox link) and commit."""
@@ -124,11 +150,11 @@ def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextSt
                         email_account_id=draft.email_account_id, has_launched=has_launched)
 
     if available < MIN_CAMPAIGN_CREDITS:
-        return NextStep(NOT_PAID, None, available, order_id=order_id, has_launched=has_launched)
+        return _not_paid(db, user_id, order, available, has_launched)
 
     # LinkedIn-only plans launch through their own flow.
     if order is not None and (getattr(order, "plan_type", None) or "email") == "linkedin":
-        return NextStep(NOT_PAID, None, available, order_id=order_id, has_launched=has_launched)
+        return _not_paid(db, user_id, order, available, has_launched)
 
     candidate_id = _launchable_candidate(db, user_id, order.candidate_id if order else None)
     mailbox = (

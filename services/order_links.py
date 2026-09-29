@@ -41,7 +41,13 @@ def campaigns_for_order(db: Session, order: OutreachOrder) -> list:
 
 
 def current_campaign_id(db: Session, order: OutreachOrder) -> Optional[int]:
+    """The campaign My Orders and the dashboard should open for this order:
+    a running or paused one first, else the newest. With two campaigns on one
+    order, the newest-only rule hid a still-running older one (audit PS-N02)."""
     rows = campaigns_for_order(db, order)
+    live = next((c for c in rows if c.status in ("running", "paused")), None)
+    if live is not None:
+        return live.id
     return rows[0].id if rows else None
 
 

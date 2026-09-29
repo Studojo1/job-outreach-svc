@@ -134,6 +134,7 @@ def add_replacement_lead(
     Returns the new emails_sent.id on success, None if:
       - the campaign has hit its 25% replacement cap
       - the source row is itself a replacement (prevents infinite chains)
+      - the source row already has a replacement
       - no candidate leads remain in the user's pool
     """
     src = db.query(EmailSent).filter(EmailSent.id == replaced_email_id).first()
@@ -141,6 +142,11 @@ def add_replacement_lead(
         return None
     if src.replacement_for_id is not None:
         return None  # don't replace a replacement
+    # One stand-in per source row. Without this a bounce reported twice (or a
+    # retry of the same no-match) queued a second free replacement: 256 sources
+    # had more than one (audit PP-P45).
+    if db.query(EmailSent.id).filter(EmailSent.replacement_for_id == src.id).first() is not None:
+        return None
 
     campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not campaign:
