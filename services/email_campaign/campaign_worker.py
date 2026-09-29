@@ -1652,8 +1652,13 @@ def _check_replies(db):
                 replies_found += r
                 bounces_found += b
             except GmailAuthError:
-                # Expected until the owner reconnects (they are emailed a
-                # reconnect link). Account id only, never the address.
+                # Revoked token or no read scope: expected until the owner
+                # reconnects. Mark it so it is skipped (and reply_check_stale
+                # does not page) until the OAuth callback clears the mark.
+                # Account id only, never the address.
+                db.rollback()
+                account.token_invalid_at = datetime.utcnow()
+                db.commit()
                 logger.warning("[REPLY_CHECK] Skipping account %d, Gmail needs reconnecting", account_id)
                 continue
             except Exception as e:
