@@ -875,6 +875,13 @@ def get_candidate_leads(
     if not light:
         # Counted before paging, like total.
         body["strong_total"] = strong_total
+    if total == 0:
+        # UC-Q25: the browser can hold a stale candidate id (a newer upload
+        # with no leads) and was told "no matches" while an older candidate
+        # holds the student's leads. Name the candidate the page should load.
+        active = _active_candidate_with_leads(db, current_user.id, candidate_id)
+        if active is not None:
+            body["active_candidate_id"] = active
     content = _json.dumps(body, separators=(",", ":"), default=str).encode()
     etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
     headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
@@ -882,6 +889,33 @@ def get_candidate_leads(
     if etag in [t.strip() for t in if_none_match.split(",")]:
         return Response(status_code=304, headers=headers)
     return Response(content, media_type="application/json", headers=headers)
+
+
+def _active_candidate_with_leads(db: Session, user_id, exclude_id: int) -> Optional[int]:
+    """The user's candidate that holds their leads, other than exclude_id.
+
+    The active order's candidate first (it is what the student is buying),
+    else the newest candidate that has leads. None when there is none.
+    """
+    from database.models import OutreachOrder
+    has_leads = db.query(Lead.id).filter(Lead.candidate_id == Candidate.id).exists()
+    order_cid = (
+        db.query(OutreachOrder.candidate_id)
+        .filter(OutreachOrder.user_id == user_id, OutreachOrder.status != "completed")
+        .order_by(OutreachOrder.created_at.desc())
+        .limit(1)
+        .scalar()
+    )
+    if order_cid and order_cid != exclude_id and db.query(Candidate.id).filter(
+            Candidate.id == order_cid, Candidate.user_id == user_id, has_leads).first():
+        return order_cid
+    row = (
+        db.query(Candidate.id)
+        .filter(Candidate.user_id == user_id, Candidate.id != exclude_id, has_leads)
+        .order_by(Candidate.created_at.desc(), Candidate.id.desc())
+        .first()
+    )
+    return row[0] if row else None
 
 
 def _is_broader(score) -> bool:
