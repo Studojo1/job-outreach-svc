@@ -787,13 +787,18 @@ async def outreach_user_detail(
 
     user_campaigns = _campaigns_for_user(db, user_id)
     order_ids = {o.id for o in orders}
-    pointed_at = {o.campaign_id for o in orders if o.campaign_id}
+    # Campaigns an order reaches: linked via campaigns.outreach_order_id, or
+    # (legacy) the order's old single pointer.
+    pointed_at = {c.id for c in user_campaigns if c.outreach_order_id in order_ids} | {
+        o.campaign_id for o in orders if o.campaign_id}
 
     orders_data = []
     for order in orders:
         campaign_data = None
-        if order.campaign_id:
-            campaign = db.query(Campaign).filter(Campaign.id == order.campaign_id).first()
+        from services.order_links import current_campaign_id
+        order_campaign_id = current_campaign_id(db, order)
+        if order_campaign_id:
+            campaign = db.query(Campaign).filter(Campaign.id == order_campaign_id).first()
             if campaign:
                 # Email stats for this campaign
                 e_stats = (

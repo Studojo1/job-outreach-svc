@@ -13,6 +13,7 @@ from database.models import (
 )
 from sqlalchemy import func
 from api.dependencies import get_current_user
+from services.order_links import current_campaign_id
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,10 @@ async def update_order(
     if request.candidate_id is not None:
         order.candidate_id = request.candidate_id
     if request.campaign_id is not None:
-        order.campaign_id = request.campaign_id
+        # Ownership was checked by _require_owned_refs. Link from the campaign
+        # side; the order's single pointer is no longer written (audit P03).
+        from services.order_links import link
+        link(db.get(Campaign, request.campaign_id), order)
     if request.email_account_id is not None:
         order.email_account_id = request.email_account_id
     if request.leads_collected is not None:
@@ -374,7 +378,7 @@ async def resume_order(
                 "order_id": order.id,
                 "status": order.status,
                 "candidate_id": step.candidate_id or order.candidate_id,
-                "campaign_id": step.campaign_id or order.campaign_id,
+                "campaign_id": step.campaign_id or current_campaign_id(db, order),
                 "email_account_id": step.email_account_id or order.email_account_id,
                 "next_step": step.state,
             }
@@ -429,7 +433,7 @@ async def resume_order(
         "order_id": order.id,
         "status": order.status,
         "candidate_id": order.candidate_id,
-        "campaign_id": order.campaign_id,
+        "campaign_id": current_campaign_id(db, order),
         "email_account_id": order.email_account_id,
     }
 
@@ -515,12 +519,13 @@ def _heal_candidate_binding(db: Session, order: OutreachOrder) -> None:
     # lead set it is working through. Picking merely the candidate with the most
     # leads can point the user at a different list than their campaign is using.
     target = None
-    if order.campaign_id:
+    order_campaign_id = current_campaign_id(db, order)
+    if order_campaign_id:
         row = (
             db.query(Campaign.candidate_id, func.count(Lead.id))
             .join(Candidate, Candidate.id == Campaign.candidate_id)
             .outerjoin(Lead, Lead.candidate_id == Campaign.candidate_id)
-            .filter(Campaign.id == order.campaign_id, Candidate.user_id == order.user_id)
+            .filter(Campaign.id == order_campaign_id, Candidate.user_id == order.user_id)
             .group_by(Campaign.candidate_id)
             .first()
         )
@@ -552,13 +557,19 @@ def _heal_candidate_binding(db: Session, order: OutreachOrder) -> None:
 
 
 def _serialize_order(order: OutreachOrder) -> dict:
+    # campaign_id is derived from campaigns.outreach_order_id (newest), not the
+    # order's single pointer, which is no longer written (audit P03).
+    from sqlalchemy.orm import object_session
+    from services.order_links import current_campaign_id
+    _db = object_session(order)
+    campaign_id = current_campaign_id(_db, order) if _db is not None else order.campaign_id
     return {
         "order": {
             "id": order.id,
             "status": order.status,
             "plan_type": getattr(order, "plan_type", "email") or "email",
             "candidate_id": order.candidate_id,
-            "campaign_id": order.campaign_id,
+            "campaign_id": campaign_id,
             "email_account_id": order.email_account_id,
             "linkedin_campaign_id": getattr(order, "linkedin_campaign_id", None),
             "linkedin_connected_at": (

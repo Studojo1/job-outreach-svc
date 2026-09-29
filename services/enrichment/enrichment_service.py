@@ -231,6 +231,10 @@ def enrich_single_lead_classified(lead: Lead) -> EnrichmentResult:
     # is skipped (and can be replaced) rather than emailed into a bounce.
     email_status = (person.get("email_status") or "").lower()
     if email_status and email_status != "verified":
+        # Apollo returned a person with an address, so the reveal was billed
+        # even though we will not use it. Count it (audit P34: the spend
+        # counter under-reported every one of these).
+        _record_apollo_reveal()
         return EnrichmentResult(success=False, error_type="no_match",
                                 error_detail=f"Apollo email not verified (status={email_status})")
 
