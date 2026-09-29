@@ -202,14 +202,19 @@ def _generate_filters_from_strategy(
     if work_mode in ("onsite", "hybrid") and normalized_locs:
         org_job_locations = normalized_locs
 
-    # ── Person past titles (roles the candidate has held) ─────────────────
-    person_past_titles = list(roles)[:5] if roles else None
+    # ── Person past titles: not set ───────────────────────────────────────
+    # This filtered hiring managers by the STUDENT's target roles as their own
+    # past titles (an Engineering Manager who was once a "Software Engineer
+    # Intern"), which with everything else matched nobody (B2C UC-Q06).
+    person_past_titles = None
 
     return LeadFilter(
         target_segments=all_segments,
         person_titles_exclude=list(DEFAULT_EXCLUSION_TITLES),
         person_locations=normalized_locs,
-        organization_locations=normalized_locs,
+        # Not the student's city: that required the company HQ there too,
+        # on top of person_locations (B2C UC-Q06).
+        organization_locations=None,
         organization_industries=None,  # dropped per Phase A audit
         email_status=["verified"],
         q_organization_job_titles=q_org_job_titles,
@@ -331,8 +336,8 @@ def _generate_filters_rules_based(
     if work_mode in ("onsite", "hybrid") and normalized_locs:
         org_job_locations = normalized_locs
 
-    # Past titles
-    person_past_titles = list(roles)[:5] if roles else None
+    # Past titles: not set (see _generate_filters_from_strategy, B2C UC-Q06)
+    person_past_titles = None
 
     # Seniority
     person_seniorities = _seniorities_for_experience_level(exp_level)
@@ -341,7 +346,9 @@ def _generate_filters_rules_based(
         target_segments=all_segments,
         person_titles_exclude=list(DEFAULT_EXCLUSION_TITLES),
         person_locations=normalized_locs,
-        organization_locations=normalized_locs,
+        # Not the student's city: that required the company HQ there too,
+        # on top of person_locations (B2C UC-Q06).
+        organization_locations=None,
         organization_industries=normalized_industries,
         email_status=["verified"],
         q_organization_job_titles=q_org_job_titles,
