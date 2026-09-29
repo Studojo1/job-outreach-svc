@@ -122,7 +122,7 @@ def test_second_redemption_of_a_coupon_is_refused(db):
 # P24
 def test_cancelled_campaign_restarts_with_credits_reserved_again(db, monkeypatch):
     from services.email_campaign import campaign_service
-    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda d, c: None)
+    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda d, c, **kw: None)
     _wallet(db, 50, 5)
     db.add(Campaign(id=1, candidate_id=1, email_account_id=5, name="c", status="cancelled",
                     credits_reserved=50, credits_released=45, outcome="cancelled"))

@@ -181,6 +181,28 @@ def fetch_message_id_header(access_token: str, gmail_message_id: str) -> Optiona
         return None
 
 
+def find_sent_message(access_token: str, to_email: str, after_epoch: int):
+    """Look in the Sent folder for a message to `to_email` since `after_epoch`.
+
+    Returns the newest {id, threadId} if found, {} if Gmail says there is none,
+    or None if the search itself failed (the caller must not guess then).
+    Used to settle emails stuck in 'sending' without sending them twice.
+    """
+    try:
+        resp = requests.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": f"in:sent to:{to_email} after:{int(after_epoch)}", "maxResults": 5},
+            timeout=GMAIL_HTTP_TIMEOUT,
+        )
+    except requests.RequestException:
+        return None
+    if not resp.ok:
+        return None
+    messages = resp.json().get("messages") or []
+    return messages[0] if messages else {}
+
+
 def _refresh_token_sync(email_account, db) -> str:
     """Refresh an expired Gmail access token synchronously (for Celery workers).
 
@@ -194,8 +216,8 @@ def _refresh_token_sync(email_account, db) -> str:
 
     if not email_account.refresh_token:
         logger.error(
-            "[GMAIL-AUTH] No refresh token for account %d (%s) — user must reconnect Gmail",
-            email_account.id, email_account.email_address,
+            "[GMAIL-AUTH] No refresh token for account %d, user must reconnect Gmail",
+            email_account.id,
         )
         raise GmailAuthError(
             f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
@@ -224,11 +246,18 @@ def _refresh_token_sync(email_account, db) -> str:
         # (e.g. user disconnected the app, or 7-day unverified-app limit hit).
         # Any other error (5xx, quota, etc.) is transient.
         if err_code == "invalid_grant":
+            # Log the account id only (audit PS-N14: each attempt wrote the
+            # user's address three times). Mark the mailbox dead so the reply
+            # check stops refreshing it every 5 minutes until they reconnect.
             logger.error(
-                "[GMAIL-AUTH] Refresh token revoked/expired for account %d (%s). "
-                "User must reconnect Gmail. Google error: %s",
-                email_account.id, email_account.email_address, err_body,
+                "[GMAIL-AUTH] Refresh token revoked/expired for account %d; user must reconnect Gmail",
+                email_account.id,
             )
+            try:
+                email_account.token_invalid_at = datetime.utcnow()
+                db.commit()
+            except Exception:
+                db.rollback()
             raise GmailAuthError(
                 f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
             )

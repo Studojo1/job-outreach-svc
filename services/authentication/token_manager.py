@@ -32,6 +32,7 @@ async def store_user_tokens(db: Session, user_id: str, email_address: str, acces
                 account.refresh_token = refresh_token
             account.token_expiry = token_expiry
             account.email_address = email_address
+            account.token_invalid_at = None  # reconnected: reply checks resume
             logger.info(f"Updated existing Gmail tokens for user_id: {user_id}, email: {email_address}")
         else:
             account = EmailAccount(
