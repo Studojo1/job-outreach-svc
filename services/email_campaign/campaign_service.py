@@ -12,6 +12,8 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
+import pytz
+
 from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate, PaymentOrder
 from core.logger import get_logger
 from core.metrics import CAMPAIGNS_RUNNING
@@ -233,6 +235,40 @@ def restore_cancelled_work(db: Session, campaign: Campaign) -> int:
     return n
 
 
+def _scan_replies_before_restart(db: Session, campaign: Campaign) -> None:
+    """Read the campaign's mailbox back to its first send before it starts
+    again. Paused and cancelled campaigns used to get no reply checks, so a
+    reply that came in meanwhile did not cancel its follow-up, which then went
+    out on resume (audit NEW-03, PS-N18). Best effort: a failure here is
+    logged, and the send-time checks still apply."""
+    from services.email_campaign.campaign_worker import check_mailbox_replies
+    account = db.get(EmailAccount, campaign.email_account_id) if campaign.email_account_id else None
+    if account is None:
+        return
+    first_sent = (
+        db.query(func.min(EmailSent.sent_at))
+        .filter(EmailSent.campaign_id == campaign.id, EmailSent.sent_at.isnot(None))
+        .scalar()
+    )
+    if first_sent is None:
+        return
+    try:
+        replies, bounces = check_mailbox_replies(db, account, after_epoch=int(first_sent.timestamp()))
+        logger.info("[CAMPAIGN] Pre-restart reply scan for campaign #%d: replies=%d bounces=%d",
+                    campaign.id, replies, bounces)
+    except Exception as e:  # noqa: BLE001 - never block the user's resume on this
+        db.rollback()
+        logger.warning("[CAMPAIGN] Pre-restart reply scan failed for campaign #%d: %s", campaign.id, e)
+
+
+def _next_business_morning(campaign: Campaign, now: datetime) -> datetime:
+    from services.email_campaign.campaign_worker import _campaign_tz, _push_to_business_hours
+    tz = _campaign_tz(campaign)
+    local = now.replace(tzinfo=pytz.utc).astimezone(tz) + timedelta(days=1)
+    morning = local.replace(hour=9, minute=0, second=0, microsecond=0)
+    return _push_to_business_hours(morning.astimezone(pytz.utc).replace(tzinfo=None), tz)
+
+
 def transition_campaign(db: Session, campaign_id: int, target_status: str,
                         actor: str = "user") -> Dict[str, Any]:
     """Transition a campaign to a new state.
@@ -255,8 +291,25 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
         )
 
     old_status = campaign.status
+    restarting = old_status in ("paused", "cancelled") and target_status == "running"
+    if restarting:
+        _scan_replies_before_restart(db, campaign)
     if old_status == "cancelled" and target_status == "running":
         restore_cancelled_work(db, campaign)  # raises ValueError if nothing can be restored
+        now = datetime.utcnow()
+        # Restored follow-ups wait for at least the next business morning, so
+        # none goes out before a reply to its first email could be seen.
+        morning = _next_business_morning(campaign, now)
+        db.query(EmailSent).filter(
+            EmailSent.campaign_id == campaign.id,
+            EmailSent.status == "followup_pending",
+            (EmailSent.scheduled_at.is_(None)) | (EmailSent.scheduled_at < morning),
+        ).update({EmailSent.scheduled_at: morning}, synchronize_session=False)
+        # A plan that ran out while cancelled gets its original length again:
+        # otherwise the restart finished itself on the next cycle (PS-N18).
+        if campaign.expires_at and campaign.expires_at <= now:
+            length = (campaign.expires_at - campaign.started_at) if campaign.started_at else timedelta(days=8)
+            campaign.expires_at = now + max(length, timedelta(days=1))
     campaign.status = target_status
     db.commit()
 
@@ -327,7 +380,9 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
 
         # Pre-compute schedule timestamps for all emails (queued + pending_enrichment)
         from services.email_campaign.campaign_worker import compute_campaign_schedule
-        compute_campaign_schedule(db, campaign_id)
+        # A resumed or restarted campaign starts inside the 9-5 window, not
+        # 30-180 seconds from now at any hour (PS-N16).
+        compute_campaign_schedule(db, campaign_id, resume=restarting)
         logger.info("[CAMPAIGN] Computed schedule for campaign #%d (emails=%d)",
                     campaign_id, email_count)
 

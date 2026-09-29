@@ -56,6 +56,7 @@ class EmailAccount(Base):
     token_expiry = Column(DateTime)
     daily_send_limit = Column(Integer, default=10, nullable=False)
     last_reply_check_at = Column(DateTime)             # Last time we polled inbox for replies
+    token_invalid_at = Column(DateTime)                # Google refused the refresh token; cleared on reconnect
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="email_accounts")

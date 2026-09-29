@@ -99,8 +99,14 @@ def _next_schedule_slot(db: Session, campaign_id: int) -> datetime:
     )
     now = datetime.utcnow()
     if max_scheduled is None or max_scheduled < now:
-        return now + timedelta(minutes=5)
-    return max_scheduled + timedelta(minutes=50)
+        slot = now + timedelta(minutes=5)
+    else:
+        slot = max_scheduled + timedelta(minutes=50)
+    # Replacements land inside the 9-5 window too (audit PS-N16); the sender
+    # also enforces it, this just keeps the dashboard's times honest.
+    from services.email_campaign.campaign_worker import _campaign_tz, _push_to_business_hours
+    campaign = db.get(Campaign, campaign_id)
+    return _push_to_business_hours(slot, _campaign_tz(campaign)) if campaign else slot
 
 
 def _log_to_order(
@@ -151,6 +157,16 @@ def add_replacement_lead(
     campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not campaign:
         return None
+
+    # A no-match stand-in takes a paid slot; none once the campaign has used
+    # every credit it paid for (PP-P26). Bounce stand-ins are free.
+    if reason != "bounce" and campaign.credits_reserved:
+        from services.email_campaign.campaign_worker import _COMMITTED, _paid_slots_in
+        allowed = max(0, campaign.credits_reserved - (campaign.credits_released or 0))
+        if _paid_slots_in(db, campaign_id, _COMMITTED) >= allowed:
+            logger.info("[REPLENISH] Campaign %d at its paid cap; no replacement for email %d",
+                        campaign_id, replaced_email_id)
+            return None
 
     initial_size = _campaign_initial_size(db, campaign_id)
     # floor, not ceil: ceil gave 50-credit plans 13 replacements, 26% (audit P45).

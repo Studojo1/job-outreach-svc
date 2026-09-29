@@ -85,7 +85,7 @@ def test_create_links_the_campaign_to_its_order(db):
 
 def test_launch_true_starts_sending_in_the_same_request(db, monkeypatch):
     from services.email_campaign import campaign_worker
-    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda db_, cid: None)
+    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda db_, cid, **kw: None)
     _leads(db, 60)
     out = _create(db, launch=True)
     assert db.get(Campaign, out["campaign_id"]).status == "running"

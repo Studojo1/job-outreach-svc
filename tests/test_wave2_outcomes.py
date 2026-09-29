@@ -217,7 +217,7 @@ def test_resume_replans_from_now_without_adding_the_pause(db, monkeypatch):
     campaign.pause_reason, campaign.paused_by = "user", "user"
     db.commit()
 
-    def plan_from_now(db_, campaign_id):
+    def plan_from_now(db_, campaign_id, **kw):
         for e in db_.query(EmailSent).filter_by(campaign_id=campaign_id, status="queued"):
             e.scheduled_at = datetime.utcnow() + timedelta(minutes=2)
         db_.commit()
@@ -238,7 +238,7 @@ def test_pause_records_who_and_why(db):
 
 def test_reconnecting_gmail_resumes_what_the_system_paused(db, monkeypatch):
     from api import routes_gmail
-    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda db_, cid: None)
+    monkeypatch.setattr(campaign_worker, "compute_campaign_schedule", lambda db_, cid, **kw: None)
     _email(db)
     campaign = db.get(Campaign, 10)
     campaign.status, campaign.pause_reason, campaign.paused_by = "paused", "gmail_auth", "system"

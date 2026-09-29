@@ -27,7 +27,7 @@ def _jsonb_as_json(type_, compiler, **kw):  # pragma: no cover - test plumbing
 def _no_scheduler(monkeypatch):
     # Scheduling is not under test and needs the worker's full environment.
     import services.email_campaign.campaign_worker as worker
-    monkeypatch.setattr(worker, "compute_campaign_schedule", lambda db, campaign_id: None)
+    monkeypatch.setattr(worker, "compute_campaign_schedule", lambda db, campaign_id, **kw: None)
 
 
 @pytest.fixture()
