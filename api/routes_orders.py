@@ -140,12 +140,29 @@ async def list_orders(
 
     for o in orders:
         _heal_candidate_binding(db, o)
+    lead_counts = _lead_counts(db, [o.candidate_id for o in orders if o.candidate_id])
     out = []
     for o in orders:
         row = _serialize_order(o)
         row["order"]["campaign"] = _live_campaign(db, o)
+        # The stored leads_collected was never written when discovery finished:
+        # 287 of 290 recent orders that had leads said "0 leads" (PH-25). Count
+        # the order's leads instead; nothing to backfill and nothing to drift.
+        if o.candidate_id in lead_counts:
+            row["order"]["leads_collected"] = lead_counts[o.candidate_id]
         out.append(row)
     return {"orders": out}
+
+
+def _lead_counts(db: Session, candidate_ids: list[int]) -> dict[int, int]:
+    if not candidate_ids:
+        return {}
+    return dict(
+        db.query(Lead.candidate_id, func.count(Lead.id))
+        .filter(Lead.candidate_id.in_(set(candidate_ids)))
+        .group_by(Lead.candidate_id)
+        .all()
+    )
 
 
 def _live_campaign(db: Session, order: OutreachOrder):
