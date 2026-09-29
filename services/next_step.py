@@ -134,6 +134,7 @@ def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextSt
     mailbox = (
         db.query(EmailAccount)
         .filter_by(user_id=user_id, provider="gmail")
+        .filter(EmailAccount.access_token != "")  # '' = the user disconnected it
         .order_by(EmailAccount.created_at.desc())
         .first()
     )

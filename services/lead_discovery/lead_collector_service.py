@@ -679,6 +679,11 @@ def _store_people(
             continue
 
         apollo_email = parsed_data.get("email")
+        # Never store a suppressed address on a new lead (Privacy Policy §5).
+        if apollo_email:
+            from services.email_campaign.suppression import is_suppressed
+            if is_suppressed(db, apollo_email):
+                apollo_email = None
         # ON CONFLICT DO NOTHING: a concurrent run for this candidate can insert
         # the same person between the check above and this insert, and the
         # unique index on (candidate_id, apollo_id) then skips it rather than

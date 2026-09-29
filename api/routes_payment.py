@@ -20,7 +20,7 @@ from core.pricing import (
     get_plan, get_plans, get_tier_pricing, get_dodo_product_id, apply_coupon,
     is_internal_only_coupon,
 )
-from core.geo import detect_country, is_india
+from core.geo import detect_country, get_client_ip, is_india
 from api.dependencies import get_current_user
 from core.analytics import capture
 from core import meta_capi
@@ -225,6 +225,36 @@ class CreateOrderRequest(BaseModel):
     plan_id: Optional[str] = None     # new path: "email_200", "linkedin_350", "both_500", etc.
     currency: str = "USD"
     coupon_code: Optional[str] = None
+    # EX-07: the browser's _fbp/_fbc cookies (or an fbc built from the stored
+    # fbclid), forwarded to the server-side Meta Purchase. Optional: ad
+    # blockers and cookie refusals leave them absent, and that is fine.
+    fbp: Optional[str] = None
+    fbc: Optional[str] = None
+
+
+def _meta_signal(value: Optional[str]) -> Optional[str]:
+    """A Meta browser id as sent by the client, or None if it is not one.
+
+    Both cookies are "fb.<n>.<timestamp>.<value>"; anything else is not worth
+    storing or forwarding.
+    """
+    v = (value or "").strip()
+    return v[:255] if v.startswith("fb.") else None
+
+
+def _meta_signals(body: CreateOrderRequest, req: Request) -> dict:
+    """PaymentOrder columns holding the buyer's match signals (EX-07).
+
+    Captured at create-order because the Purchase is reported later, often
+    from a webhook that has no browser behind it.
+    """
+    ip = get_client_ip(req)
+    return {
+        "meta_fbp": _meta_signal(body.fbp),
+        "meta_fbc": _meta_signal(body.fbc),
+        "client_ip": ip[:64] if ip and ip != "0.0.0.0" else None,  # noqa: S104 - string comparison, not a bind
+        "client_user_agent": (req.headers.get("user-agent") or "")[:1000] or None,
+    }
 
 
 def _has_something_to_send(db: Session, user_id: str) -> bool:
@@ -458,6 +488,7 @@ async def create_order(
             geo_country=country,
             status="created",
             idempotency_key=idem_key,
+            **_meta_signals(body, req),
         )
         db.add(order)
         _set_plan_on_order(db, outreach_order_id, plan)
@@ -524,6 +555,7 @@ async def create_order(
         geo_country=country,
         status="created",
         idempotency_key=idem_key,
+        **_meta_signals(body, req),
     )
     db.add(order)
     _set_plan_on_order(db, outreach_order_id, plan)
@@ -1013,6 +1045,12 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
             currency=order.currency or "INR",
             email=email,
             external_id=str(order.user_id) if order.user_id else None,
+            # EX-07: captured at create-order; without them Meta could match
+            # this Purchase on the hashed email alone.
+            client_ip=order.client_ip,
+            user_agent=order.client_user_agent,
+            fbp=order.meta_fbp,
+            fbc=order.meta_fbc,
         )
     except Exception as e:
         # A payment must never fail because an analytics call did.

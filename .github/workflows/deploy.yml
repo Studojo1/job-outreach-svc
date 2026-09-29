@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Two merges a minute apart used to run two deploys at once, and the older
+# build could finish last and go live. The newest push wins now.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: read
@@ -99,6 +105,13 @@ jobs:
           # off and the frontend's server-side CRM/extension calls get 401.
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             --from=secret/app-secrets --keys=INTERNAL_API_SECRET \
+            -n studojo
+          # Account deletion (Privacy Policy §15): resume files in Azure Blob and
+          # the user's PostHog person. kubectl turns the keys into
+          # AZURE_STORAGE_ACCOUNT_NAME, AZURE_STORAGE_ACCOUNT_KEY,
+          # POSTHOG_PERSONAL_API_KEY and POSTHOG_PROJECT_ID.
+          kubectl set env deployment/${{ env.SERVICE_NAME }} \
+            --from=secret/app-secrets --keys=azure-storage-account-name,azure-storage-account-key,POSTHOG_PERSONAL_API_KEY,POSTHOG_PROJECT_ID \
             -n studojo
           # Emailer's send-template secret, for the paid-not-launched nudges
           # (services/launch_nudge.py). Only wired once the app-secrets key

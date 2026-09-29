@@ -329,7 +329,9 @@ async def update_order(
 
 
 def _has_mailbox(db: Session, user_id: str) -> bool:
-    return db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id).first() is not None
+    # access_token '' = the user disconnected this mailbox
+    return db.query(EmailAccount.id).filter(EmailAccount.user_id == user_id,
+                                            EmailAccount.access_token != "").first() is not None
 
 
 def _has_paid_credits(db: Session, user_id: str) -> bool:
