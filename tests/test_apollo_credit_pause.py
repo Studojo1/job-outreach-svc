@@ -76,6 +76,7 @@ def apollo(monkeypatch):
     monkeypatch.setattr(apollo_pause, "_restore_checked", False)
     monkeypatch.setattr(apollo_pause, "_seen_restore_at", None)
     monkeypatch.setattr(apollo_pause, "_canary_verdict", None)
+    apollo_pause._reset_sweep_backoff()
     yield Fake
     apollo_keys.reset()
 
@@ -277,3 +278,32 @@ def test_no_match_fails_normally_when_there_is_nothing_to_compare(db, apollo):
     _run_until_decided(db, email)
 
     assert email.status == "failed"
+
+
+# ── PP-P34: the sweep backs off while Apollo keeps pausing the same rows ──
+
+def test_sweep_backs_off_while_rows_keep_getting_paused_again(db, apollo, monkeypatch):
+    apollo.status = 429  # rate limited: pauses the row, key stays usable
+    (email,) = _pending(db)
+    clock = [datetime.utcnow()]
+
+    class _DT(datetime):
+        @classmethod
+        def utcnow(cls):
+            return clock[0]
+    monkeypatch.setattr(apollo_pause, "datetime", _DT)
+
+    requeued_at = []
+    for second in range(0, 600, 30):  # 10 minutes of 30s worker cycles
+        clock[0] = _DT.utcnow() + timedelta(seconds=30) if second else clock[0]
+        campaign_worker._enrich_upcoming(db)
+        if apollo_pause.requeue_credit_paused(db):
+            requeued_at.append(second)
+    # Without backoff: requeued (and Apollo called) on all 20 cycles.
+    assert len(requeued_at) <= 6
+    gaps = [b - a for a, b in pairwise(requeued_at)]
+    assert gaps == sorted(gaps) and gaps[-1] > gaps[0]
+
+    # A scoped call (someone pressing retry) is not held back.
+    campaign_worker._enrich_upcoming(db)
+    assert apollo_pause.requeue_credit_paused(db, campaign_id=10) == 1
