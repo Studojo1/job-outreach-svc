@@ -87,7 +87,13 @@ def send_gmail_email(
 
     Raises:
         RuntimeError: If the API call fails.
+        SuppressedAddress: If the recipient is on the suppression list.
     """
+    # Last line for every Gmail send, whichever path got here: never write to
+    # an address that bounced or asked to be removed (Privacy Policy §5).
+    from services.email_campaign.suppression import guard_send
+    guard_send(to_email)
+
     logger.info("Sending email to %s (subject: %s, thread_id=%s)", to_email, subject, thread_id)
 
     # ── Build MIME message ───────────────────────────────────────────────

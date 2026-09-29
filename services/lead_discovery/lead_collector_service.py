@@ -622,6 +622,11 @@ def _store_people(
             continue
 
         apollo_email = parsed_data.get("email")
+        # Never store a suppressed address on a new lead (Privacy Policy §5).
+        if apollo_email:
+            from services.email_campaign.suppression import is_suppressed
+            if is_suppressed(db, apollo_email):
+                apollo_email = None
         new_lead = Lead(
             candidate_id=candidate_id,
             apollo_id=apollo_id,

@@ -94,6 +94,26 @@ class Settings(BaseSettings):
     # POSTHOG
     POSTHOG_KEY: str = ""
     POSTHOG_HOST: str = "https://eu.i.posthog.com"
+    # Account deletion asks PostHog to delete the person (Privacy Policy §15).
+    # Both blank: skipped with a warning. Private API host is derived from
+    # POSTHOG_HOST (eu.i.posthog.com -> eu.posthog.com) unless set.
+    POSTHOG_PERSONAL_API_KEY: str = ""
+    POSTHOG_PROJECT_ID: str = ""
+    POSTHOG_API_HOST: str = ""
+
+    # MIXPANEL GDPR deletion API (Privacy Policy §15). Blank: skipped with a
+    # warning. MIXPANEL_GDPR_TOKEN is an OAuth token of a project owner.
+    MIXPANEL_PROJECT_TOKEN: str = ""
+    MIXPANEL_GDPR_TOKEN: str = ""
+    MIXPANEL_API_HOST: str = "https://mixpanel.com"
+
+    # AZURE BLOB STORAGE (same account the frontend and control-plane upload
+    # resumes to). Used only to delete a deleted account's files. Blank:
+    # skipped with a warning.
+    AZURE_STORAGE_ACCOUNT_NAME: str = ""
+    AZURE_STORAGE_ACCOUNT_KEY: str = ""
+    AZURE_STORAGE_CONTAINER_NAME: str = "resumes"
+    AZURE_STORAGE_TICKETS_CONTAINER: str = "ticket-screenshots"
 
     # LINKEDIN OUTREACH
     # Generate: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"

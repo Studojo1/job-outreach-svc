@@ -275,9 +275,10 @@ def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
 # ── JIT Phase 1: Enrich Upcoming Leads ──────────────────────────────────────
 
 def _skip_suppressed(db, email, address) -> bool:
-    """A lead whose address bounced before is treated like no email found:
-    the row is skipped, a replacement lead takes the slot where the cap
-    allows, and otherwise the credit comes back (audit P18)."""
+    """A lead whose address is on the suppression list (it bounced, or its
+    owner asked to be removed) is treated like no email found: the row is
+    skipped, a replacement lead takes the slot where the cap allows, and
+    otherwise the credit comes back (audit P18, Privacy Policy §5)."""
     from services.email_campaign.suppression import is_suppressed
     if not is_suppressed(db, address):
         return False
@@ -286,7 +287,7 @@ def _skip_suppressed(db, email, address) -> bool:
     if email.replacement_for_id is None:
         from services.email_campaign.replenishment import add_replacement_lead
         replaced = add_replacement_lead(db, email.campaign_id, email.id, reason="enrichment_exhausted") is not None
-    outcomes.fail(db, email, "Apollo could not find email for this contact (address bounced before)",
+    outcomes.fail(db, email, "Apollo could not find email for this contact (address is suppressed)",
                   replaced=replaced)
     db.commit()
     return True
@@ -686,10 +687,11 @@ def _send_ready(db) -> tuple:
                 db.commit()
                 continue
 
-        # Never email an address that has bounced before (audit P18).
+        # Never email a suppressed address: it bounced before or its owner
+        # asked to be removed (audit P18, Privacy Policy §5).
         from services.email_campaign.suppression import is_suppressed
         if not email.is_test and is_suppressed(db, email.to_email):
-            outcomes.fail(db, email, "Address is suppressed: it bounced before")
+            outcomes.fail(db, email, "Address is suppressed: it bounced or asked to be removed")
             db.commit()
             failed_count += 1
             continue
@@ -954,7 +956,7 @@ def _process_followups(db) -> tuple:
         from services.email_campaign.suppression import is_suppressed
         if is_suppressed(db, fu.to_email):
             fu.status = "cancelled_reply"
-            fu.error_message = "Address is suppressed (bounced before)"
+            fu.error_message = "Address is suppressed (bounced or asked to be removed)"
             db.commit()
             cancelled_count += 1
             continue
@@ -1308,6 +1310,8 @@ def _check_replies(db):
             account = db.query(EmailAccount).filter_by(id=account_id).first()
             if not account:
                 continue
+            if not account.access_token and not account.refresh_token:
+                continue  # the user disconnected this mailbox; nothing to read with
 
             try:
                 # Refresh access token
@@ -1387,7 +1391,8 @@ def _check_replies(db):
                         email_row.status_changed_at = datetime.utcnow()
                         email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
                         from services.email_campaign.suppression import suppress
-                        suppress(db, email_row.to_email, f"bounce: {(email_row.bounce_reason or '')[:200]}")
+                        suppress(db, email_row.to_email, f"bounce: {(email_row.bounce_reason or '')[:200]}",
+                                 source="bounce")
                         if email_row.replacement_for_id is None:
                             from services.email_campaign.replenishment import add_replacement_lead
                             add_replacement_lead(db, email_row.campaign_id, email_row.id, reason="bounce")
@@ -1407,6 +1412,14 @@ def _check_replies(db):
                     email_row.reply_text = detail["body_text"][:10000]
                     email_row.reply_received_at = datetime.utcfromtimestamp(detail["internal_date"])
                     email_row.reply_sentiment = classification.get("sentiment", "neutral")
+                    # "Remove me" in a reply is a removal request (Terms §6):
+                    # nobody on Studojo writes to this address again.
+                    from services.email_campaign.suppression import asks_removal, suppress
+                    if asks_removal(detail["body_text"]):
+                        suppress(db, email_row.to_email, f"reply asked to be removed (email {email_row.id})",
+                                 source="reply")
+                        logger.info("[REPLY_CHECK] Email %d: reply asked to be removed, address suppressed",
+                                    email_row.id)
                     db.commit()
                     replies_found += 1
                     logger.info("[REPLY_CHECK] Reply detected for email %d: sentiment=%s",

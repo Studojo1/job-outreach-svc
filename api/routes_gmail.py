@@ -218,7 +218,8 @@ async def get_gmail_account(
     mailboxes (audit P48). email_account_id, when given, picks that account
     instead of an arbitrary one.
     """
-    q = db.query(EmailAccount).filter_by(user_id=str(current_user.id), provider="gmail")
+    from services.connections import gmail_connected_filter
+    q = db.query(EmailAccount).filter_by(user_id=str(current_user.id), provider="gmail").filter(gmail_connected_filter())
     if email_account_id:
         # PP-P48: honour the requested account; never report on a different one.
         account = q.filter_by(id=email_account_id).first()

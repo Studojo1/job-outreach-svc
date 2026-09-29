@@ -20,6 +20,8 @@ from api.routes_marketing import router as marketing_router
 from api.routes_mesa import router as mesa_router
 from api.routes_extension import router as extension_router
 from api.routes_account import router as account_router
+from api.routes_connections import router as connections_router
+from api.routes_privacy_admin import router as privacy_admin_router
 from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware, SSESafeGZipMiddleware
@@ -86,6 +88,8 @@ app.include_router(marketing_router, prefix="/api/v1")
 app.include_router(mesa_router, prefix="/api/v1")
 app.include_router(extension_router, prefix="/api/v1")
 app.include_router(account_router, prefix="/api/v1")
+app.include_router(connections_router, prefix="/api/v1")
+app.include_router(privacy_admin_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
@@ -96,6 +100,11 @@ def on_startup():
     start_automation_daemon()
     from services.payment_reconciler import start_reconciler
     start_reconciler()
+    # Encrypt any Gmail tokens still stored in plaintext (idempotent; a no-op
+    # once done). Off the startup path so a slow DB cannot delay readiness.
+    import threading
+    from services.gmail_tokens import run_startup_backfill
+    threading.Thread(target=run_startup_backfill, name="gmail-token-backfill", daemon=True).start()
 
 
 @app.on_event("shutdown")

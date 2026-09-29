@@ -44,6 +44,22 @@ def _record_apollo_reveal() -> None:
         logger.warning("[ENRICHMENT] apollo reveal counter failed: %s", e)
 
 
+def _is_suppressed_address(address: str) -> bool:
+    """Own short session, like the reveal counter. The send path re-checks
+    and fails closed, so a lookup error here only logs."""
+    try:
+        from database.session import SessionLocal
+        from services.email_campaign.suppression import is_suppressed
+        db = SessionLocal()
+        try:
+            return is_suppressed(db, address)
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ENRICHMENT] suppression check failed: %s", e)
+        return False
+
+
 # Classified result from a single enrichment attempt. Lets the JIT worker
 # distinguish "Apollo cannot find this person" (permanent for this lead) from
 # "Apollo credits exhausted / rate-limited / API down" (retry when recovered).
@@ -237,6 +253,14 @@ def enrich_single_lead_classified(lead: Lead) -> EnrichmentResult:
         _record_apollo_reveal()
         return EnrichmentResult(success=False, error_type="no_match",
                                 error_detail=f"Apollo email not verified (status={email_status})")
+
+    # A suppressed address (bounced, or its owner asked to be removed) is
+    # never stored on a lead, so no flow can pick it up later (Privacy Policy
+    # §5). Billed by Apollo all the same, so it is counted.
+    if _is_suppressed_address(email):
+        _record_apollo_reveal()
+        return EnrichmentResult(success=False, error_type="no_match",
+                                error_detail="Address is on the suppression list")
 
     result_dict: Dict[str, str] = {"email": email}
     first = person.get("first_name") or ""
