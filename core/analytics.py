@@ -23,7 +23,14 @@ def _get_client():
 
 
 def capture(event: str, user_id: str, properties: dict = None):
-    """Fire a PostHog event. No-op if POSTHOG_KEY is not configured."""
+    """Fire a PostHog event. No-op if POSTHOG_KEY is not configured.
+
+    Every server event is tagged source='server' (audit ST-N09): several of them
+    (resume_uploaded, profile_quiz_completed, payment_confirmed, campaign_started,
+    coupon_applied) share a name with the browser's copy, so insights that count
+    events need a way to drop the server duplicate. The tag always wins over a
+    caller's own 'source'; put call-site context under another key.
+    """
     client = _get_client()
     if not client:
         return
@@ -31,7 +38,7 @@ def capture(event: str, user_id: str, properties: dict = None):
         client.capture(
             distinct_id=str(user_id),
             event=event,
-            properties=properties or {},
+            properties={**(properties or {}), "source": "server"},
         )
     except Exception as e:
         logger.warning("[PostHog] capture failed for event=%s: %s", event, e)
