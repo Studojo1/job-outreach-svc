@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 
 from database.session import SessionLocal
 from database.models import PaymentOrder, Coupon
+from core.analytics import capture
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,36 @@ def _flip_to_paid(db, order: PaymentOrder, *, payment_id: str | None, provider: 
         order.id, provider, order.plan_id, order.user_id,
     )
     safe_mark_stage(db, str(order.user_id), "payment_made")
+    _report_recovered_payment(db, order, provider)
+
+
+def _report_recovered_payment(db, order: PaymentOrder, provider: str) -> None:
+    """Tell PostHog and Meta about a payment only the reconciler saw.
+
+    The verify endpoints report every payment they confirm; an order rescued
+    here (tab closed, webhook missed) was invisible to both (audit ST-N04).
+    Meta's event_id is the provider id, so it dedupes if the browser also
+    fired. Never raises: the order is already paid and committed.
+    """
+    from api.routes_payment import _order_plan_type, _report_purchase_to_meta
+    try:
+        capture("payment_confirmed", str(order.user_id), {
+            "plan_id": order.plan_id,
+            "plan_type": _order_plan_type(order),
+            "credits_granted": order.credits_granted,
+            "provider": provider,
+            "amount_cents": order.amount_cents,
+            "currency": order.currency,
+            "country": order.geo_country,
+            "source": "reconciler",
+        })
+    except Exception:
+        logger.exception("[RECONCILER] PostHog capture failed for order %s", order.id)
+    try:
+        # This runs on the reconciler's own thread, which has no event loop.
+        asyncio.run(_report_purchase_to_meta(db, order))
+    except Exception:
+        logger.exception("[RECONCILER] Meta Purchase failed for order %s", order.id)
 
 
 def _check_razorpay(db, order: PaymentOrder) -> bool:

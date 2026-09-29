@@ -92,31 +92,21 @@ async def get_pricing(req: Request):
     # alongside `plans` so both the old (email-only) and new (9-plan) frontends
     # render the right pricing in INR/USD without a frontend rebuild.
     #
-    # Anchor pricing — show a struck-out "original" price next to the actual
-    # price so customers see the discount visually. INR only for now; USD
-    # users see flat pricing (no strikethrough). The anchor numbers and
-    # resulting discount percentages were product-defined.
-    ANCHOR_INR_PAISE = {200: 250000, 350: 350000, 500: 500000}  # ₹2500 / ₹3500 / ₹5000
+    # No struck-out "original" prices: Rs 2,500 / 3,500 / 5,000 were never
+    # charged, so showing them is a false reference price (audit OP-N04).
+    # Bring one back only when a real, dated previous price exists.
 
     tiers = []
     for p in result:
         if p["plan_type"] != "email":
             continue
         tier_num = p["email_credits"]
-        anchor_paise = ANCHOR_INR_PAISE.get(tier_num) if currency == "INR" else None
-        discount_pct = None
-        anchor_display = None
-        if anchor_paise and anchor_paise > p["amount_cents"]:
-            discount_pct = round((anchor_paise - p["amount_cents"]) / anchor_paise * 100)
-            anchor_display = f"₹{anchor_paise // 100}"
         tiers.append({
             "tier": tier_num,
             "label": p["label"],
             "amount_cents": p["amount_cents"],
             "currency": p["currency"],
             "display_price": p["display_price"],
-            "anchor_display": anchor_display,   # e.g. "₹2500", or null
-            "discount_pct": discount_pct,        # e.g. 27, or null
             "duration_days": p["duration_days"], # 0 = unlimited
         })
 
@@ -1019,9 +1009,9 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
 
     event_id is the payment provider's own id, which is exactly what the browser
     pixel sends, so Meta merges the two copies instead of counting the sale twice.
-    All four paid paths (Razorpay verify, Dodo verify, and both webhooks) route
-    through here, so a payment confirmed while the user's tab is closed is still
-    reported.
+    Every paid path routes through here: Razorpay verify, Dodo verify, both
+    webhooks and the stranded-order reconciler (services/payment_reconciler.py),
+    so a payment confirmed while the user's tab is closed is still reported.
     """
     if not meta_capi.is_configured():
         return
