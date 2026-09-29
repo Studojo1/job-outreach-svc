@@ -22,7 +22,7 @@ from api.routes_extension import router as extension_router
 from api.routes_account import router as account_router
 from core.config import settings
 from core.logger import get_logger
-from core.middleware import RequestLoggingMiddleware
+from core.middleware import RequestLoggingMiddleware, SSESafeGZipMiddleware
 from core.metrics import metrics_endpoint
 
 logger = get_logger("job_outreach_tool.api.main")
@@ -63,6 +63,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# UC-Q21 / NEW-06: compress JSON (leads, campaign emails); event streams pass
+# through untouched so the quiz chat still streams.
+app.add_middleware(SSESafeGZipMiddleware, minimum_size=1000, compresslevel=6)
 
 # Registry
 app.include_router(candidate_router, prefix="/api/v1")

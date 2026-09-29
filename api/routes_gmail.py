@@ -1,5 +1,6 @@
 """Gmail OAuth Routes — Gmail Mailbox OAuth (separate from Login OAuth)."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -175,6 +176,34 @@ def _resume_auth_paused_campaigns(db: Session, user_id: str, email_address: str)
         logger.exception("[GmailOAuth] Could not resume auth-paused campaigns for %s", user_id)
 
 
+def _check_refresh_token(account_id: int, refresh_token: str) -> Optional[bool]:
+    """True/False when Google answers, None when the check itself fails (PP-P48).
+
+    Blocking; call via asyncio.to_thread. One retry on a network error or a
+    5xx, since a single blip must not look like a dead mailbox.
+    """
+    for attempt in range(2):
+        try:
+            resp = http_requests.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.GMAIL_CLIENT_ID,
+                    "client_secret": settings.GMAIL_CLIENT_SECRET,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                return True
+            if resp.status_code in (400, 401):
+                return False  # invalid_grant / revoked: really dead
+        except Exception:
+            logger.warning("[GmailOAuth] Token validation request failed for account %s (attempt %d)",
+                           account_id, attempt + 1)
+    return None
+
+
 @router.get("/account")
 async def get_gmail_account(
     email_account_id: Optional[int] = None,
@@ -190,30 +219,18 @@ async def get_gmail_account(
     instead of an arbitrary one.
     """
     q = db.query(EmailAccount).filter_by(user_id=str(current_user.id), provider="gmail")
-    account = (q.filter_by(id=email_account_id).first() if email_account_id else None) or q.first()
+    if email_account_id:
+        # PP-P48: honour the requested account; never report on a different one.
+        account = q.filter_by(id=email_account_id).first()
+    else:
+        account = q.first()
 
     if not account:
         raise HTTPException(status_code=404, detail="No Gmail account connected")
 
-    # Verify the refresh token is still valid
-    token_valid: Optional[bool] = None
-    try:
-        resp = http_requests.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": settings.GMAIL_CLIENT_ID,
-                "client_secret": settings.GMAIL_CLIENT_SECRET,
-                "refresh_token": account.refresh_token,
-                "grant_type": "refresh_token",
-            },
-            timeout=5,
-        )
-        if resp.status_code == 200:
-            token_valid = True
-        elif resp.status_code in (400, 401):
-            token_valid = False  # invalid_grant / revoked: really dead
-    except Exception:
-        logger.warning("[GmailOAuth] Token validation request failed for account %s", account.id)
+    # Verify the refresh token is still valid. PP-P48: the blocking request
+    # runs off the event loop and a failed call is retried once.
+    token_valid = await asyncio.to_thread(_check_refresh_token, account.id, account.refresh_token)
 
     return {
         "email_account_id": account.id,

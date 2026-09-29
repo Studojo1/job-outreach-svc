@@ -1067,16 +1067,36 @@ async def test_launch_status(job_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/{campaign_id}/emails")
-async def get_campaign_emails(
-    campaign_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Return all emails for a campaign with lead details and schedule info."""
-    from database.models import EmailSent, Lead
+def _email_row(email, lead, include_body: bool = True) -> dict:
+    """One emails_sent row as the dashboard sees it."""
+    row = {
+        "id": email.id,
+        "lead_name": lead.name if lead else "Unknown",
+        "lead_company": lead.company if lead else "",
+        "lead_title": lead.title if lead else "",
+        "to_email": email.to_email,
+        "subject": email.subject,
+        "status": email.status,
+        "enrichment_status": email.enrichment_status,
+        "assigned_style": email.assigned_style,
+        "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
+        "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+        "reply_sentiment": email.reply_sentiment,
+        "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
+        "bounce_reason": email.bounce_reason,
+        # A customer-safe reason; error_message stays admin-only (P22).
+        "failure_reason": customer_failure_reason(email.status, email.error_message),
+        "is_test": email.is_test or False,
+        "followup_number": email.followup_number or 0,
+        "parent_email_id": email.parent_email_id,
+    }
+    if include_body:
+        row["body"] = email.body
+        row["reply_text"] = email.reply_text
+    return row
 
-    from database.models import Candidate
+
+def _owned_campaign_or_raise(db: Session, campaign_id: int, current_user: User) -> Campaign:
     campaign = db.query(Campaign).filter_by(id=campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1084,42 +1104,60 @@ async def get_campaign_emails(
     candidate = db.query(Candidate).filter_by(id=campaign.candidate_id, user_id=current_user.id).first()
     if not candidate:
         raise HTTPException(status_code=403, detail="Not authorized")
+    return campaign
 
-    emails = (
-        db.query(EmailSent)
+
+@router.get("/{campaign_id}/emails")
+async def get_campaign_emails(
+    campaign_id: int,
+    fields: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all emails for a campaign with lead details and schedule info.
+
+    NEW-06: leads come from one outer join instead of a query per email.
+    ?fields=summary leaves out body and reply_text (fetch them per row from
+    /{campaign_id}/emails/{email_id}); the default still includes them
+    because the current dashboard reads them from the list.
+    """
+    from database.models import EmailSent, Lead
+
+    _owned_campaign_or_raise(db, campaign_id, current_user)
+
+    rows = (
+        db.query(EmailSent, Lead)
+        .outerjoin(Lead, Lead.id == EmailSent.lead_id)
         .filter(EmailSent.campaign_id == campaign_id)
         .order_by(func.coalesce(EmailSent.scheduled_at, EmailSent.created_at).asc())
         .all()
     )
 
-    result = []
-    for email in emails:
-        lead = db.query(Lead).filter_by(id=email.lead_id).first() if email.lead_id else None
-        result.append({
-            "id": email.id,
-            "lead_name": lead.name if lead else "Unknown",
-            "lead_company": lead.company if lead else "",
-            "lead_title": lead.title if lead else "",
-            "to_email": email.to_email,
-            "subject": email.subject,
-            "body": email.body,
-            "status": email.status,
-            "enrichment_status": email.enrichment_status,
-            "assigned_style": email.assigned_style,
-            "scheduled_at": email.scheduled_at.isoformat() if email.scheduled_at else None,
-            "sent_at": email.sent_at.isoformat() if email.sent_at else None,
-            "reply_text": email.reply_text,
-            "reply_sentiment": email.reply_sentiment,
-            "reply_received_at": email.reply_received_at.isoformat() if email.reply_received_at else None,
-            "bounce_reason": email.bounce_reason,
-            # A customer-safe reason; error_message stays admin-only (P22).
-            "failure_reason": customer_failure_reason(email.status, email.error_message),
-            "is_test": email.is_test or False,
-            "followup_number": email.followup_number or 0,
-            "parent_email_id": email.parent_email_id,
-        })
-
+    include_body = fields != "summary"
+    result = [_email_row(email, lead, include_body) for email, lead in rows]
     return {"emails": result}
+
+
+@router.get("/{campaign_id}/emails/{email_id}")
+async def get_campaign_email(
+    campaign_id: int,
+    email_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """One email with body and reply_text, for when a row is opened (NEW-06)."""
+    from database.models import EmailSent, Lead
+
+    _owned_campaign_or_raise(db, campaign_id, current_user)
+    row = (
+        db.query(EmailSent, Lead)
+        .outerjoin(Lead, Lead.id == EmailSent.lead_id)
+        .filter(EmailSent.campaign_id == campaign_id, EmailSent.id == email_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Email not found")
+    return _email_row(row[0], row[1], include_body=True)
 
 
 # ── Send Test Emails ─────────────────────────────────────────────────────────
