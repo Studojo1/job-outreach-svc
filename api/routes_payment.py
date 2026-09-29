@@ -40,7 +40,16 @@ def _run_async(fn, *args):
     return anyio.from_thread.run(fn, *args)
 
 
+# Google's OAuth reviewers use OAUTH100 (CLAUDE.md: must keep working) and may
+# reuse one test account across review rounds, so it is exempt from the
+# one-per-user rule. Its max_uses cap still bounds it.
+PER_USER_EXEMPT_COUPONS = {"OAUTH100"}
+
+
 def _already_redeemed(db: Session, coupon_id: int, user_id: str) -> bool:
+    code = db.query(Coupon.code).filter(Coupon.id == coupon_id).scalar()
+    if code and code.strip().upper() in PER_USER_EXEMPT_COUPONS:
+        return False
     return db.query(PaymentOrder.id).filter(
         PaymentOrder.coupon_id == coupon_id,
         PaymentOrder.user_id == user_id,
