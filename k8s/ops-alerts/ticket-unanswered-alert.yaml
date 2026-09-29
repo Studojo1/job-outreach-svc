@@ -1,0 +1,210 @@
+---
+# Unanswered support-ticket alerter (audit PP-P43).
+#
+# Tickets raised from the support chat and dashboard sat for days with no
+# reply (ticket 38: 5 days; first-reply mean 28.6h, worst 200.6h) and nothing
+# told the founders. Every hour this finds open / in_progress tickets where the
+# student spoke last and has been waiting WAIT_HOURS (24) or more, and emails
+# the founders:
+#   - hourly, only when a ticket crossed the 24h mark in the hour just gone
+#     (so each wait is announced once, without a state table);
+#   - once a day at DIGEST_HOUR_UTC (03 UTC = 08:30 IST), the full list of
+#     every ticket still waiting, so nothing drops off after one email.
+# "Waiting" restarts when the student writes again after an admin reply; an
+# admin message stops it. System messages are ignored.
+#
+# Read-only against Postgres (tickets / ticket_messages, created by the
+# frontend's app/lib/tickets.server.ts). Sends via Azure Communication Services
+# with the same secrets and recipients as campaign-failure-alert.yaml.
+# Self-contained: public python:3.11-slim image, no dependency on the
+# job-outreach-svc image. Applied by hand like the other ops alerts:
+#   kubectl apply -f k8s/ops-alerts/ticket-unanswered-alert.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ticket-unanswered-alert-script
+  namespace: studojo
+data:
+  alert.py: |
+    import os
+    import sys
+    from datetime import datetime, timedelta, timezone
+    from html import escape
+
+    WAIT_HOURS = int(os.environ.get("WAIT_HOURS", "24"))
+    DIGEST_HOUR_UTC = int(os.environ.get("DIGEST_HOUR_UTC", "3"))
+    ADMIN_URL = os.environ.get("ADMIN_URL", "https://admin.studojo.com").rstrip("/")
+
+
+    def waiting_since(created_at, messages):
+        """When the student started waiting, or None if the team spoke last.
+
+        messages: (author_type, created_at) in time order. A ticket with no
+        admin message has waited since it was created; after an admin reply the
+        clock restarts at the student's next message.
+        """
+        since = created_at
+        for author, at in messages:
+            if author == "admin":
+                since = None
+            elif author == "user" and since is None:
+                since = at
+        return since
+
+
+    def pick(tickets, now, wait_hours=WAIT_HOURS):
+        """(overdue, fresh): overdue = waiting >= wait_hours; fresh = crossed
+        that line during the hour ending at `now` (floored to the hour, so
+        back-to-back hourly runs cover every instant exactly once)."""
+        hour = now.replace(minute=0, second=0, microsecond=0)
+        line = hour - timedelta(hours=wait_hours)
+        overdue = sorted((t for t in tickets if t["since"] is not None and t["since"] <= line),
+                         key=lambda t: t["since"])
+        fresh = [t for t in overdue if t["since"] > line - timedelta(hours=1)]
+        return overdue, fresh
+
+
+    def should_send(overdue, fresh, now, digest_hour=DIGEST_HOUR_UTC):
+        return bool(fresh) or (bool(overdue) and now.hour == digest_hour)
+
+
+    def render(overdue, fresh, now):
+        fresh_ids = {t["id"] for t in fresh}
+
+        def hours(t):
+            return int((now - t["since"]).total_seconds() // 3600)
+
+        def line(t):
+            new = " NEW" if t["id"] in fresh_ids else ""
+            return (f"- #{t['id']}{new}: waiting {hours(t)}h, {t['status']}, {t['priority']} "
+                    f"{t['category']} from {t['user_email']} ({t['source']}): {t['preview']}\n"
+                    f"  {ADMIN_URL}/tickets/{t['id']}")
+
+        subject = f"Support: {len(overdue)} ticket(s) unanswered for {WAIT_HOURS}h+"
+        if fresh:
+            subject += f" ({len(fresh)} new)"
+        text = (f"Tickets where the student is still waiting on a reply after {WAIT_HOURS}h:\n\n"
+                + "\n".join(line(t) for t in overdue)
+                + f"\n\nReply from {ADMIN_URL}/tickets")
+        html = (f"<h3>Tickets waiting {WAIT_HOURS}h+ for a reply</h3><ul>"
+                + "".join(
+                    f"<li><a href='{ADMIN_URL}/tickets/{t['id']}'><b>#{t['id']}</b></a>"
+                    + (" <b>NEW</b>" if t["id"] in fresh_ids else "")
+                    + f": waiting <b>{hours(t)}h</b>, {escape(str(t['status']))}, {escape(str(t['priority']))} "
+                    f"{escape(str(t['category']))} from {escape(str(t['user_email']))} "
+                    f"({escape(str(t['source']))})<br><i>{escape(str(t['preview']))}</i></li>"
+                    for t in overdue)
+                + f"</ul><p>Reply on <a href='{ADMIN_URL}/tickets'>Tickets</a>.</p>")
+        return subject, text, html
+
+
+    def load_tickets(cur):
+        cur.execute("SELECT to_regclass('public.tickets') IS NOT NULL AND to_regclass('public.ticket_messages') IS NOT NULL")
+        if not cur.fetchone()[0]:
+            return []
+        cur.execute("""
+            SELECT t.id, t.user_email, t.category, t.priority, t.status, t.source, t.created_at,
+                   COALESCE((SELECT LEFT(m.body, 140) FROM ticket_messages m
+                             WHERE m.ticket_id = t.id ORDER BY m.created_at ASC, m.id ASC LIMIT 1), '')
+            FROM tickets t
+            WHERE t.status IN ('open', 'in_progress')
+        """)
+        tickets = {r[0]: {"id": r[0], "user_email": r[1], "category": r[2], "priority": r[3],
+                          "status": r[4], "source": r[5], "created_at": r[6],
+                          "preview": " ".join(str(r[7]).split()), "messages": []}
+                   for r in cur.fetchall()}
+        if tickets:
+            cur.execute("""
+                SELECT ticket_id, author_type, created_at FROM ticket_messages
+                WHERE ticket_id = ANY(%s) ORDER BY ticket_id, created_at ASC, id ASC
+            """, (list(tickets),))
+            for tid, author, at in cur.fetchall():
+                tickets[tid]["messages"].append((author, at))
+        for t in tickets.values():
+            t["since"] = waiting_since(t["created_at"], t["messages"])
+        return list(tickets.values())
+
+
+    def main():
+        import psycopg2
+        from azure.communication.email import EmailClient
+
+        db = os.environ["DATABASE_URL"].replace("+psycopg2", "").replace("+asyncpg", "")
+        acs = os.environ["ACS_CONNECTION_STRING"]
+        sender = os.environ.get("ALERT_SENDER", "pranav@support.studojo.com")
+        recipients = [e.strip() for e in os.environ.get(
+            "ALERT_RECIPIENTS", "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+        ).split(",") if e.strip()]
+
+        conn = psycopg2.connect(db)
+        conn.set_session(readonly=True, autocommit=True)
+        now = datetime.now(timezone.utc)
+        overdue, fresh = pick(load_tickets(conn.cursor()), now)
+        if not should_send(overdue, fresh, now):
+            print(f"{len(overdue)} ticket(s) waiting {WAIT_HOURS}h+, none new, not digest hour. Nothing to send.")
+            sys.exit(0)
+
+        subject, text, html = render(overdue, fresh, now)
+        client = EmailClient.from_connection_string(acs)
+        client.begin_send({
+            "senderAddress": sender,
+            "recipients": {"to": [{"address": a} for a in recipients]},
+            "content": {"subject": subject, "plainText": text, "html": html},
+        }).result()
+        print(f"Alert sent: {len(overdue)} waiting, {len(fresh)} new, to {recipients}.")
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ticket-unanswered-alerter
+  namespace: studojo
+spec:
+  schedule: "0 * * * *"   # hourly; daily digest at DIGEST_HOUR_UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: alerter
+              image: python:3.11-slim
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  pip install --quiet --no-cache-dir azure-communication-email psycopg2-binary && \
+                  python /script/alert.py
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: database-url
+                - name: ACS_CONNECTION_STRING
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secrets
+                      key: acs-email-connection-string
+                - name: ALERT_SENDER
+                  value: "pranav@support.studojo.com"
+                - name: ALERT_RECIPIENTS
+                  value: "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+                - name: WAIT_HOURS
+                  value: "24"
+                - name: DIGEST_HOUR_UTC
+                  value: "3"
+              volumeMounts:
+                - name: script
+                  mountPath: /script
+          volumes:
+            - name: script
+              configMap:
+                name: ticket-unanswered-alert-script
