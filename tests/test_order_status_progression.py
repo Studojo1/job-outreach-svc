@@ -79,3 +79,29 @@ def test_promote_paid_order(status, moved):
 
 def test_promote_paid_order_tolerates_no_order():
     assert promote_paid_order(None, "test") is False
+
+
+def test_orders_list_counts_leads_instead_of_the_stale_column(monkeypatch):
+    """PH-25: leads_collected stayed 0 on 287 of 290 orders that had leads."""
+    import asyncio
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from api import routes_orders
+    from database.models import Base, Candidate, Lead, LeadScore, OutreachOrder, Campaign
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine, tables=[t.__table__ for t in (Candidate, Lead, LeadScore, Campaign, OutreachOrder)])
+    db = sessionmaker(bind=engine)()
+    db.add_all([Candidate(id=1, user_id="u", resume_text="."), Candidate(id=2, user_id="u", resume_text=".")])
+    db.commit()
+    db.add_all([Lead(candidate_id=1, name=f"HM{i}", company="Acme") for i in range(3)])
+    db.add_all([OutreachOrder(id=10, user_id="u", candidate_id=1, status="leads_ready", leads_collected=0, action_log=[]),
+                OutreachOrder(id=11, user_id="u", candidate_id=2, status="created", leads_collected=0, action_log=[])])
+    db.commit()
+    monkeypatch.setattr(routes_orders, "_heal_candidate_binding", lambda db, o: None)
+
+    class _U:
+        id = "u"
+
+    out = {r["order"]["id"]: r["order"]["leads_collected"] for r in asyncio.run(routes_orders.list_orders(current_user=_U(), db=db))["orders"]}
+    assert out == {10: 3, 11: 0}
