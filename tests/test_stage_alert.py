@@ -45,7 +45,9 @@ def test_failed_stage_write_is_recorded_for_ops(events, caplog):
 def test_upload_still_succeeds_when_the_order_write_fails(events, monkeypatch):
     monkeypatch.setattr(rc, "parse_resume", lambda *a: ("resume text " * 10, {"name": "A"}))
     monkeypatch.setattr(rc, "find_reusable_candidate", lambda db, uid: None)
+    monkeypatch.setattr(rc, "find_identical_candidate_with_leads", lambda *a: None)
     monkeypatch.setattr(rc, "capture", lambda *a, **k: None)
+    monkeypatch.setattr(st, "order_for_new_resume", lambda *a: None)
 
     class _F:
         filename = "cv.pdf"

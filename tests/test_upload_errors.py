@@ -55,6 +55,7 @@ def test_a_parser_crash_is_a_generic_500_not_a_400(monkeypatch):
 def test_a_database_failure_is_a_generic_500(monkeypatch):
     monkeypatch.setattr(rc, "parse_resume", lambda *a: ("resume text", {"name": "A"}))
     monkeypatch.setattr(rc, "find_reusable_candidate", lambda db, uid: None)
+    monkeypatch.setattr(rc, "find_identical_candidate_with_leads", lambda *a: None)
     db = MagicMock()
     db.commit.side_effect = RuntimeError("(psycopg2.OperationalError) server closed the connection")
 
