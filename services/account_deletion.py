@@ -113,7 +113,9 @@ def delete_account(db: Session, user_id: str) -> dict:
             text("SELECT refresh_token FROM email_accounts WHERE user_id = :u AND refresh_token IS NOT NULL"),
             {"u": user_id},
         ).scalars().all()
-        report["revoked_gmail"] = sum(revoke_google_grant(t) for t in tokens)
+        # Raw SQL bypasses the ORM type, so decrypt here (legacy plaintext passes through).
+        from services.gmail_tokens import decrypt_token
+        report["revoked_gmail"] = sum(revoke_google_grant(decrypt_token(t)) for t in tokens)
 
     try:
         for t in DELETE:
