@@ -13,6 +13,7 @@ from services.lead_discovery.domain_utils import clean_domain as _clean_domain
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
+from database.conflict import insert_ignore
 from database.models import User, Candidate, Lead, LeadScore
 from services.lead_discovery.lead_collector_service import (
     collect_leads,
@@ -237,14 +238,13 @@ def _score_candidate_leads(
         company_fit_scores={},  # empty — company intel runs on top-K below
     )
 
-    score_rows: dict[int, LeadScore] = {}
     fallback_explanation = f"Scored against {', '.join(preferred_roles[:3])} (seniority={candidate_seniority})"
-    count = 0
+    score_values = []
     for lead_dict in scored:
         lead_id = lead_dict.get("id")
         if not lead_id:
             continue
-        ls = LeadScore(
+        score_values.append(dict(
             lead_id=lead_id,
             overall_score=lead_dict.get("score", 0),
             title_relevance=lead_dict.get("_title_score", 0),
@@ -253,30 +253,46 @@ def _score_candidate_leads(
             seniority_relevance=lead_dict.get("_seniority_score", 0),
             location_relevance=lead_dict.get("_location_score", 0),
             explanation=fallback_explanation,
-        )
-        db.add(ls)
-        score_rows[lead_id] = ls
-        count += 1
+        ))
 
     # Leads the scorer filtered out (title blocklist) get a 0 row rather than
     # none. With no row they counted toward scoring-ready's total but never
     # toward scored, so enough of them held the discovery screen at 96%, and
     # every rescore retried them. 0 ranks them last, which is what the filter
     # means. They are not in score_rows, so they are never justified.
-    filtered_ids = sorted(lead_id_map.keys() - score_rows.keys())
-    for lead_id in filtered_ids:
-        db.add(LeadScore(
-            lead_id=lead_id,
-            overall_score=0,
-            title_relevance=0,
-            department_relevance=0,
-            industry_relevance=0,
-            seniority_relevance=0,
-            location_relevance=0,
-            explanation=_FILTERED_EXPLANATION,
-        ))
+    filtered_ids = sorted(lead_id_map.keys() - {v["lead_id"] for v in score_values})
+    filtered_values = [dict(
+        lead_id=lead_id,
+        overall_score=0,
+        title_relevance=0,
+        department_relevance=0,
+        industry_relevance=0,
+        seniority_relevance=0,
+        location_relevance=0,
+        explanation=_FILTERED_EXPLANATION,
+    ) for lead_id in filtered_ids]
     if filtered_ids:
         logger.info("[SCORE_BG] %d leads filtered by title; stored as score 0", len(filtered_ids))
+
+    # UC-Q36: a second scoring pass running at the same time (a rescore, a
+    # retried request) read the same "unscored" set. ON CONFLICT DO NOTHING on
+    # the lead_scores(lead_id) unique index lets the first writer win instead
+    # of storing two rows per lead or failing the whole batch. Only rows this
+    # pass inserted are adjusted and justified below.
+    inserted = insert_ignore(
+        db, LeadScore, score_values + filtered_values,
+        returning=[LeadScore.id, LeadScore.lead_id],
+    )
+    scored_lead_ids_set = {v["lead_id"] for v in score_values}
+    mine = [r.id for r in inserted if r.lead_id in scored_lead_ids_set]
+    score_rows: dict[int, LeadScore] = {
+        row.lead_id: row
+        for row in db.query(LeadScore).filter(LeadScore.id.in_(mine)).all()
+    } if mine else {}
+    count = len(score_rows)
+    if len(inserted) < len(score_values) + len(filtered_values):
+        logger.info("[SCORE_BG] %d leads already scored by a concurrent pass; skipped",
+                    len(score_values) + len(filtered_values) - len(inserted))
 
     # Commit heuristic scores immediately — durable regardless of what LLM phases do.
     db.commit()
@@ -1160,26 +1176,28 @@ async def import_from_outreach(
             continue
         if sl.linkedin_url and sl.linkedin_url in seen_li:
             continue
-        new_lead = Lead(
+        # Conflict-safe (UC-Q36): a concurrent import of the same source can
+        # insert this person first; the unique index then skips it here.
+        inserted = insert_ignore(db, Lead, [dict(
             candidate_id=body.candidate_id,
             apollo_id=sl.apollo_id, name=sl.name, title=sl.title, company=sl.company,
             industry=sl.industry, location=sl.location, linkedin_url=sl.linkedin_url,
             email=sl.email, company_size=sl.company_size, email_verified=sl.email_verified,
             company_description=sl.company_description, company_domain=sl.company_domain,
             status=sl.status or "new",
-        )
-        db.add(new_lead)
-        db.flush()  # get new_lead.id
+        )], returning=[Lead.id])
+        if not inserted:
+            continue
         # copy the best score row if present
         src_score = db.query(LeadScore).filter_by(lead_id=sl.id).first()
         if src_score:
-            db.add(LeadScore(
-                lead_id=new_lead.id,
+            insert_ignore(db, LeadScore, [dict(
+                lead_id=inserted[0].id,
                 overall_score=src_score.overall_score, title_relevance=src_score.title_relevance,
                 department_relevance=src_score.department_relevance, industry_relevance=src_score.industry_relevance,
                 seniority_relevance=src_score.seniority_relevance, location_relevance=src_score.location_relevance,
                 explanation=src_score.explanation, justification_json=src_score.justification_json,
-            ))
+            )])
         if sl.apollo_id: seen_apollo.add(sl.apollo_id)
         if sl.linkedin_url: seen_li.add(sl.linkedin_url)
         imported += 1
