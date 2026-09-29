@@ -5,6 +5,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
 
+from services.gmail_tokens import EncryptedToken
+
 Base = declarative_base()
 
 
@@ -46,8 +48,11 @@ class EmailAccount(Base):
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"))
     email_address = Column(String(255), unique=True, nullable=False)
     provider = Column(String(50), default="gmail", nullable=False)
-    access_token = Column(Text, nullable=False)
-    refresh_token = Column(Text)
+    # Encrypted by the app (services/gmail_tokens.py); the attributes hold
+    # plaintext, the columns hold "enc:v1:..." (legacy rows may be plaintext).
+    # access_token is '' after the user disconnects Gmail.
+    access_token = Column(EncryptedToken, nullable=False)
+    refresh_token = Column(EncryptedToken)
     token_expiry = Column(DateTime)
     daily_send_limit = Column(Integer, default=10, nullable=False)
     last_reply_check_at = Column(DateTime)             # Last time we polled inbox for replies
@@ -400,12 +405,47 @@ class LaunchNudge(Base):
 
 
 class SuppressedEmail(Base):
-    """An address never to email again (it bounced). Audit P18.
-    Table predates this model; services/email_campaign/suppression.py writes it."""
+    """An address never to contact again (audit P18; migration 055).
+    Looked up by email_hash; email is NULL for hashed-only entries.
+    services/email_campaign/suppression.py reads and writes it."""
     __tablename__ = "suppressed_emails"
-    email = Column(Text, primary_key=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    email = Column(Text, nullable=True, unique=True)
+    email_hash = Column(Text, nullable=False, unique=True)
+    source = Column(Text, nullable=False, default="manual")  # bounce | removal_request | reply | manual
     reason = Column(Text, nullable=False, default="")
     suppressed_at = Column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+class RemovalRequest(Base):
+    """A third party asked to be removed (Privacy Policy §5, migration 055).
+    Suppressed on arrival; details deleted by the deadline (30 days)."""
+    __tablename__ = "removal_requests"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    email = Column(Text, nullable=True)  # NULL once their details are deleted
+    email_hash = Column(Text, nullable=False, index=True)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    deadline = Column(DateTime(timezone=True), nullable=False)
+    status = Column(Text, nullable=False, default="open")  # open | done
+    done_at = Column(DateTime(timezone=True), nullable=True)
+    done_by = Column(Text, nullable=True)
+    result = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+class DeletedAccountSend(Base):
+    """What a deleted account sent, without content or a readable address
+    (Privacy Policy §15: kept 3 years after deletion, migration 055)."""
+    __tablename__ = "deleted_account_sends"
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    channel = Column(Text, nullable=False, default="email")  # email | linkedin
+    recipient_hash = Column(Text, nullable=False)
+    campaign_id = Column(Integer, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    status = Column(Text, nullable=True)
+    followup_number = Column(Integer, nullable=True)
+    payment_order_id = Column(Integer, nullable=True)
+    deleted_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
 
 
 class EnrichmentJob(Base):

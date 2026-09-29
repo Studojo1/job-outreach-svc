@@ -14,3 +14,7 @@ for _k in ("DATABASE_URL", "APOLLO_API_KEY", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SE
     os.environ.setdefault(
         _k, f"sqlite:///{tempfile.gettempdir()}/outreach_tests.db" if _k == "DATABASE_URL" else "x"
     )
+
+# Gmail tokens are encrypted with this key on every write (services/gmail_tokens.py).
+# A fixed test-only key: 32 bytes of 0x07, base64. Not used anywhere real.
+os.environ.setdefault("LINKEDIN_ENCRYPTION_KEY", "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
