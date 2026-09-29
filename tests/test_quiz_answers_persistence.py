@@ -34,6 +34,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from api.routes_candidate import merge_quiz_answers
 from database.models import Base, Candidate
 
 
@@ -55,21 +56,9 @@ def db():
 
 
 def _persist(db, candidate, answers):
-    """The merge from routes_candidate.candidate_chat_stream.
-
-    Kept identical to the code under test on purpose: if the endpoint's merge
-    changes and this does not, the assertions below stop describing production.
-    Returns is_first_answer, which is what now drives the quiz_started stage.
-    """
-    is_first_answer = False
-    if answers:
-        stored = candidate.quiz_answers if isinstance(candidate.quiz_answers, dict) else {}
-        merged = {**stored, **answers}
-        if merged != stored:
-            is_first_answer = not stored
-            candidate.quiz_answers = merged
-            db.commit()
-    return is_first_answer
+    """The production merge itself (was a hand copy that had already drifted:
+    it never set quiz_answers_updated_at)."""
+    return merge_quiz_answers(db, candidate, answers)
 
 
 @pytest.fixture()
@@ -140,3 +129,12 @@ def test_no_answers_yet_writes_nothing(db, candidate):
     assert _persist(db, candidate, {}) is False
     db.expire_all()
     assert db.get(Candidate, 1).quiz_answers is None
+
+
+def test_merge_stamps_quiz_answers_updated_at(db):
+    c = Candidate(id=99, user_id="u", resume_text=".")
+    db.add(c)
+    db.commit()
+    assert merge_quiz_answers(db, c, {"target_role": "Analyst"}) is True
+    assert c.quiz_answers_updated_at is not None
+    assert merge_quiz_answers(db, c, {"target_role": "Analyst"}) is False  # no-op replay
