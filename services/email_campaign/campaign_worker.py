@@ -300,8 +300,6 @@ def _enrich_upcoming(db) -> int:
 
     Returns number of leads successfully enriched.
     """
-    from services.enrichment.enrichment_service import enrich_single_lead_classified
-
     now = datetime.utcnow()
     lookahead = now + timedelta(hours=JIT_LOOKAHEAD_HOURS)
 
@@ -327,125 +325,136 @@ def _enrich_upcoming(db) -> int:
     enriched_count = 0
 
     for email in pending_emails:
-        lead = db.query(Lead).filter_by(id=email.lead_id).first()
-        if not lead:
-            email.enrichment_status = "skipped"
-            outcomes.fail(db, email, "Lead not found")
-            db.commit()
-            continue
-
-        # Lead already enriched (e.g., by preview enrichment) — reuse the email.
-        # Credits are reserved up-front at campaign creation; no per-send deduction.
-        if lead.email and lead.email_verified:
-            if _skip_suppressed(db, email, lead.email):
-                continue
-            email.to_email = lead.email
-            email.enrichment_status = "enriched"
-            db.commit()
+        if _enrich_one(db, email):
             enriched_count += 1
-            continue
-
-        # Already exhausted in another campaign: do not pay Apollo to ask again
-        # (audit P34: 184 leads sat past the cap and still drew fresh calls).
-        if (lead.enrichment_fail_count or 0) >= MAX_ENRICHMENT_FAILURES:
-            email.enrichment_status = "skipped"
-            replaced = False
-            if email.replacement_for_id is None:
-                from services.email_campaign.replenishment import add_replacement_lead
-                replaced = add_replacement_lead(db, email.campaign_id, email.id,
-                                                reason="enrichment_exhausted") is not None
-            outcomes.fail(db, email, "Apollo could not find email for this contact (already exhausted)",
-                          replaced=replaced)
-            db.commit()
-            continue
-
-        result = enrich_single_lead_classified(lead)
-
-        if result.success and _skip_suppressed(db, email, result.data["email"]):
-            continue
-        if result.success:
-            lead.email = result.data["email"]
-            if result.data.get("name"):
-                lead.name = result.data["name"]
-            lead.email_verified = True
-            lead.status = "enriched"
-
-            email.to_email = result.data["email"]
-            email.enrichment_status = "enriched"
-
-            db.commit()
-            enriched_count += 1
-            logger.info("[JIT-ENRICH] Enriched lead %d (%s) -> %s for email %d",
-                        lead.id, lead.name, result.data["email"], email.id)
-
-        elif result.error_type in ("credit_exhausted", "rate_limited", "apollo_down"):
-            # Transient failure — do NOT increment fail_count. Pause this email
-            # so the credit-restored requeue (Bundle C3) can pick it back up.
-            email.enrichment_status = "credit_paused"
-            email.error_message = f"Apollo {result.error_type}: {result.error_detail[:200]}"
-            db.commit()
-            logger.warning("[JIT-ENRICH] Paused lead %d (%s): %s",
-                           lead.id, lead.name, result.error_type)
-
-        elif result.error_type == "no_match":
-            # Apollo cannot find an email for this person. Permanent for this lead,
-            # unless Apollo is out of credits and answering no-match for everyone.
-            lead.enrichment_fail_count += 1
-            from services.email_campaign.apollo_pause import apollo_looks_empty
-            if (lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES
-                    and apollo_looks_empty(db, exclude_lead_id=lead.id)):
-                lead.enrichment_fail_count = 0
-                email.enrichment_status = "credit_paused"
-                email.error_message = "Apollo credit_exhausted (no-match from every lead)"
-                logger.warning("[JIT-ENRICH] Paused lead %d (%s): Apollo looks out of credits",
-                               lead.id, lead.name)
-            elif lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
-                email.enrichment_status = "skipped"
-                logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
-                               lead.id, lead.name, lead.enrichment_fail_count)
-                replaced = False
-                if email.replacement_for_id is None:
-                    from services.email_campaign.replenishment import add_replacement_lead
-                    replaced = add_replacement_lead(
-                        db, email.campaign_id, email.id, reason="enrichment_exhausted") is not None
-                # The credit comes back only if no replacement took the slot
-                # (audit P13 vs P33: otherwise the user is compensated twice).
-                outcomes.fail(db, email, "Apollo could not find email for this contact",
-                              replaced=replaced)
-            else:
-                email.error_message = (
-                    f"Apollo no match (attempt {lead.enrichment_fail_count}/"
-                    f"{MAX_ENRICHMENT_FAILURES})"
-                )
-            db.commit()
-
-        else:  # exception or unknown
-            # Before counting toward permanent failure quota, check if the error
-            # detail indicates a credit/rate/infra issue (transient) vs a genuine
-            # exception. Catches credit errors that slip past enrich_single_lead_classified.
-            detail_lower = result.error_detail.lower()
-            _credit_keywords = (
-                "insufficient credits", "credit limit", "upgrade your plan",
-                "not accessible", "apollo key exhausted", "no valid apollo key",
-                "keys are exhausted", "keys exhausted", "402", "403",
-            )
-            if any(kw in detail_lower for kw in _credit_keywords):
-                email.enrichment_status = "credit_paused"
-                email.error_message = f"Apollo credit_exhausted (exception): {result.error_detail[:200]}"
-                db.commit()
-                logger.warning("[JIT-ENRICH] Credit exhaustion detected in exception path for lead %d: %s",
-                               lead.id, result.error_detail[:120])
-            else:
-                lead.enrichment_fail_count += 1
-                if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
-                    email.enrichment_status = "skipped"
-                    outcomes.fail(db, email, f"Enrichment error: {result.error_detail[:200]}")
-                db.commit()
-                logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
-
         time.sleep(0.2)  # Apollo rate limit
 
     return enriched_count
+
+
+def _enrich_one(db, email) -> bool:
+    """Find the recipient for one pending email. True if it is now enriched.
+
+    Every outcome (no match, replacement, credit pause, silent outage) is
+    handled here, so the JIT loop and the Apollo frontload behave the same.
+    """
+    from services.enrichment.enrichment_service import enrich_single_lead_classified
+
+    lead = db.query(Lead).filter_by(id=email.lead_id).first()
+    if not lead:
+        email.enrichment_status = "skipped"
+        outcomes.fail(db, email, "Lead not found")
+        db.commit()
+        return False
+
+    # Lead already enriched (e.g., by preview enrichment) — reuse the email.
+    # Credits are reserved up-front at campaign creation; no per-send deduction.
+    if lead.email and lead.email_verified:
+        if _skip_suppressed(db, email, lead.email):
+            return False
+        email.to_email = lead.email
+        email.enrichment_status = "enriched"
+        db.commit()
+        return True
+
+    # Already exhausted in another campaign: do not pay Apollo to ask again
+    # (audit P34: 184 leads sat past the cap and still drew fresh calls).
+    if (lead.enrichment_fail_count or 0) >= MAX_ENRICHMENT_FAILURES:
+        email.enrichment_status = "skipped"
+        replaced = False
+        if email.replacement_for_id is None:
+            from services.email_campaign.replenishment import add_replacement_lead
+            replaced = add_replacement_lead(db, email.campaign_id, email.id,
+                                            reason="enrichment_exhausted") is not None
+        outcomes.fail(db, email, "Apollo could not find email for this contact (already exhausted)",
+                      replaced=replaced)
+        db.commit()
+        return False
+
+    result = enrich_single_lead_classified(lead)
+
+    if result.success and _skip_suppressed(db, email, result.data["email"]):
+        return False
+    if result.success:
+        lead.email = result.data["email"]
+        if result.data.get("name"):
+            lead.name = result.data["name"]
+        lead.email_verified = True
+        lead.status = "enriched"
+
+        email.to_email = result.data["email"]
+        email.enrichment_status = "enriched"
+
+        db.commit()
+        return True
+        logger.info("[JIT-ENRICH] Enriched lead %d (%s) -> %s for email %d",
+                    lead.id, lead.name, result.data["email"], email.id)
+
+    elif result.error_type in ("credit_exhausted", "rate_limited", "apollo_down"):
+        # Transient failure — do NOT increment fail_count. Pause this email
+        # so the credit-restored requeue (Bundle C3) can pick it back up.
+        email.enrichment_status = "credit_paused"
+        email.error_message = f"Apollo {result.error_type}: {result.error_detail[:200]}"
+        db.commit()
+        logger.warning("[JIT-ENRICH] Paused lead %d (%s): %s",
+                       lead.id, lead.name, result.error_type)
+
+    elif result.error_type == "no_match":
+        # Apollo cannot find an email for this person. Permanent for this lead,
+        # unless Apollo is out of credits and answering no-match for everyone.
+        lead.enrichment_fail_count += 1
+        from services.email_campaign.apollo_pause import apollo_looks_empty
+        if (lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES
+                and apollo_looks_empty(db, exclude_lead_id=lead.id)):
+            lead.enrichment_fail_count = 0
+            email.enrichment_status = "credit_paused"
+            email.error_message = "Apollo credit_exhausted (no-match from every lead)"
+            logger.warning("[JIT-ENRICH] Paused lead %d (%s): Apollo looks out of credits",
+                           lead.id, lead.name)
+        elif lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+            email.enrichment_status = "skipped"
+            logger.warning("[JIT-ENRICH] Exhausted lead %d (%s) after %d no-match attempts",
+                           lead.id, lead.name, lead.enrichment_fail_count)
+            replaced = False
+            if email.replacement_for_id is None:
+                from services.email_campaign.replenishment import add_replacement_lead
+                replaced = add_replacement_lead(
+                    db, email.campaign_id, email.id, reason="enrichment_exhausted") is not None
+            # The credit comes back only if no replacement took the slot
+            # (audit P13 vs P33: otherwise the user is compensated twice).
+            outcomes.fail(db, email, "Apollo could not find email for this contact",
+                          replaced=replaced)
+        else:
+            email.error_message = (
+                f"Apollo no match (attempt {lead.enrichment_fail_count}/"
+                f"{MAX_ENRICHMENT_FAILURES})"
+            )
+        db.commit()
+
+    else:  # exception or unknown
+        # Before counting toward permanent failure quota, check if the error
+        # detail indicates a credit/rate/infra issue (transient) vs a genuine
+        # exception. Catches credit errors that slip past enrich_single_lead_classified.
+        detail_lower = result.error_detail.lower()
+        _credit_keywords = (
+            "insufficient credits", "credit limit", "upgrade your plan",
+            "not accessible", "apollo key exhausted", "no valid apollo key",
+            "keys are exhausted", "keys exhausted", "402", "403",
+        )
+        if any(kw in detail_lower for kw in _credit_keywords):
+            email.enrichment_status = "credit_paused"
+            email.error_message = f"Apollo credit_exhausted (exception): {result.error_detail[:200]}"
+            db.commit()
+            logger.warning("[JIT-ENRICH] Credit exhaustion detected in exception path for lead %d: %s",
+                           lead.id, result.error_detail[:120])
+        else:
+            lead.enrichment_fail_count += 1
+            if lead.enrichment_fail_count >= MAX_ENRICHMENT_FAILURES:
+                email.enrichment_status = "skipped"
+                outcomes.fail(db, email, f"Enrichment error: {result.error_detail[:200]}")
+            db.commit()
+            logger.error("[JIT-ENRICH] Error enriching lead %d: %s", lead.id, result.error_detail)
+    return False
 
 
 # NOTE: per-send credit deduction was removed. Credits are now reserved
@@ -1548,6 +1557,10 @@ def _process_cycle():
         # Phase 6: paid-not-launched sweep (hourly, self-throttled via system_events)
         from services.launch_nudge import maybe_sweep
         maybe_sweep(db)
+
+        # Phase 7: Apollo frontload, only while switched on (apollo_frontload)
+        from services.email_campaign.apollo_frontload import maybe_run as frontload
+        result["frontloaded"] = sum(v for k, v in frontload(db).items() if k != "no_match")
 
     finally:
         _release_cycle_lock(cycle_lock)
