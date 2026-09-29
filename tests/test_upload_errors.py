@@ -17,7 +17,7 @@ import api.routes_candidate as rc
 class _File:
     filename = "cv.pdf"
 
-    async def read(self):
+    async def read(self, n=-1):
         return b"%PDF-1.4"
 
 
@@ -51,3 +51,23 @@ def test_a_database_failure_is_a_generic_500(monkeypatch):
     assert e.value.status_code == 500
     assert "psycopg2" not in e.value.detail
     db.rollback.assert_called()
+
+
+def test_a_file_over_10mb_is_a_413_and_never_parsed(monkeypatch):
+    """UC-Q31: the page promised 10MB while the API took up to 100MB."""
+    parsed = []
+    monkeypatch.setattr(rc, "parse_resume", lambda *a: parsed.append(a) or ("", {}))
+    reads = []
+
+    class _Big:
+        filename = "huge.pdf"
+
+        async def read(self, n=-1):
+            reads.append(n)
+            return b"x" * (rc.MAX_RESUME_BYTES + 1 if n == -1 else min(n, rc.MAX_RESUME_BYTES + 5))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(rc.upload_resume(BackgroundTasks(), _Big(), _User(), MagicMock()))
+    assert exc.value.status_code == 413
+    assert parsed == []
+    assert reads == [rc.MAX_RESUME_BYTES + 1]  # bounded read, not the whole body
