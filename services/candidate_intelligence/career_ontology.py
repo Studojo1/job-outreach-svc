@@ -351,3 +351,180 @@ def search_ontology(query: str) -> dict:
                     })
 
     return results
+
+
+# ── Nearest real title (OP-N09) ─────────────────────────────────────────────
+# The resume prompt asks for an archetype_label that is "NOT a job title from a
+# job board" ("Zero-to-One Growth Systems Builder"), and it used to be offered
+# as quiz option A, so about half of students picked it as a target role and it
+# went into Apollo's q_organization_job_titles, where nobody holds it.
+
+# Real titles the resume prompt's role-cluster reference names that the
+# ontology above lacks. Without these, "Product Manager" would have no match.
+TITLES_OUTSIDE_ONTOLOGY = (
+    "Product Manager", "Associate Product Manager", "AI Product Manager",
+    "Founding Product Manager", "Founder's Office", "ML Engineer", "Growth Hacker",
+    "SDR", "BDR", "Business Development Representative", "VC Analyst",
+    "Mobile Developer", "Management Consultant",
+)
+
+# Words that describe a style or level, not a function. A coined label is full
+# of them ("High-Volume", "Zero-to-One", "Systems Builder"), and matching on
+# them picks titles like "Systems Administrator".
+_DESCRIPTOR_WORDS = frozenset({
+    "and", "of", "the", "for", "to", "a", "an", "in", "with", "at", "on",
+    "senior", "junior", "lead", "principal", "head", "chief", "founding",
+    "entry", "level", "high", "volume", "zero", "one", "first", "led", "native",
+    "systems", "system", "solutions", "builder", "operator", "generalist",
+    "hybrid", "hire", "focused", "driven", "oriented", "end", "full", "cycle",
+    "intern", "trainee", "fresher", "hygienist",
+})
+# Function nouns shared by many titles. They count, but only alongside a word
+# that actually names the field.
+_ROLE_NOUNS = frozenset({
+    "engineer", "analyst", "manager", "associate", "specialist", "developer",
+    "designer", "consultant", "coordinator", "executive", "representative",
+    "officer", "administrator", "architect", "scientist", "researcher",
+})
+_ABBREVIATIONS = {"gtm": "go to market", "pm": "product manager", "ml": "machine learning"}
+
+
+def _title_tokens(title: str) -> list[str]:
+    import re
+    words = re.findall(r"[a-z0-9]+", (title or "").lower())
+    out: list[str] = []
+    for w in words:
+        out.extend(_ABBREVIATIONS.get(w, w).split())
+    return [w for w in out if len(w) > 1]
+
+
+def _known_titles() -> list[str]:
+    seen, titles = set(), []
+    for t in [*get_all_roles_flat(), *TITLES_OUTSIDE_ONTOLOGY]:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            titles.append(t)
+    return titles
+
+
+# Words that only set the level of a real title: "Software Engineer Intern" is
+# still a real title, and Apollo should search it as the student wrote it.
+_LEVEL_WORDS = frozenset({
+    "intern", "internship", "trainee", "apprentice", "graduate", "fresher",
+    "senior", "junior", "sr", "jr", "lead", "associate", "entry", "level",
+    "ii", "iii", "remote", "part", "time",
+})
+
+
+def is_known_title(title: str) -> bool:
+    """True when `title` is a real title as written (OP-N09): an ontology role
+    or prompt reference title, a substring of one, or one of them plus level
+    words only ("Software Engineer Intern", "Senior Data Analyst")."""
+    t = (title or "").strip().lower()
+    if not t:
+        return False
+    known = _known_titles()
+    if any(t == k.lower() for k in known) or search_ontology(t)["roles"]:
+        return True
+    q_set = set(_title_tokens(t))
+    for k in known:
+        k_set = set(_title_tokens(k))
+        if k_set and k_set <= q_set and (q_set - k_set) <= _LEVEL_WORDS:
+            return True
+    return False
+
+
+def nearest_real_title(title: str) -> str | None:
+    """The closest real job title to `title`, or None when nothing is close.
+
+    In order: an exact known title; the ontology's own substring search (the
+    match the quiz always used); a known title whose every word appears in
+    `title` ("Analytics Engineer / Power BI Developer" -> "Analytics
+    Engineer"); then the known title sharing the most field words, with role
+    nouns counting half and style words not at all. Ties go to the shorter
+    title, then ontology order.
+    """
+    raw = (title or "").strip()
+    if not raw:
+        return None
+    known = _known_titles()
+    for k in known:
+        if k.lower() == raw.lower():
+            return k
+    hits = search_ontology(raw)["roles"]
+    if hits:
+        return hits[0]["role"]
+
+    q_tokens = _title_tokens(raw)
+    q_set = set(q_tokens)
+    if not q_set:
+        return None
+
+    contained = [k for k in known if _title_tokens(k) and set(_title_tokens(k)) <= q_set]
+    if contained:
+        return max(contained, key=lambda k: len(_title_tokens(k)))
+
+    best, best_key = None, None
+    for i, k in enumerate(known):
+        k_tokens = set(_title_tokens(k))
+        shared = q_set & k_tokens
+        field_words = {w for w in shared if w not in _DESCRIPTOR_WORDS and w not in _ROLE_NOUNS}
+        if not field_words:
+            continue
+        score = len(field_words) + 0.5 * len(shared & _ROLE_NOUNS)
+        key = (score, -len(k_tokens), -i)
+        if best_key is None or key > best_key:
+            best, best_key = k, key
+    return best
+
+
+# Words a job board title does not use but the archetype prompt does
+# ("Zero-to-One", "High-Volume", "Systems Builder", "AI-Native ... Hire"). A
+# title with none of them is left alone even when the ontology lacks it:
+# "Marketing Intern" and "Data Science Intern" are real, only unlisted.
+_COINED_MARKERS = frozenset({
+    "founding", "high", "volume", "zero", "one", "first", "led", "native",
+    "systems", "system", "solutions", "builder", "operator", "generalist",
+    "hybrid", "hire", "focused", "driven", "oriented", "end", "full", "cycle",
+    "hygienist",
+})
+
+
+def looks_coined(title: str) -> bool:
+    """A title nobody holds (OP-N09): not a known title, and carrying a word
+    only a coined archetype would use."""
+    if is_known_title(title):
+        return False
+    return bool(set(_title_tokens(title)) & _COINED_MARKERS)
+
+
+def real_title_for(role: str) -> str | None:
+    """`role` if it is a title people hold, else its nearest real title, else
+    None (a coined title with nothing close)."""
+    role = (role or "").strip()
+    if not role:
+        return None
+    if not looks_coined(role):
+        return role
+    return nearest_real_title(role)
+
+
+def to_real_titles(roles: list[str]) -> list[str]:
+    """Roles as Apollo should search them (OP-N09).
+
+    A real title is kept exactly as the student chose it. A coined one (the
+    quiz archetype, an LLM invention) is replaced by its nearest real title.
+    A coined one with nothing close is kept: these are OR lists, so it cannot
+    zero the search on its own. Deduplicated, order kept.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for role in roles or []:
+        role = (role or "").strip()
+        if not role:
+            continue
+        mapped = real_title_for(role) or role
+        if mapped.lower() not in seen:
+            seen.add(mapped.lower())
+            out.append(mapped)
+    return out

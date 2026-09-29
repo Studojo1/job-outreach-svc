@@ -20,6 +20,7 @@ from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
 from services.shared.decision_maker_engine import generate_titles_by_company_size
 from services.shared.apollo_normalizer import normalize_industries, normalize_locations
+from services.candidate_intelligence.career_ontology import to_real_titles
 from services.candidate_intelligence.career_strategist import (
     APOLLO_VALID_SENIORITY_CODES,
     APOLLO_VALID_SIZE_RANGES,
@@ -140,7 +141,9 @@ def _generate_filters_from_strategy(
     All strategy values are pre-validated by career_strategist._validate_strategy().
     This function only applies Apollo-safe transformations.
     """
-    roles = candidate_profile.preferred_roles
+    # OP-N09: a coined role (the quiz archetype, "Zero-to-One Growth Systems
+    # Builder") becomes its nearest real title before it reaches Apollo.
+    roles = to_real_titles(candidate_profile.preferred_roles)
     company_prefs = candidate_profile.company_preferences or {}
     work_prefs = candidate_profile.work_preferences or {}
     work_mode = (work_prefs.get("work_mode") or "").lower()
@@ -235,7 +238,9 @@ def _generate_filters_rules_based(
     candidate_profile: CandidateProfile,
 ) -> LeadFilter:
     """Original rules-based filter generation. Used when Career Strategist is unavailable."""
-    roles = candidate_profile.preferred_roles
+    # OP-N09: a coined role (the quiz archetype, "Zero-to-One Growth Systems
+    # Builder") becomes its nearest real title before it reaches Apollo.
+    roles = to_real_titles(candidate_profile.preferred_roles)
     company_prefs = candidate_profile.company_preferences or {}
     work_prefs = candidate_profile.work_preferences or {}
     work_mode = (work_prefs.get("work_mode") or "").lower()

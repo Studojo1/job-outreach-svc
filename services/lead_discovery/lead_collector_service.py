@@ -642,11 +642,17 @@ def _store_people(
         if company_name:
             company_counts[company_name.lower()] = cnt
 
-    for person in people:
+    # UC-Q03: Apollo's free search returns no organization data, so industry,
+    # size, description and domain come from the company_profiles cache: one
+    # lookup per page, blank fields only, best-effort.
+    from services.company_intelligence.lead_backfill import cache_for_rows, fill_row_from_cache
+    parsed_people = [parse_apollo_person(person) for person in people]
+    company_cache = cache_for_rows(db, parsed_people)
+
+    for parsed_data in parsed_people:
         if leads_collected >= target_leads:
             break
 
-        parsed_data = parse_apollo_person(person)
         # A lead nobody can identify (no name, or no employer) is not a lead.
         if not parsed_data["name"] or not parsed_data["company"]:
             continue
@@ -688,7 +694,7 @@ def _store_people(
         # the same person between the check above and this insert, and the
         # unique index on (candidate_id, apollo_id) then skips it rather than
         # failing the page (UC-Q36). Only a real insert counts as collected.
-        inserted = insert_ignore(db, Lead, [dict(
+        row = dict(
             candidate_id=candidate_id,
             apollo_id=apollo_id,
             name=parsed_data.get("name"),
@@ -703,7 +709,9 @@ def _store_people(
             email=apollo_email,
             email_verified=bool(apollo_email),
             status="discovered",
-        )], returning=[Lead.id])
+        )
+        fill_row_from_cache(row, company_cache)
+        inserted = insert_ignore(db, Lead, [row], returning=[Lead.id])
         if not inserted:
             continue
         if in_location_ids is not None:

@@ -8,6 +8,8 @@ import base64
 import fitz  # PyMuPDF
 import logging
 import re
+import time
+
 import requests
 
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +25,10 @@ _OCR_MAX_PAGES = 5
 # Render PDF pages at ~150 DPI for OCR (2.0x zoom on default 72 DPI). Higher
 # is more accurate but pushes vision input tokens up fast.
 _OCR_PAGE_ZOOM = 2.0
-
+# OP-N06: one retry for a transient OCR failure (timeout, connection error,
+# 429 or 5xx), after a short pause.
+_OCR_ATTEMPTS = 2
+_OCR_RETRY_PAUSE_S = 2.0
 
 class UnreadableResumeError(ValueError):
     """The file is a resume we cannot read. The message is student copy.
@@ -40,6 +45,26 @@ NO_TEXT_MESSAGE = (
     "We could not read any text from that file. If it is a scanned copy or an "
     "image, please upload a text-based PDF or a Word document instead."
 )
+
+
+SCANNED_RESUME_UNREADABLE = (
+    "We could not read your scanned resume right now. Try again in a minute, "
+    "or upload a text PDF."
+)
+
+
+class ScannedResumeUnreadable(UnreadableResumeError):
+    """OCR of an image-only PDF failed on our side (OP-N06).
+
+    Distinct from NO_TEXT_MESSAGE: the file may be a perfectly good scan, we
+    just could not get the text out of it this time. Its message is student
+    copy like its parent's (UC-Q29), but the upload route catches it first
+    and answers 503, since the failure is ours.
+    """
+
+    def __init__(self, message: str = SCANNED_RESUME_UNREADABLE):
+        super().__init__(message)
+
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -75,8 +100,12 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         if ocr_text and len(ocr_text.strip()) >= _OCR_FALLBACK_THRESHOLD:
             logger.info(f"OCR recovered {len(ocr_text)} chars from image-based PDF")
             return ocr_text.strip()
-        # OCR also yielded nothing useful — return whatever text layer we had.
+        # OCR ran and read nothing useful: the page really is (nearly) blank.
+        # Return whatever text layer we had.
         return text
+    except ScannedResumeUnreadable:
+        # OP-N06: keep the distinct message; do not rewrap it as a parse error.
+        raise
     except Exception as e:
         logger.warning(f"Error parsing PDF: {e}")
         raise UnreadableResumeError(
@@ -90,6 +119,12 @@ def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
 
     Uses the same Azure OpenAI deployment the rest of the codebase uses.
     Caps page count to keep vision token cost bounded.
+
+    OP-N06: a single failed request used to return "", which parse_resume then
+    reported as "the uploaded file appears to be empty", so a student with a
+    real scanned resume was told it was blank. A timeout, connection error, 429
+    or 5xx is now retried once; if OCR still cannot run, this raises
+    ScannedResumeUnreadable instead of returning "".
     """
     from core.config import settings
 
@@ -100,7 +135,7 @@ def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
     api_key = settings.AZURE_OPENAI_KEY
     if not all([endpoint, api_version, deployment, api_key]):
         logger.warning("Azure OpenAI config missing — cannot run vision OCR fallback")
-        return ""
+        raise ScannedResumeUnreadable()  # OP-N06: not the student's empty file
 
     pages_to_ocr = min(num_pages, _OCR_MAX_PAGES)
     image_blocks = []
@@ -129,27 +164,36 @@ def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
         "temperature": 0.0,
         "max_tokens": 4000,
     }
-    try:
-        resp = requests.post(
-            url,
-            headers={"api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=60,
-        )
-    except Exception as e:
-        logger.error(f"Azure vision OCR request failed: {e}")
-        return ""
+    resp = None
+    for attempt in range(1, _OCR_ATTEMPTS + 1):
+        transient = False
+        try:
+            resp = requests.post(
+                url,
+                headers={"api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=60,
+            )
+        except Exception as e:
+            logger.error(f"Azure vision OCR request failed (attempt {attempt}): {e}")
+            resp, transient = None, True
+        else:
+            if resp.ok:
+                break
+            logger.error(
+                f"Azure vision OCR HTTP {resp.status_code} (attempt {attempt}): {resp.text[:300]}"
+            )
+            transient = resp.status_code == 429 or resp.status_code >= 500
+        if not transient or attempt == _OCR_ATTEMPTS:
+            raise ScannedResumeUnreadable()
+        time.sleep(_OCR_RETRY_PAUSE_S)
 
-    if not resp.ok:
-        logger.error(f"Azure vision OCR HTTP {resp.status_code}: {resp.text[:300]}")
-        return ""
-
-    data = resp.json() or {}
     try:
+        data = resp.json() or {}
         content = data["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        logger.error(f"Azure vision OCR returned unexpected shape: {str(data)[:300]}")
-        return ""
+    except (KeyError, IndexError, TypeError, ValueError):
+        logger.error(f"Azure vision OCR returned unexpected shape: {resp.text[:300]}")
+        raise ScannedResumeUnreadable() from None
     return content
 
 
@@ -251,6 +295,28 @@ def _extract_degrees(raw_text: str, limit: int = 3) -> list:
     return found[:limit]
 
 
+# OP-N07: words almost every resume carries and almost nothing else does. An
+# invoice became "Quarterly Maintenance Invoice", domain finance, with Accounts
+# Payable roles and a lead search behind it. Two distinct hits are required:
+# a report or invoice can say "summary" or "services" once, a resume names its
+# sections. A miss only makes the upload page ask the student to confirm.
+_RESUME_SIGNALS = re.compile(
+    r"(?i)\b(education|experience|skills|projects?|internships?|university|college"
+    r"|employment|work\s+history|certifications?|curriculum\s+vitae|resume|r\u00e9sum\u00e9"
+    r"|objective|achievements|extracurricular|cgpa|gpa|linkedin|responsibilities)\b"
+)
+_RESUME_SIGNALS_NEEDED = 2
+
+
+def looks_like_resume(raw_text: str) -> bool:
+    """Cheap check, no LLM: does this text read like a resume at all (OP-N07)?"""
+    hits = {m.group(1).lower() for m in _RESUME_SIGNALS.finditer(raw_text or "")}
+    hits = {h.rstrip("s") for h in hits}  # "project" and "projects" are one signal
+    if _extract_degrees(raw_text):
+        hits.add("_degree")
+    return len(hits) >= _RESUME_SIGNALS_NEEDED
+
+
 def quick_extract_preview(raw_text: str) -> dict:
     """
     Fast regex-based extraction for the upload preview card.
@@ -342,6 +408,8 @@ def quick_extract_preview(raw_text: str) -> dict:
     preview["skills"] = preview["skills"][:15]  # Cap at 15
 
     preview["education"] = _extract_degrees(raw_text)
+    # OP-N07: the upload page asks "This does not look like a resume" when False.
+    preview["looks_like_resume"] = looks_like_resume(raw_text)
 
     # Extract years of experience from resume text
     exp_match = re.search(r'(\d+)\+?\s*(?:years?|yrs?)\s*(?:of)?\s*(?:experience|exp)', raw_text, re.IGNORECASE)
@@ -369,6 +437,12 @@ def parse_resume(file_bytes: bytes, filename: str) -> tuple[str, dict]:
         raw_text = extract_text_from_docx(file_bytes)
     else:
         raise ValueError(f"Unsupported file type: .{ext}. Please upload a PDF or DOCX file.")
+
+    # OP-N08: Postgres rejects NUL (\x00) in text columns, so a resume whose
+    # text layer carries one failed to save, and the student was told to "try
+    # again in a minute" with a file that could never succeed. The preview is
+    # built from the cleaned text, so its strings are clean too.
+    raw_text = (raw_text or "").replace("\x00", "")
 
     if not raw_text or len(raw_text.strip()) < 50:
         raise UnreadableResumeError(NO_TEXT_MESSAGE)
