@@ -270,3 +270,20 @@ def test_frontload_stops_at_the_campaigns_paid_credits(db, apollo):
     assert sum(r.enrichment_status == "enriched" for r in rows) == 2
     assert sum(r.status == "expired" for r in rows) == 3
     assert apollo.calls == 2
+
+
+def test_backup_stock_stops_at_the_campaigns_paid_credits(db, apollo):
+    campaign = db.get(Campaign, 10)
+    campaign.credits_reserved, campaign.credits_released = 21, 0
+    for r in _rows(db, 10, 1, 20):
+        r.status = "sent"
+    _rows(db, 10, 1, 30)  # unsent, not yet enriched: 10% share would be 3 backups
+    pool = [_lead(db, 1, score=90 - i) for i in range(5)]
+    db.commit()
+
+    # 21 paid - 20 sent = 1 slot left, so one backup lead, not three.
+    assert [lead.id for lead in apollo_frontload._buffer_targets(db, 100)] == [pool[0].id]
+
+    campaign.credits_reserved = 20  # at the cap: a replacement is refused, so no backups
+    db.commit()
+    assert apollo_frontload._buffer_targets(db, 100) == []
