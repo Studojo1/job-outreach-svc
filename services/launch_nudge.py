@@ -109,6 +109,22 @@ def _launched_since(db: Session, user_id: str, since: datetime) -> bool:
     ) is not None
 
 
+# Credits left after a finished campaign (refunded unsent work or a bigger
+# pack) sat idle with no reminder: 8 paying users held 1,077 credits and
+# nobody told them (audit PS-N06). Once the last campaign has been over this
+# long, the nudge counts from its end instead of skipping them.
+IDLE_AFTER_FINISH = timedelta(days=3)
+
+
+def _last_campaign_end(db: Session, user_id: str) -> Optional[datetime]:
+    return (
+        db.query(func.max(Campaign.completed_at))
+        .join(Candidate, Candidate.id == Campaign.candidate_id)
+        .filter(Candidate.user_id == user_id, Campaign.status.in_(("completed", "cancelled")))
+        .scalar()
+    )
+
+
 def _nudges_so_far(db: Session, user_id: str, since: datetime):
     """Nudges sent for the current payment (a new purchase restarts the count)."""
     return (
@@ -144,9 +160,14 @@ def sweep(db: Session, now: Optional[datetime] = None, send: bool = True) -> dic
             # Credits with no payment (comps, P29) are not this sweep's business.
             continue
         if _launched_since(db, user_id, paid_at):
-            # Paid, launched, and has credits left (a finished campaign gave
-            # back its unsent work, or they bought extra). Not stuck.
-            continue
+            # Paid and launched, and still holds credits (a finished campaign
+            # gave back its unsent work, or they bought extra). Remind them
+            # once that campaign has been over for IDLE_AFTER_FINISH, counting
+            # nudges from its end (PS-N06).
+            ended = _last_campaign_end(db, user_id)
+            if ended is None or now - ended < IDLE_AFTER_FINISH:
+                continue
+            paid_at = ended
         user = db.get(User, user_id)
         if user is None or not user.email:
             continue

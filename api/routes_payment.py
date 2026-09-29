@@ -23,6 +23,7 @@ from core.pricing import (
 from core.geo import detect_country, get_client_ip, is_india
 from api.dependencies import get_current_user
 from core.analytics import capture
+from services.payment_receipt import send_receipt
 from core import meta_capi
 import services.dodo_payments as dodo_svc
 from services import credits
@@ -652,6 +653,8 @@ def verify_payment(
 
     _run_async(_report_purchase_to_meta, db, order)
 
+    send_receipt(db, order)  # PS-N10
+
     return {"status": "verified", "credits": order.credits_granted, "plan_type": _order_plan_type(order)}
 
 
@@ -729,6 +732,7 @@ def verify_dodo_payment(
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db, str(order.user_id), "payment_made")
         _run_async(_report_purchase_to_meta, db, order)
+        send_receipt(db, order)  # PS-N10
         return {"status": "paid", "credits": order.credits_granted, "tier": order.tier, "plan_type": _order_plan_type(order)}
 
     if dodo_status["status"] in ("failed", "expired", "cancelled"):
@@ -824,6 +828,8 @@ def _dodo_webhook_apply(body: bytes, db: Session):
 
         _run_async(_report_purchase_to_meta, db, order)
 
+        send_receipt(db, order)  # PS-N10
+
     elif event_type == "payment.failed":
         checkout_id = data.get("checkout_id", "")
         if checkout_id:
@@ -902,6 +908,7 @@ def _razorpay_webhook_apply(body: bytes, db: Session):
                 from services.stage_tracking import safe_mark_stage
                 safe_mark_stage(db, str(order.user_id), "payment_made")
                 _run_async(_report_purchase_to_meta, db, order)
+                send_receipt(db, order)  # PS-N10
 
     elif event == "payment.failed":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})

@@ -254,3 +254,59 @@ def test_returning_customer_with_spare_credits_is_marked_as_launched(db):
 def test_first_timer_is_not_marked_as_launched(db):
     _user(db, "first")
     assert resolve_next_step(db, "first").has_launched is False
+
+
+# ── PS-N06: idle credits after a finished campaign ──────────────────────────
+
+def test_leftover_credits_are_nudged_once_the_campaign_has_been_over_three_days(db, sent):
+    _, cids = _user(db, "idle", credits=349, paid_days_ago=20)
+    db.add(Campaign(candidate_id=cids[0], name="c", status="cancelled",
+                    created_at=NOW - timedelta(days=19), completed_at=NOW - timedelta(days=4)))
+    db.commit()
+    launch_nudge.sweep(db, now=NOW)
+    [nudge] = _nudges(sent)
+    assert nudge["to"] == "idle@x.com" and nudge["credits"] == 349
+
+
+def test_a_campaign_that_just_ended_is_not_nudged_yet(db, sent):
+    _, cids = _user(db, "fresh", credits=349, paid_days_ago=20)
+    db.add(Campaign(candidate_id=cids[0], name="c", status="completed",
+                    created_at=NOW - timedelta(days=19), completed_at=NOW - timedelta(days=1)))
+    db.commit()
+    launch_nudge.sweep(db, now=NOW)
+    assert _nudges(sent) == []
+
+
+# ── PS-N10: one receipt per payment ─────────────────────────────────────────
+
+def test_receipt_is_sent_once_per_payment(db, sent):
+    from services.payment_receipt import send_receipt
+    _user(db, "payer", credits=350)
+    order = db.query(PaymentOrder).filter_by(user_id="payer").one()
+    order.plan_id = "email_350"
+    db.commit()
+    assert send_receipt(db, order) is True
+    assert send_receipt(db, order) is False          # a second paid path, same payment
+    [receipt] = [c for c in sent if c["template"] == "payment-thankyou"]
+    assert receipt["to"] == "payer@x.com"
+    assert receipt["amount"] == "Rs 1,700" and receipt["credits"] == 350
+    assert receipt["action_url"].endswith("/outreach/campaign/setup")
+
+
+def test_failed_receipt_can_be_retried(db, monkeypatch):
+    from services.payment_receipt import send_receipt
+    _user(db, "retry", credits=200)
+    order = db.query(PaymentOrder).filter_by(user_id="retry").one()
+    monkeypatch.setattr(launch_nudge, "_send_template", lambda payload: False)
+    assert send_receipt(db, order) is False
+    monkeypatch.setattr(launch_nudge, "_send_template", lambda payload: True)
+    assert send_receipt(db, order) is True
+
+
+def test_free_orders_get_no_receipt(db, sent):
+    from services.payment_receipt import send_receipt
+    _user(db, "free", credits=200)
+    order = db.query(PaymentOrder).filter_by(user_id="free").one()
+    order.amount_cents = 0
+    db.commit()
+    assert send_receipt(db, order) is False and sent == []

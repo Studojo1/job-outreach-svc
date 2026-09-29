@@ -104,6 +104,8 @@ def _report_recovered_payment(db, order: PaymentOrder, provider: str) -> None:
         asyncio.run(_report_purchase_to_meta(db, order))
     except Exception:
         logger.exception("[RECONCILER] Meta Purchase failed for order %s", order.id)
+    from services.payment_receipt import send_receipt
+    send_receipt(db, order)
 
 
 def _check_razorpay(db, order: PaymentOrder) -> bool:
