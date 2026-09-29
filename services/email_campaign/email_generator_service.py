@@ -14,7 +14,9 @@ from typing import Tuple, Dict
 
 from core.config import settings
 from core.logger import get_logger
-from database.models import Lead, Candidate
+from sqlalchemy.orm import object_session
+
+from database.models import Lead, Candidate, User
 from services.shared.ai.azure_openai_client import generate_json, ContentFilterError
 
 logger = get_logger(__name__)
@@ -231,6 +233,54 @@ FORBIDDEN_PHRASES = [
 
 # ── Stage 1: Candidate Profile Extraction ──────────────────────────────────────
 
+_DEGREE_WORDS = {"bachelor", "master", "phd", "doctorate", "mba", "bsc", "msc", "b.tech", "m.tech", "b.e", "m.e", "associate"}
+# Resume parsers often grab a header/title instead of the name (e.g. "AIML STUDENT").
+# Reject those so we fall back to the authenticated account name.
+_NON_NAME_WORDS = {"student", "resume", "cv", "curriculum", "vitae", "fresher", "aiml", "profile", "objective"}
+# Words that appear in resume section headings but never inside a person's
+# name. Used to tell "OTHER INTERESTS AND ACTIVITIES" from "KAAVYA CHANDRASEKHAR".
+_HEADER_WORDS = {
+    "and", "or", "of", "the", "in", "for", "with", "other", "interests",
+    "activities", "experience", "education", "skills", "projects", "summary",
+    "contact", "details", "achievements", "certifications", "languages",
+    "hobbies", "references", "work", "personal", "information", "career",
+    "employment", "history", "qualification", "qualifications", "extra",
+    "curricular", "awards", "publications", "internship", "internships",
+}
+
+
+def _is_valid_name(n: str) -> bool:
+    if not n:
+        return False
+    low = n.lower()
+    if any(w in low for w in _DEGREE_WORDS):
+        return False
+    words = low.split()
+    if any(w in _NON_NAME_WORDS for w in words):
+        return False
+    # All-caps multi-word strings are often resume section headers ("OTHER
+    # INTERESTS AND ACTIVITIES"), but most people also type their own name in
+    # caps at the top of a resume. Rejecting every all-caps name threw away
+    # the correctly parsed name and fell back to the account name, which is
+    # frequently stored in the wrong order. So reject only what actually
+    # looks like a heading: joining words, or more names than a person has.
+    if n.isupper() and len(words) >= 2:
+        if len(words) > 4:
+            return False
+        if any(w in _HEADER_WORDS for w in words):
+            return False
+    return True
+
+
+def _account_name(candidate: Candidate) -> str:
+    """Name on the candidate's Studojo account, used when the resume gives none."""
+    db = object_session(candidate)
+    if db is None or not candidate.user_id:
+        return ""
+    user = db.query(User).filter_by(id=candidate.user_id).first()
+    return (user.name or "").strip() if user else ""
+
+
 def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> dict:
     """Extract a structured profile from the candidate's parsed resume JSON.
 
@@ -243,42 +293,6 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     personal = parsed.get("personal_info", {})
     career = parsed.get("career_analysis", {})
     prefs = parsed.get("preferences", {})
-
-    _DEGREE_WORDS = {"bachelor", "master", "phd", "doctorate", "mba", "bsc", "msc", "b.tech", "m.tech", "b.e", "m.e", "associate"}
-    # Resume parsers often grab a header/title instead of the name (e.g. "AIML STUDENT").
-    # Reject those so we fall back to the authenticated account name.
-    _NON_NAME_WORDS = {"student", "resume", "cv", "curriculum", "vitae", "fresher", "aiml", "profile", "objective"}
-    # Words that appear in resume section headings but never inside a person's
-    # name. Used to tell "OTHER INTERESTS AND ACTIVITIES" from "KAAVYA CHANDRASEKHAR".
-    _HEADER_WORDS = {
-        "and", "or", "of", "the", "in", "for", "with", "other", "interests",
-        "activities", "experience", "education", "skills", "projects", "summary",
-        "contact", "details", "achievements", "certifications", "languages",
-        "hobbies", "references", "work", "personal", "information", "career",
-        "employment", "history", "qualification", "qualifications", "extra",
-        "curricular", "awards", "publications", "internship", "internships",
-    }
-    def _is_valid_name(n: str) -> bool:
-        if not n:
-            return False
-        low = n.lower()
-        if any(w in low for w in _DEGREE_WORDS):
-            return False
-        words = low.split()
-        if any(w in _NON_NAME_WORDS for w in words):
-            return False
-        # All-caps multi-word strings are often resume section headers ("OTHER
-        # INTERESTS AND ACTIVITIES"), but most people also type their own name in
-        # caps at the top of a resume. Rejecting every all-caps name threw away
-        # the correctly parsed name and fell back to the account name, which is
-        # frequently stored in the wrong order. So reject only what actually
-        # looks like a heading: joining words, or more names than a person has.
-        if n.isupper() and len(words) >= 2:
-            if len(words) > 4:
-                return False
-            if any(w in _HEADER_WORDS for w in words):
-                return False
-        return True
 
     raw_name = personal.get("name") or parsed.get("name") or ""
     name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
@@ -745,9 +759,10 @@ def _build_generation_prompt(
     """
     greeting = random.choice(GREETINGS).replace("{name}", ((lead_profile["lead_name"] or "").split() or ["there"])[0])
     closing = random.choice(CLOSINGS)
-    signoff = random.choice(SIGNOFFS).replace(
-        "{name}", ((candidate_profile["candidate_name"] or "").split() or ["Me"])[0]
-    )
+    # With no name anywhere, sign off without one. This used to fall back to
+    # "Me", which went out to real recruiters as "Best,\nMe".
+    sender_first = ((candidate_profile["candidate_name"] or "").split() or [""])[0]
+    signoff = random.choice(SIGNOFFS).replace("{name}", sender_first) if sender_first else "Best,"
 
     has_flex = candidate_profile.get("has_flex_notes", False)
     has_company_desc = lead_profile.get("has_company_description", False)
@@ -971,8 +986,11 @@ def generate_email_for_lead(lead: Lead, candidate: Candidate, style: str, user_n
     Returns:
         Tuple of (subject, body) strings.
     """
-    # Stage 1: Candidate profile extraction
-    candidate_profile = extract_candidate_profile(candidate, fallback_name=user_name)
+    # Stage 1: Candidate profile extraction. Callers that don't pass user_name
+    # (test launch, preview) still get the account name as the fallback.
+    candidate_profile = extract_candidate_profile(
+        candidate, fallback_name=user_name or _account_name(candidate)
+    )
 
     # Stage 2: Lead profile extraction
     lead_profile = extract_lead_profile(lead)
@@ -1091,16 +1109,24 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
 
     Returns just the body (greeting + body + signoff). Subject inherits from parent.
     """
-    candidate_name = "there"
+    candidate_name = ""
     parsed = candidate.parsed_json or {}
     resume_profile = candidate.resume_profile or {}
     for source in (resume_profile, parsed.get("personal_info", {}), parsed):
         n = source.get("name") if isinstance(source, dict) else None
-        if n and isinstance(n, str) and " " in n:
+        if n and isinstance(n, str) and " " in n and _is_valid_name(n):
             candidate_name = n
             break
+    # No full name on the resume: use the account name rather than signing the
+    # follow-up as "there".
+    if not candidate_name:
+        candidate_name = _account_name(candidate)
+    if candidate_name.isupper():
+        candidate_name = candidate_name.title()
 
-    first_name_candidate = candidate_name.split()[0] if candidate_name else "there"
+    first_name_candidate = candidate_name.split()[0] if candidate_name else ""
+    sign_as = f'"{first_name_candidate}"' if first_name_candidate else "nothing (no name)"
+    candidate_name = candidate_name or "the sender"
     lead_first = (lead.name or "").split()[0] if lead.name else "there"
     lead_company = lead.company or ""
     lead_title = lead.title or ""
@@ -1132,7 +1158,7 @@ Sentence 3: Say that if they did find a few minutes to connect, the learning wou
 
 Format:
 - Start with "Hi {lead_first},"
-- Sign off: "{first_name_candidate}" on its own line
+- Sign off: {sign_as} on its own line
 - Under 60 words. Grateful, humble, zero pressure. No "just bumping", no "any openings", no job-seeking language."""
 
         result = generate_json(
@@ -1193,7 +1219,7 @@ Final sentence: Use this exact sentence: "Would you know if there's an opening, 
 Format:
 - Start with "Hi {lead_first},"
 - Put a blank line between every sentence, so each sits in its own paragraph
-- Sign off: "{first_name_candidate}" on its own line, nothing else
+- Sign off: {sign_as} on its own line, nothing else
 - Body total under 65 words"""
 
     else:
@@ -1210,7 +1236,7 @@ Sentence 2: Wish them well at {lead_company} in one warm line. Leave the door op
 Format:
 - Start with "Hi {lead_first},"
 - Put a blank line between every sentence, so each sits in its own paragraph
-- Sign off: "{first_name_candidate}" on its own line, no "Best," or "Take care,"
+- Sign off: {sign_as} on its own line, no "Best," or "Take care,"
 - Body total under 30 words
 
 Good example of tone:
