@@ -775,6 +775,15 @@ def get_candidate_leads(
 
     light = fields == "justification"
 
+    # Revealed emails are the paid product. Show them only to a user who has
+    # bought (or been granted) credits, or who already has a campaign on this
+    # candidate; everyone else gets the list without addresses (audit PS-N08).
+    from database.models import Campaign, UserCredit
+    wallet = db.query(UserCredit.total_credits).filter(UserCredit.user_id == current_user.id).scalar()
+    show_emails = bool(wallet and wallet > 0) or db.query(
+        db.query(Campaign.id).filter(Campaign.candidate_id == candidate_id).exists()
+    ).scalar()
+
     # Ordered, so identical polls return identical lists. Heap order moves as
     # the justification pass rewrites company_domain on rows mid-poll.
     # Plain column tuples, not ORM objects: building 1,600 mapped instances
@@ -835,7 +844,7 @@ def get_candidate_leads(
             "industry": lead.industry,
             "location": lead.location,
             "linkedin_url": lead.linkedin_url,
-            "email": lead.email,
+            "email": lead.email if show_emails else None,
             "email_verified": lead.email_verified,
             "company_size": lead.company_size,
             "status": lead.status,

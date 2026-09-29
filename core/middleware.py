@@ -32,8 +32,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             },
         )
 
-        # Prometheus metrics
-        endpoint = request.url.path
+        # Prometheus metrics. Label by the route template (/candidate/{id}/leads),
+        # not the raw path: raw paths made one series per id and exposed live
+        # open-tracking tokens under /metrics (audit PS-N11).
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", None) or "unmatched"
         REQUEST_COUNT.labels(method=request.method, endpoint=endpoint, status_code=response.status_code).inc()
         REQUEST_DURATION.labels(method=request.method, endpoint=endpoint).observe(duration_ms / 1000)
 

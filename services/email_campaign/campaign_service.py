@@ -73,12 +73,13 @@ def create_campaign(
     )
 
     # Verify email account exists
-    account = db.query(EmailAccount).filter_by(id=email_account_id).first()
+    account = db.query(EmailAccount).filter_by(id=email_account_id, user_id=user_id).first()
     if not account:
         raise ValueError(f"Email account {email_account_id} not found")
 
-    # Fetch candidate
-    candidate = db.query(Candidate).filter_by(id=candidate_id).first()
+    # Fetch candidate. Scoped to the caller so nobody can run a campaign on
+    # another user's candidate and lead list (audit PS-N17).
+    candidate = db.query(Candidate).filter_by(id=candidate_id, user_id=user_id).first()
     if not candidate:
         raise ValueError(f"Candidate {candidate_id} not found")
 
