@@ -193,6 +193,9 @@ class Campaign(Base):
     outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL", use_alter=True), nullable=True)
     pause_reason = Column(Text, nullable=True)
     paused_by = Column(Text, nullable=True)   # 'user' | 'system' | admin user id
+    # Migration 053 (audit P01): how a finished campaign actually went.
+    # 'delivered' | 'degraded' (under half its first touches delivered) | 'cancelled'
+    outcome = Column(String(20), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     candidate = relationship("Candidate", back_populates="campaigns")
@@ -258,7 +261,9 @@ class OutreachOrder(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
-    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    # Legacy single pointer, no longer written (audit P03; see services/order_links.py).
+    # NO ACTION since migration 053 (P44): a campaign cannot be hand-deleted from under it.
+    campaign_id = Column(Integer, ForeignKey("campaigns.id"), nullable=True)
     email_account_id = Column(Integer, ForeignKey("email_accounts.id", ondelete="SET NULL"), nullable=True)
 
     status = Column(String(50), default="created", nullable=False)
@@ -401,6 +406,24 @@ class SuppressedEmail(Base):
     email = Column(Text, primary_key=True)
     reason = Column(Text, nullable=False, default="")
     suppressed_at = Column(DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False)
+
+
+class EnrichmentJob(Base):
+    """A legacy bulk-enrichment job (migration 053, audit P31). Was a per-process
+    dict, so a restart lost the job and the credits it held."""
+    __tablename__ = "enrichment_jobs"
+    id = Column(Text, primary_key=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), nullable=False)
+    reserved = Column(Integer, nullable=False, default=0)
+    released = Column(Integer, nullable=False, default=0)
+    total = Column(Integer, nullable=False, default=0)
+    enriched = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    progress = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class CampaignNotice(Base):

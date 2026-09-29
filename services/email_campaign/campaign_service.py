@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate, OutreachOrder, PaymentOrder
+from database.models import Campaign, EmailSent, Lead, LeadScore, EmailAccount, Candidate, PaymentOrder
 from core.logger import get_logger
 from core.metrics import CAMPAIGNS_RUNNING
 from services.email_campaign.email_generator_service import assign_style
@@ -25,6 +25,9 @@ VALID_TRANSITIONS = {
     "running": ["paused", "completed"],
     "paused": ["running", "completed"],
     "completed": ["running"],
+    # Restart (audit P24): only via restore_cancelled_work, which re-reserves
+    # credits for the retired emails first.
+    "cancelled": ["running"],
 }
 
 
@@ -188,6 +191,47 @@ def create_campaign(
     }
 
 
+def restore_cancelled_work(db: Session, campaign: Campaign) -> int:
+    """Bring back what a cancelled campaign retired, as far as credits allow.
+
+    Cancel returned the credits for every unsent email and retired those rows
+    as 'expired'. Restarting re-reserves credits for as many as the wallet can
+    cover (oldest first), puts them back in the queue, and restores their
+    follow-ups. Returns how many first touches came back.
+    """
+    from services import credits as _credits
+    owner = db.query(Candidate.user_id).filter(Candidate.id == campaign.candidate_id).scalar()
+    retired = (
+        db.query(EmailSent)
+        .filter(EmailSent.campaign_id == campaign.id, EmailSent.status == "expired",
+                EmailSent.followup_number == 0, EmailSent.is_test.isnot(True),
+                EmailSent.replacement_for_id.is_(None))
+        .order_by(EmailSent.id.asc())
+        .all()
+    )
+    n = min(len(retired), _credits.available(db, owner) if owner else 0)
+    if n <= 0:
+        raise ValueError(
+            "Nothing to restart: this campaign has no unsent emails left, or you have no credits free to cover them."
+        )
+    if _credits.reserve(db, owner, n, _credits.RESERVE_CAMPAIGN, campaign=campaign,
+                        note="restart of a cancelled campaign") is None:
+        raise ValueError("Not enough free credits to restart this campaign.")
+    now = datetime.utcnow()
+    for e in retired[:n]:
+        e.status = "pending_enrichment"
+        e.error_message = None
+        e.status_changed_at = now
+    db.query(EmailSent).filter(
+        EmailSent.campaign_id == campaign.id, EmailSent.status == "cancelled_expired",
+    ).update({EmailSent.status: "followup_pending", EmailSent.status_changed_at: now},
+             synchronize_session=False)
+    campaign.outcome = None
+    campaign.completed_at = None
+    db.commit()
+    return n
+
+
 def transition_campaign(db: Session, campaign_id: int, target_status: str,
                         actor: str = "user") -> Dict[str, Any]:
     """Transition a campaign to a new state.
@@ -210,6 +254,8 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
         )
 
     old_status = campaign.status
+    if old_status == "cancelled" and target_status == "running":
+        restore_cancelled_work(db, campaign)  # raises ValueError if nothing can be restored
     campaign.status = target_status
     db.commit()
 
@@ -225,7 +271,8 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
             campaign.started_at = now
             # Set expiry for duration-limited plans (e.g. email_50 = 8 days)
             try:
-                outreach_order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+                from services.order_links import order_for_campaign
+                outreach_order = order_for_campaign(db, campaign)
                 if outreach_order:
                     payment_order = (
                         db.query(PaymentOrder)
@@ -257,6 +304,8 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
         campaign.paused_at = datetime.utcnow()
         campaign.paused_by = actor
         campaign.pause_reason = "user" if actor == "user" else "admin"
+        from services.email_campaign.outcomes import record_pause_event
+        record_pause_event(db, campaign)
         db.commit()
         logger.info("[CAMPAIGN] Paused campaign #%d by %s, paused_at=%s",
                     campaign_id, actor, campaign.paused_at)
@@ -300,7 +349,8 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
         # UnboundLocalError. That was caught and logged, so expires_at was
         # never set and 8-day plans (email_50) never expired.
         from services.stage_tracking import safe_mark_stage
-        order = db.query(OutreachOrder).filter_by(campaign_id=campaign_id).first()
+        from services.order_links import order_for_campaign
+        order = order_for_campaign(db, campaign)
         if order:
             order_status_map = {
                 "running": "campaign_running",
@@ -473,6 +523,13 @@ def get_campaign_metrics(db: Session, campaign_id: int) -> Dict[str, Any]:
         "emails_neutral": neutral_replies,
         "reply_rate": round(reply_rate, 2),
         "emails_skipped_no_email": skipped_no_email,
+        # Contacts we found a replacement for (audit P33), so the dashboard can
+        # say "N couldn't be reached, we replaced K" instead of just under-delivering.
+        "replacements_added": db.query(func.count(EmailSent.id)).filter(
+            EmailSent.campaign_id == campaign_id,
+            EmailSent.replacement_reason == "enrichment_exhausted").scalar() or 0,
+        # P01: 'delivered' | 'degraded' | 'cancelled' once finished.
+        "outcome": campaign.outcome,
         "emails_failed_other": failed - skipped_no_email,
         "first_touch_total": first_total,
         "first_touch_delivered": first_delivered,
