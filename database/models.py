@@ -354,6 +354,13 @@ class PaymentOrder(Base):
     refunded_cents = Column(Integer, nullable=True)
     refunded_at = Column(DateTime, nullable=True)
     refund_id = Column(Text, nullable=True)
+    # Migration 056 (EX-07): the buyer's browser signals, captured at
+    # create-order so the server-side Meta Purchase can match on more than the
+    # hashed email. All optional; raw by design (Meta hashes or drops them).
+    meta_fbp = Column(Text, nullable=True)
+    meta_fbc = Column(Text, nullable=True)
+    client_ip = Column(String(64), nullable=True)
+    client_user_agent = Column(Text, nullable=True)
     coupon_id = Column(Integer, ForeignKey("coupons.id", ondelete="SET NULL"), nullable=True)
     outreach_order_id = Column(Integer, ForeignKey("outreach_orders.id", ondelete="SET NULL"), nullable=True)
     status = Column(String(50), default="created", nullable=False)
