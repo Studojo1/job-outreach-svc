@@ -298,6 +298,13 @@ def _score_candidate_leads(
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
 
+    # UC-Q17: this is the moment scoring-ready releases the student (it waits
+    # for scores, not for justifications), so it is when leads were generated.
+    # Stamping after the LLM justification pass overstated the discovery wait
+    # in the funnel by that whole pass.
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, str(candidate.user_id), "leads_generated", candidate_id=candidate.id)
+
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
     # Tiebreaker: leads with a known company_domain rank first within the same
@@ -527,6 +534,8 @@ def _score_candidate_leads_sync(
     # Post-scoring housekeeping in a fresh session (_score_candidate_leads closed the original).
     db2 = SessionLocal()
     try:
+        # leads_generated is stamped when Phase 1 commits (UC-Q17); this
+        # one-shot call only covers a run that found nothing left to score.
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db2, user_id, "leads_generated", candidate_id=candidate_id)
         from core.analytics import capture as _capture
