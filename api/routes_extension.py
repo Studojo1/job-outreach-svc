@@ -66,6 +66,12 @@ DAILY_SEND_CAP = 25
 # Kill switch. Turning a feature off must not require a deploy — a deploy is
 # slow exactly when you most need the feature stopped. Read per-request, so
 # `kubectl set env` takes effect on the next call.
+OPTED_OUT_MESSAGE = (
+    "This person has asked not to be contacted through Studojo, so we can't send to them. "
+    "Your draft is saved."
+)
+
+
 def _sends_disabled() -> bool:
     return os.getenv("EXTENSION_SEND_DISABLED", "").strip().lower() in {"1", "true", "yes"}
 
@@ -538,6 +544,13 @@ def check_contact(
     Only spends an Apollo call when the caller passes allow_lookup.
     """
     from services.enrichment.enrichment_service import enrich_single_lead_classified
+    from services.email_campaign.suppression import is_suppressed
+
+    # This person asked not to be contacted, or the address bounced
+    # (Privacy Policy §5). Said before the student writes anything.
+    if request.contact_email and is_suppressed(db, request.contact_email):
+        _log_resolution(current_user.id, request.company, "unreachable", True, "suppressed")
+        return _not_yet(OPTED_OUT_MESSAGE, True, similar=_suggest_alternatives(request))
 
     # The page itself gave us an address — nothing to resolve.
     if request.contact_email:
@@ -573,6 +586,9 @@ def check_contact(
             cached=True,
             similar=_suggest_alternatives(request),
         )
+    if contact.get("email") and is_suppressed(db, contact["email"]):
+        _log_resolution(current_user.id, request.company, "unreachable", True, "suppressed")
+        return _not_yet(OPTED_OUT_MESSAGE, True, similar=_suggest_alternatives(request))
     if contact.get("email"):
         _log_resolution(current_user.id, request.company, "reachable", True, "search")
         return _reachable(contact, f"We can reach {contact['name']}.", True)
@@ -588,6 +604,10 @@ def check_contact(
         .order_by(Lead.id.desc())
         .first()
     )
+
+    if lead and lead.email and is_suppressed(db, lead.email):
+        _log_resolution(current_user.id, request.company, "unreachable", True, "suppressed")
+        return _not_yet(OPTED_OUT_MESSAGE, True, similar=_suggest_alternatives(request))
 
     # Already resolved once — reuse it rather than paying Apollo twice.
     if lead and lead.email and lead.email_verified:
@@ -880,6 +900,13 @@ def send_one_email(
             status_code=422,
             detail="no_contact_email: We couldn't find a verified email for this person. Your draft is saved.",
         )
+
+    # Nobody on Studojo writes to an address that bounced or asked to be
+    # removed (Privacy Policy §5). Nothing is charged.
+    from services.email_campaign.suppression import is_suppressed
+    if is_suppressed(db, to_email):
+        _log_resolution(current_user.id, request.company, "unreachable", True, "suppressed")
+        raise HTTPException(status_code=422, detail=f"contact_opted_out: {OPTED_OUT_MESSAGE}")
 
     # ── Send ─────────────────────────────────────────────────────────────
     # The student's exact subject and body. Nothing is regenerated, nothing is

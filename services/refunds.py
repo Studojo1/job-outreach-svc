@@ -31,18 +31,42 @@ class RefundError(Exception):
     pass
 
 
+async def _dodo_partial_refund(client, order: PaymentOrder, amount_cents: int, reason: str):
+    """Dodo refunds part of a payment per line item: refunds.create(items=[{
+    item_id, amount}]). Our checkouts have one product per payment; the line
+    item says how much of it is still refundable, in the payment's currency."""
+    lines = await client.payments.retrieve_line_items(order.dodo_payment_id)
+    if str(lines.currency).upper() != (order.currency or "").upper():
+        raise RefundError(f"Dodo charged this payment in {lines.currency}, not {order.currency}. "
+                          "Refund it in the Dodo dashboard.")
+    items = [i for i in lines.items if (i.refundable_amount or 0) > 0]
+    if len(items) != 1:
+        raise RefundError(f"This Dodo payment has {len(items)} refundable line items, not one. "
+                          "Refund it in the Dodo dashboard.")
+    item = items[0]
+    if amount_cents > item.refundable_amount:
+        raise RefundError(f"Dodo can refund at most {item.refundable_amount} more on this payment.")
+    return await client.refunds.create(
+        payment_id=order.dodo_payment_id,
+        items=[{"item_id": item.items_id, "amount": amount_cents, "tax_inclusive": True}],
+        reason=reason[:200],
+    )
+
+
 async def _provider_refund(order: PaymentOrder, reason: str, amount_cents: int | None = None) -> str:
     """Refund at the provider. amount_cents=None refunds whatever is still
     unrefunded on the payment. Returns the provider's refund id."""
     remaining = order.amount_cents - (order.refunded_cents or 0)
     partial = amount_cents is not None and amount_cents < remaining
     if order.provider == "dodo":
-        if partial or order.refunded_cents:
-            raise RefundError("Partial refunds through Dodo Payments aren't automated. Refund it in the Dodo dashboard.")
         if not order.dodo_payment_id:
             raise RefundError("This Dodo order has no payment id to refund.")
         from services.dodo_payments import _get_client
-        refund = await _get_client().refunds.create(payment_id=order.dodo_payment_id, reason=reason[:200])
+        client = _get_client()
+        if partial or order.refunded_cents:
+            refund = await _dodo_partial_refund(client, order, amount_cents if partial else remaining, reason)
+        else:
+            refund = await client.refunds.create(payment_id=order.dodo_payment_id, reason=reason[:200])
         return str(getattr(refund, "refund_id", None) or getattr(refund, "id", ""))
     if order.provider == "razorpay":
         if not order.razorpay_payment_id:

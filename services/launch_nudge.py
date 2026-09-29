@@ -256,6 +256,12 @@ def maybe_sweep(db: Session) -> Optional[dict]:
         except Exception:
             db.rollback()
             logger.exception("[NOTICES] run failed")
+        try:
+            from services import retention
+            retention.run(db, now=now)
+        except Exception:
+            db.rollback()
+            logger.exception("[RETENTION] run failed")
         result = sweep(db, now=now)
         if result["nudged"]:
             logger.info("[LAUNCH-NUDGE] nudged %d, %d paid-not-launched",
