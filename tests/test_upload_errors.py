@@ -55,6 +55,7 @@ def test_a_parser_crash_is_a_generic_500_not_a_400(monkeypatch):
 def test_a_database_failure_is_a_generic_500(monkeypatch):
     monkeypatch.setattr(rc, "parse_resume", lambda *a: ("resume text", {"name": "A"}))
     monkeypatch.setattr(rc, "find_reusable_candidate", lambda db, uid: None)
+    monkeypatch.setattr(rc, "find_identical_candidate_with_leads", lambda *a: None)
     db = MagicMock()
     db.commit.side_effect = RuntimeError("(psycopg2.OperationalError) server closed the connection")
 
@@ -83,3 +84,46 @@ def test_a_file_over_10mb_is_a_413_and_never_parsed(monkeypatch):
     assert exc.value.status_code == 413
     assert parsed == []
     assert reads == [rc.MAX_RESUME_BYTES + 1]  # bounded read, not the whole body
+
+
+# ── UC-Q29: the real parser's failures reach the student as friendly 422s ──
+
+def _upload_bytes(name, data):
+    class F:
+        filename = name
+
+        async def read(self, n=-1):
+            return data
+    return asyncio.run(rc.upload_resume(BackgroundTasks(), F(), _User(), MagicMock()))
+
+
+def _tiny_docx(text):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml",
+                   '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                   f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("name,data,library_words", [
+    ("cv.docx", b"not a zip", "zip"),
+    ("cv.doc", b"\xd0\xcf\x11\xe0 old binary word", "zip"),
+    ("cv.pdf", b"%PDF-1.4 garbage", "pdf file: "),
+])
+def test_a_corrupt_file_gets_student_copy_not_the_library_error(name, data, library_words):
+    with pytest.raises(HTTPException) as e:
+        _upload_bytes(name, data)
+    assert e.value.status_code == 422
+    assert library_words not in e.value.detail.lower()
+    assert "Could not parse" not in e.value.detail
+    assert "upload" in e.value.detail.lower()
+
+
+def test_too_little_text_gets_the_scanned_copy_message():
+    with pytest.raises(HTTPException) as e:
+        _upload_bytes("cv.docx", _tiny_docx("Jane"))
+    assert e.value.status_code == 422
+    assert "scanned copy" in e.value.detail

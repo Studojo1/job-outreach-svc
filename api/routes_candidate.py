@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
-from services.candidate_intelligence.parser import parse_resume
+from services.candidate_intelligence.parser import NO_TEXT_MESSAGE, UnreadableResumeError, parse_resume
 from api.dependencies import get_current_user
 from core.analytics import capture
 
@@ -66,6 +66,23 @@ def find_reusable_candidate(db: Session, user_id) -> Optional[Candidate]:
             Lead.id.is_(None),
         )
         .order_by(Candidate.created_at.desc())
+        .first()
+    )
+
+
+def find_identical_candidate_with_leads(db: Session, user_id, raw_text: str) -> Optional[Candidate]:
+    """The user's newest candidate for this exact resume that already has leads.
+
+    UC-Q14: re-uploading the same file after discovery made a new candidate
+    and ran discovery again (53 byte-identical repeats in 30 days, 73,689
+    redundant lead rows). The parser is deterministic for a text layer, so a
+    byte-identical upload yields identical text; compare that.
+    """
+    has_leads = db.query(Lead.id).filter(Lead.candidate_id == Candidate.id).exists()
+    return (
+        db.query(Candidate)
+        .filter(Candidate.user_id == user_id, Candidate.resume_text == raw_text, has_leads)
+        .order_by(Candidate.created_at.desc(), Candidate.id.desc())
         .first()
     )
 
@@ -137,6 +154,12 @@ async def upload_resume(
     # outages included, and showed the raw Python error to the student.
     try:
         raw_text, preview = parse_resume(contents, file.filename)
+    except UnreadableResumeError as e:
+        # A corrupt file or one with no text (UC-Q29): 422 with copy that says
+        # what to do. The library's error was logged by the parser.
+        logger.info("[UPLOAD] Unreadable resume from user %s (%s, %d bytes): %s",
+                    current_user.id, file.filename, len(contents), e)
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except ValueError as e:
         logger.info("[UPLOAD] Could not parse resume from user %s (%s): %s",
                     current_user.id, file.filename, e)
@@ -165,14 +188,24 @@ async def upload_resume(
             "[UPLOAD] Unreadable resume from user %s (%s, %d bytes)",
             current_user.id, file.filename, len(contents),
         )
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "We could not read any text from that file. If it is a "
-                "scanned copy or an image, please upload a text-based PDF "
-                "or a Word document instead."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=NO_TEXT_MESSAGE)
+
+    # Same resume as a run that already has leads: send them back to it rather
+    # than creating a candidate and paying for discovery again (UC-Q14).
+    try:
+        existing = find_identical_candidate_with_leads(db, current_user.id, raw_text)
+    except Exception:
+        logger.warning("[UPLOAD] identical-resume lookup failed", exc_info=True)
+        existing = None
+    if existing is not None:
+        logger.info("[UPLOAD] user %s re-uploaded the resume of candidate %s, which has leads; reusing it",
+                    current_user.id, existing.id)
+        return {
+            "status": "success",
+            "candidate_id": existing.id,
+            "preview": preview,
+            "existing_results": True,
+        }
 
     try:
         new_candidate = find_reusable_candidate(db, current_user.id)
@@ -225,15 +258,30 @@ async def upload_resume(
     # Funnel: create / advance the user's OutreachOrder to stage 1.
     # This is the entry point to the funnel — every uploaded resume
     # produces an order row so we can see drop-off from here on.
-    from services.stage_tracking import safe_mark_stage
+    from services.stage_tracking import order_for_new_resume, safe_mark_stage
+    # UC-Q28: a new resume after leads either starts a new order (unpaid) or
+    # leaves the paid order on its leads; the client is told which.
+    order_candidate_id = None
+    try:
+        order_candidate_id = order_for_new_resume(db, str(current_user.id), new_candidate.id)
+    except Exception:
+        logger.exception("[UPLOAD] order_for_new_resume failed for user %s", current_user.id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     safe_mark_stage(db, str(current_user.id), "resume_uploaded",
                     candidate_id=new_candidate.id)
 
-    return {
+    body = {
         "status": "success",
         "candidate_id": new_candidate.id,
         "preview": preview,
     }
+    if order_candidate_id is not None:
+        # The paid order stays on this candidate's leads.
+        body["order_candidate_id"] = order_candidate_id
+    return body
 
 
 @router.post("/{candidate_id}/chat/stream")
@@ -827,6 +875,13 @@ def get_candidate_leads(
     if not light:
         # Counted before paging, like total.
         body["strong_total"] = strong_total
+    if total == 0:
+        # UC-Q25: the browser can hold a stale candidate id (a newer upload
+        # with no leads) and was told "no matches" while an older candidate
+        # holds the student's leads. Name the candidate the page should load.
+        active = _active_candidate_with_leads(db, current_user.id, candidate_id)
+        if active is not None:
+            body["active_candidate_id"] = active
     content = _json.dumps(body, separators=(",", ":"), default=str).encode()
     etag = '"' + hashlib.sha256(content).hexdigest()[:32] + '"'
     headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
@@ -834,6 +889,33 @@ def get_candidate_leads(
     if etag in [t.strip() for t in if_none_match.split(",")]:
         return Response(status_code=304, headers=headers)
     return Response(content, media_type="application/json", headers=headers)
+
+
+def _active_candidate_with_leads(db: Session, user_id, exclude_id: int) -> Optional[int]:
+    """The user's candidate that holds their leads, other than exclude_id.
+
+    The active order's candidate first (it is what the student is buying),
+    else the newest candidate that has leads. None when there is none.
+    """
+    from database.models import OutreachOrder
+    has_leads = db.query(Lead.id).filter(Lead.candidate_id == Candidate.id).exists()
+    order_cid = (
+        db.query(OutreachOrder.candidate_id)
+        .filter(OutreachOrder.user_id == user_id, OutreachOrder.status != "completed")
+        .order_by(OutreachOrder.created_at.desc())
+        .limit(1)
+        .scalar()
+    )
+    if order_cid and order_cid != exclude_id and db.query(Candidate.id).filter(
+            Candidate.id == order_cid, Candidate.user_id == user_id, has_leads).first():
+        return order_cid
+    row = (
+        db.query(Candidate.id)
+        .filter(Candidate.user_id == user_id, Candidate.id != exclude_id, has_leads)
+        .order_by(Candidate.created_at.desc(), Candidate.id.desc())
+        .first()
+    )
+    return row[0] if row else None
 
 
 def _is_broader(score) -> bool:

@@ -25,6 +25,7 @@ from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
 from services.lead_discovery.apollo_query_builder import build_apollo_query
 from services.lead_discovery.apollo_service import search_people_chunked
+from database.conflict import insert_ignore
 from database.models import Lead
 from core.logger import get_logger
 
@@ -267,10 +268,60 @@ def _probe_batch(filters: LeadFilter) -> list[dict]:
     return [parse_apollo_person(p) for p in people if p.get("id")]
 
 
+def _probe_effective_stage(filters: LeadFilter) -> tuple[int, list[dict]]:
+    """Probe the filter set collection will actually get leads from.
+
+    UC-Q07: the original filters return nothing on most runs (collection only
+    fills at a loosening stage), so probing them skipped the quality check on
+    5 of 6 production runs. Walk the same ladder collect_leads walks and
+    return (stage, probe) for the first stage with results; stage 0 is the
+    original filters. (-1, []) when every stage is empty.
+    """
+    probe = _probe_batch(filters)
+    if probe:
+        return 0, probe
+    for idx, stage_filters in enumerate(_build_loosening_stages(filters), 1):
+        probe = _probe_batch(stage_filters)
+        if probe:
+            return idx, probe
+    return -1, []
+
+
+LOW_QUALITY_EVENT = "lead_quality_low"
+
+
+def _alert_low_quality(candidate_id: int | None, quality_score: int, main_issue, stage: int) -> None:
+    """Page ops on a batch the probe judged poor (UC-Q07).
+
+    Collection still proceeds (a poor batch beats none), but it used to do so
+    silently. The error log carries a fixed tag for log alerts, and the
+    system_events row makes it countable without log access. Never raises.
+    """
+    logger.error(
+        "[QualityProbe] LOW_QUALITY candidate=%s quality=%d/10 stage=%d issue=%r; proceeding",
+        candidate_id, quality_score, stage, main_issue,
+    )
+    try:
+        from database.models import SystemEvent
+        from database.session import SessionLocal
+        db = SessionLocal()
+        try:
+            db.add(SystemEvent(event_type=LOW_QUALITY_EVENT, meta={
+                "candidate_id": candidate_id, "quality_score": quality_score,
+                "stage": stage, "main_issue": main_issue,
+            }))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error("[QualityProbe] could not record %s event: %s", LOW_QUALITY_EVENT, e)
+
+
 def quality_probe_loop(
     filters: LeadFilter,
     candidate_prefs: dict,
     max_iterations: int = 3,
+    candidate_id: int | None = None,
 ) -> tuple[LeadFilter, list[str]]:
     """Probe Apollo, evaluate quality with LLM, adjust filters if needed. Max 3 rounds.
 
@@ -293,13 +344,15 @@ def quality_probe_loop(
     from services.candidate_intelligence.career_strategist import APOLLO_VALID_SIZE_RANGES
 
     all_exclusions: list[str] = []
+    quality_score = None
+    stage = -1
 
     for iteration in range(max_iterations + 1):
-        probe = _probe_batch(filters)
-        logger.info("[QualityProbe] iter=%d probe_size=%d", iteration, len(probe))
+        stage, probe = _probe_effective_stage(filters)
+        logger.info("[QualityProbe] iter=%d stage=%d probe_size=%d", iteration, stage, len(probe))
 
         if not probe:
-            logger.info("[QualityProbe] Empty probe — skipping quality check, proceeding")
+            logger.warning("[QualityProbe] No loosening stage returns anyone — skipping quality check")
             break
 
         result = evaluate_probe_with_llm(probe, candidate_prefs)
@@ -370,9 +423,10 @@ def quality_probe_loop(
             logger.info("[QualityProbe] No actionable adjustments from LLM — stopping early")
             break
 
-    return filters, all_exclusions
+    if quality_score is not None and quality_score < 7:
+        _alert_low_quality(candidate_id, quality_score, main_issue, stage)
 
-    return filters
+    return filters, all_exclusions
 
 
 def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
@@ -563,11 +617,14 @@ def _store_people(
     db: Session,
     leads_collected: int,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Parse, deduplicate, and store a batch of Apollo people. Returns updated count.
 
     Enforces a per-company cap of MAX_LEADS_PER_COMPANY to ensure diversity.
     excluded_companies: company names flagged by the probe loop LLM as hard mismatches.
+    in_location_ids: when given, the ids of stored leads are added to it. The
+    caller passes it only for a search filtered on the candidate's locations.
     """
     from sqlalchemy import func
 
@@ -627,7 +684,11 @@ def _store_people(
             from services.email_campaign.suppression import is_suppressed
             if is_suppressed(db, apollo_email):
                 apollo_email = None
-        new_lead = Lead(
+        # ON CONFLICT DO NOTHING: a concurrent run for this candidate can insert
+        # the same person between the check above and this insert, and the
+        # unique index on (candidate_id, apollo_id) then skips it rather than
+        # failing the page (UC-Q36). Only a real insert counts as collected.
+        inserted = insert_ignore(db, Lead, [dict(
             candidate_id=candidate_id,
             apollo_id=apollo_id,
             name=parsed_data.get("name"),
@@ -642,9 +703,11 @@ def _store_people(
             email=apollo_email,
             email_verified=bool(apollo_email),
             status="discovered",
-        )
-        db.add(new_lead)
-        db.flush()
+        )], returning=[Lead.id])
+        if not inserted:
+            continue
+        if in_location_ids is not None:
+            in_location_ids.add(inserted[0].id)
         leads_collected += 1
         company_counts[company_key] = company_counts.get(company_key, 0) + 1
 
@@ -658,11 +721,16 @@ def _paginate_filters(
     db: Session,
     leads_collected: int,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Paginate through all Apollo pages for a given filter set.
 
     Returns cumulative leads_collected.
     """
+    # Apollo filtered these people on the candidate's cities, so they are in
+    # one; stages that dropped person_locations prove nothing (UC-Q04).
+    if not filters.person_locations:
+        in_location_ids = None
     page = 1
     while leads_collected < target_leads:
         logger.info("Paginating page %d (collected: %d/%d)", page, leads_collected, target_leads)
@@ -680,6 +748,7 @@ def _paginate_filters(
         leads_collected = _store_people(
             people, candidate_id, target_leads, db, leads_collected,
             excluded_companies=excluded_companies,
+            in_location_ids=in_location_ids,
         )
 
         try:
@@ -700,6 +769,7 @@ def collect_leads(
     target_leads: int,
     db: Session,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Execute iterative Apollo search logic until target_leads are secured.
 
@@ -715,6 +785,9 @@ def collect_leads(
 
     excluded_companies: company names flagged by probe-loop LLM as hard mismatches —
     skipped even when Apollo returns them during full collection.
+
+    in_location_ids: optional set that receives the ids of leads found while
+    person_locations was still applied, for location scoring (UC-Q04).
     """
     # Fail fast when Apollo has no usable credentials. Without this the run walks
     # every loosening stage making doomed calls, then reports "0 leads" several
@@ -726,7 +799,9 @@ def collect_leads(
         )
 
     try:
-        return _collect_in_stages(filters, candidate_id, target_leads, db, excluded_companies)
+        return _collect_in_stages(
+            filters, candidate_id, target_leads, db, excluded_companies, in_location_ids,
+        )
     except ApolloTransientError as e:
         # Apollo went down mid-run. Keep what was stored rather than walking
         # the remaining stages against an outage; only a run with nothing at
@@ -744,6 +819,7 @@ def _collect_in_stages(
     target_leads: int,
     db: Session,
     excluded_companies: list[str] | None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     # Phase 1: Original filters — paginate fully
     logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
@@ -751,6 +827,7 @@ def _collect_in_stages(
     leads_collected = _paginate_filters(
         filters, candidate_id, target_leads, db, 0,
         excluded_companies=excluded_companies,
+        in_location_ids=in_location_ids,
     )
 
     logger.info("[PHASE1] Original filters collected %d/%d leads", leads_collected, target_leads)
@@ -775,6 +852,7 @@ def _collect_in_stages(
             leads_collected = _paginate_filters(
                 loose_filters, candidate_id, target_leads, db, leads_collected,
                 excluded_companies=excluded_companies,
+                in_location_ids=in_location_ids,
             )
 
             logger.info(

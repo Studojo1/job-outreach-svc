@@ -13,6 +13,7 @@ from services.lead_discovery.domain_utils import clean_domain as _clean_domain
 from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
+from database.conflict import insert_ignore
 from database.models import User, Candidate, Lead, LeadScore
 from services.lead_discovery.lead_collector_service import (
     collect_leads,
@@ -146,8 +147,14 @@ class DiscoveryRequest(BaseModel):
     filters: Optional[LeadFilter] = None
 
 
-def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
-    """Score all unscored leads for a candidate and store LeadScore records."""
+def _score_candidate_leads(
+    db: Session, candidate: Candidate, in_location_ids: set[int] | None = None,
+) -> int:
+    """Score all unscored leads for a candidate and store LeadScore records.
+
+    in_location_ids: leads that discovery found under the candidate's
+    person_locations filter (UC-Q04; Apollo returns no city to score on).
+    """
     parsed = candidate.parsed_json or {}
     career = parsed.get("career_analysis", {})
     prefs = parsed.get("preferences", {})
@@ -214,6 +221,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             "linkedin_url": lead.linkedin_url,
             "company_domain": lead.company_domain,
             "company_description": lead.company_description,
+            "in_preferred_location": lead.id in (in_location_ids or ()),
         }
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
@@ -230,14 +238,13 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
         company_fit_scores={},  # empty — company intel runs on top-K below
     )
 
-    score_rows: dict[int, LeadScore] = {}
     fallback_explanation = f"Scored against {', '.join(preferred_roles[:3])} (seniority={candidate_seniority})"
-    count = 0
+    score_values = []
     for lead_dict in scored:
         lead_id = lead_dict.get("id")
         if not lead_id:
             continue
-        ls = LeadScore(
+        score_values.append(dict(
             lead_id=lead_id,
             overall_score=lead_dict.get("score", 0),
             title_relevance=lead_dict.get("_title_score", 0),
@@ -246,34 +253,57 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             seniority_relevance=lead_dict.get("_seniority_score", 0),
             location_relevance=lead_dict.get("_location_score", 0),
             explanation=fallback_explanation,
-        )
-        db.add(ls)
-        score_rows[lead_id] = ls
-        count += 1
+        ))
 
     # Leads the scorer filtered out (title blocklist) get a 0 row rather than
     # none. With no row they counted toward scoring-ready's total but never
     # toward scored, so enough of them held the discovery screen at 96%, and
     # every rescore retried them. 0 ranks them last, which is what the filter
     # means. They are not in score_rows, so they are never justified.
-    filtered_ids = sorted(lead_id_map.keys() - score_rows.keys())
-    for lead_id in filtered_ids:
-        db.add(LeadScore(
-            lead_id=lead_id,
-            overall_score=0,
-            title_relevance=0,
-            department_relevance=0,
-            industry_relevance=0,
-            seniority_relevance=0,
-            location_relevance=0,
-            explanation=_FILTERED_EXPLANATION,
-        ))
+    filtered_ids = sorted(lead_id_map.keys() - {v["lead_id"] for v in score_values})
+    filtered_values = [dict(
+        lead_id=lead_id,
+        overall_score=0,
+        title_relevance=0,
+        department_relevance=0,
+        industry_relevance=0,
+        seniority_relevance=0,
+        location_relevance=0,
+        explanation=_FILTERED_EXPLANATION,
+    ) for lead_id in filtered_ids]
     if filtered_ids:
         logger.info("[SCORE_BG] %d leads filtered by title; stored as score 0", len(filtered_ids))
+
+    # UC-Q36: a second scoring pass running at the same time (a rescore, a
+    # retried request) read the same "unscored" set. ON CONFLICT DO NOTHING on
+    # the lead_scores(lead_id) unique index lets the first writer win instead
+    # of storing two rows per lead or failing the whole batch. Only rows this
+    # pass inserted are adjusted and justified below.
+    inserted = insert_ignore(
+        db, LeadScore, score_values + filtered_values,
+        returning=[LeadScore.id, LeadScore.lead_id],
+    )
+    scored_lead_ids_set = {v["lead_id"] for v in score_values}
+    mine = [r.id for r in inserted if r.lead_id in scored_lead_ids_set]
+    score_rows: dict[int, LeadScore] = {
+        row.lead_id: row
+        for row in db.query(LeadScore).filter(LeadScore.id.in_(mine)).all()
+    } if mine else {}
+    count = len(score_rows)
+    if len(inserted) < len(score_values) + len(filtered_values):
+        logger.info("[SCORE_BG] %d leads already scored by a concurrent pass; skipped",
+                    len(score_values) + len(filtered_values) - len(inserted))
 
     # Commit heuristic scores immediately — durable regardless of what LLM phases do.
     db.commit()
     logger.info("[SCORE_BG] Phase 1 done: %d heuristic scores committed", count)
+
+    # UC-Q17: this is the moment scoring-ready releases the student (it waits
+    # for scores, not for justifications), so it is when leads were generated.
+    # Stamping after the LLM justification pass overstated the discovery wait
+    # in the funnel by that whole pass.
+    from services.stage_tracking import safe_mark_stage
+    safe_mark_stage(db, str(candidate.user_id), "leads_generated", candidate_id=candidate.id)
 
     # ── Top-K LLM justification ───────────────────────────────────────────
     # Sort scored leads by overall score; enrich + justify the top JUSTIFY_TOP_K.
@@ -477,7 +507,9 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     return count
 
 
-def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
+def _score_candidate_leads_sync(
+    candidate_id: int, user_id: str, in_location_ids: set[int] | None = None,
+) -> int:
     """Opens its own DB session, runs Phase 1 (heuristic) + Phase 3 (justification).
 
     Called via asyncio.to_thread from the search endpoint so scoring completes
@@ -491,7 +523,7 @@ def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
         if not candidate:
             logger.warning("[SCORE_SYNC] candidate %d not found", candidate_id)
             return 0
-        scored_count = _score_candidate_leads(db, candidate)
+        scored_count = _score_candidate_leads(db, candidate, in_location_ids)
         logger.info("[SCORE_SYNC] candidate %d: scored+justified %d leads", candidate_id, scored_count)
     except Exception as e:
         logger.error("[SCORE_SYNC] failed for candidate %d: %s", candidate_id, e, exc_info=True)
@@ -502,6 +534,8 @@ def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
     # Post-scoring housekeeping in a fresh session (_score_candidate_leads closed the original).
     db2 = SessionLocal()
     try:
+        # leads_generated is stamped when Phase 1 commits (UC-Q17); this
+        # one-shot call only covers a run that found nothing left to score.
         from services.stage_tracking import safe_mark_stage
         safe_mark_stage(db2, user_id, "leads_generated", candidate_id=candidate_id)
         from core.analytics import capture as _capture
@@ -605,6 +639,39 @@ def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
     finally:
         db.close()
     _run_company_intel_bg(candidate_id)
+
+
+# UC-Q32: the strategist LLM call is 14-25s, about half the discovery wait,
+# and its answer depends only on its inputs. Cache it in parsed_json (like
+# "_qps") keyed by a hash of those inputs, and reuse a match from any of the
+# user's candidates, since a re-upload creates a new candidate row.
+_STRATEGY_CACHE = "_strategist_cache"
+
+
+def _cached_strategy(db: Session, candidate: Candidate, key: str) -> dict | None:
+    try:
+        rows = [candidate.parsed_json] + [
+            pj for (pj,) in db.query(Candidate.parsed_json).filter(
+                Candidate.user_id == candidate.user_id, Candidate.id != candidate.id,
+            ).all()
+        ]
+        for pj in rows:
+            entry = (pj or {}).get(_STRATEGY_CACHE) if isinstance(pj, dict) else None
+            if isinstance(entry, dict) and entry.get("key") == key and entry.get("strategy"):
+                return entry["strategy"]
+    except Exception as e:
+        logger.warning("[LeadSearch] strategist cache lookup failed: %s", e)
+    return None
+
+
+def _store_strategy(db: Session, candidate: Candidate, key: str, strategy: dict) -> None:
+    try:
+        parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+        candidate.parsed_json = {**parsed, _STRATEGY_CACHE: {"key": key, "strategy": strategy}}
+        db.commit()
+    except Exception as e:
+        logger.warning("[LeadSearch] strategist cache write failed: %s", e)
+        db.rollback()
 
 
 @router.post("/search")
@@ -737,17 +804,28 @@ async def search_leads(
             logger.info(f"[LeadSearch] Built CandidateProfile: roles={profile.preferred_roles}, locations={profile.location_preferences}")
 
             # Career Strategist — LLM generates title clusters + Apollo strategy
-            from services.candidate_intelligence.career_strategist import run_career_strategist
-            t_pre_strategist = time.perf_counter()
-            search_strategy = await asyncio.to_thread(
-                run_career_strategist,
-                candidate.resume_profile or {},
-                prefs,
-                preferred_roles,
-                candidate.flex_notes,
+            from services.candidate_intelligence.career_strategist import (
+                run_career_strategist, strategy_cache_key,
             )
+            t_pre_strategist = time.perf_counter()
+            strategy_key = strategy_cache_key(
+                candidate.resume_profile or {}, prefs, preferred_roles, candidate.flex_notes,
+            )
+            search_strategy = _cached_strategy(db, candidate, strategy_key)
+            strategy_source = "cache"
+            if search_strategy is None:
+                strategy_source = "llm"
+                search_strategy = await asyncio.to_thread(
+                    run_career_strategist,
+                    candidate.resume_profile or {},
+                    prefs,
+                    preferred_roles,
+                    candidate.flex_notes,
+                )
+                if search_strategy:
+                    _store_strategy(db, candidate, strategy_key, search_strategy)
             logger.info(
-                f"[LeadSearch] Career Strategist: {'strategy generated' if search_strategy else 'fallback to rules'} "
+                f"[LeadSearch] Career Strategist: {'strategy ' + strategy_source if search_strategy else 'fallback to rules'} "
                 f"in {(time.perf_counter() - t_pre_strategist)*1000:.0f}ms"
             )
 
@@ -777,6 +855,7 @@ async def search_leads(
                 filters,
                 candidate_prefs_for_probe,
                 1,  # max_iterations — 1 probe is enough; 3 added ~26s of sync latency
+                candidate.id,
             )
             logger.info(
                 f"[LeadSearch] Quality probe complete: {(time.perf_counter() - t_pre_probe)*1000:.0f}ms "
@@ -787,6 +866,7 @@ async def search_leads(
         logger.info(f"[LeadSearch] Filter generation + probe: {(t_filter - t_start)*1000:.0f}ms")
 
         # Run blocking Apollo API calls in a thread to avoid blocking the event loop
+        in_location_ids: set[int] = set()
         count = await asyncio.to_thread(
             collect_leads,
             filters=filters,
@@ -794,6 +874,7 @@ async def search_leads(
             target_leads=request.target_leads,
             db=db,
             excluded_companies=probe_exclusions or None,
+            in_location_ids=in_location_ids,
         )
 
         t_collect = time.perf_counter()
@@ -833,7 +914,7 @@ async def search_leads(
             # Leads are stored; the order is ready for the results page.
             safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
             background_tasks.add_task(
-                _score_candidate_leads_sync, candidate.id, str(current_user.id)
+                _score_candidate_leads_sync, candidate.id, str(current_user.id), in_location_ids
             )
             background_tasks.add_task(_run_company_intel_bg, candidate.id)
 
@@ -1149,26 +1230,28 @@ async def import_from_outreach(
             continue
         if sl.linkedin_url and sl.linkedin_url in seen_li:
             continue
-        new_lead = Lead(
+        # Conflict-safe (UC-Q36): a concurrent import of the same source can
+        # insert this person first; the unique index then skips it here.
+        inserted = insert_ignore(db, Lead, [dict(
             candidate_id=body.candidate_id,
             apollo_id=sl.apollo_id, name=sl.name, title=sl.title, company=sl.company,
             industry=sl.industry, location=sl.location, linkedin_url=sl.linkedin_url,
             email=sl.email, company_size=sl.company_size, email_verified=sl.email_verified,
             company_description=sl.company_description, company_domain=sl.company_domain,
             status=sl.status or "new",
-        )
-        db.add(new_lead)
-        db.flush()  # get new_lead.id
+        )], returning=[Lead.id])
+        if not inserted:
+            continue
         # copy the best score row if present
         src_score = db.query(LeadScore).filter_by(lead_id=sl.id).first()
         if src_score:
-            db.add(LeadScore(
-                lead_id=new_lead.id,
+            insert_ignore(db, LeadScore, [dict(
+                lead_id=inserted[0].id,
                 overall_score=src_score.overall_score, title_relevance=src_score.title_relevance,
                 department_relevance=src_score.department_relevance, industry_relevance=src_score.industry_relevance,
                 seniority_relevance=src_score.seniority_relevance, location_relevance=src_score.location_relevance,
                 explanation=src_score.explanation, justification_json=src_score.justification_json,
-            ))
+            )])
         if sl.apollo_id: seen_apollo.add(sl.apollo_id)
         if sl.linkedin_url: seen_li.add(sl.linkedin_url)
         imported += 1
