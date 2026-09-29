@@ -632,6 +632,39 @@ def _score_candidate_leads_bg(candidate_id: int, user_id: str) -> None:
     _run_company_intel_bg(candidate_id)
 
 
+# UC-Q32: the strategist LLM call is 14-25s, about half the discovery wait,
+# and its answer depends only on its inputs. Cache it in parsed_json (like
+# "_qps") keyed by a hash of those inputs, and reuse a match from any of the
+# user's candidates, since a re-upload creates a new candidate row.
+_STRATEGY_CACHE = "_strategist_cache"
+
+
+def _cached_strategy(db: Session, candidate: Candidate, key: str) -> dict | None:
+    try:
+        rows = [candidate.parsed_json] + [
+            pj for (pj,) in db.query(Candidate.parsed_json).filter(
+                Candidate.user_id == candidate.user_id, Candidate.id != candidate.id,
+            ).all()
+        ]
+        for pj in rows:
+            entry = (pj or {}).get(_STRATEGY_CACHE) if isinstance(pj, dict) else None
+            if isinstance(entry, dict) and entry.get("key") == key and entry.get("strategy"):
+                return entry["strategy"]
+    except Exception as e:
+        logger.warning("[LeadSearch] strategist cache lookup failed: %s", e)
+    return None
+
+
+def _store_strategy(db: Session, candidate: Candidate, key: str, strategy: dict) -> None:
+    try:
+        parsed = candidate.parsed_json if isinstance(candidate.parsed_json, dict) else {}
+        candidate.parsed_json = {**parsed, _STRATEGY_CACHE: {"key": key, "strategy": strategy}}
+        db.commit()
+    except Exception as e:
+        logger.warning("[LeadSearch] strategist cache write failed: %s", e)
+        db.rollback()
+
+
 @router.post("/search")
 async def search_leads(
     request: DiscoveryRequest,
@@ -762,17 +795,28 @@ async def search_leads(
             logger.info(f"[LeadSearch] Built CandidateProfile: roles={profile.preferred_roles}, locations={profile.location_preferences}")
 
             # Career Strategist — LLM generates title clusters + Apollo strategy
-            from services.candidate_intelligence.career_strategist import run_career_strategist
-            t_pre_strategist = time.perf_counter()
-            search_strategy = await asyncio.to_thread(
-                run_career_strategist,
-                candidate.resume_profile or {},
-                prefs,
-                preferred_roles,
-                candidate.flex_notes,
+            from services.candidate_intelligence.career_strategist import (
+                run_career_strategist, strategy_cache_key,
             )
+            t_pre_strategist = time.perf_counter()
+            strategy_key = strategy_cache_key(
+                candidate.resume_profile or {}, prefs, preferred_roles, candidate.flex_notes,
+            )
+            search_strategy = _cached_strategy(db, candidate, strategy_key)
+            strategy_source = "cache"
+            if search_strategy is None:
+                strategy_source = "llm"
+                search_strategy = await asyncio.to_thread(
+                    run_career_strategist,
+                    candidate.resume_profile or {},
+                    prefs,
+                    preferred_roles,
+                    candidate.flex_notes,
+                )
+                if search_strategy:
+                    _store_strategy(db, candidate, strategy_key, search_strategy)
             logger.info(
-                f"[LeadSearch] Career Strategist: {'strategy generated' if search_strategy else 'fallback to rules'} "
+                f"[LeadSearch] Career Strategist: {'strategy ' + strategy_source if search_strategy else 'fallback to rules'} "
                 f"in {(time.perf_counter() - t_pre_strategist)*1000:.0f}ms"
             )
 
