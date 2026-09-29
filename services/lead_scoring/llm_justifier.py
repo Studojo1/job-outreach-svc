@@ -243,7 +243,9 @@ def _build_company_snapshot(lead: dict, company: Optional[dict]) -> str:
     return " · ".join(parts) if parts else ""
 
 
-def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str, dict]) -> Dict[int, dict]:
+def _justify_batch(
+    candidate: dict, batch_leads: List[dict], companies: Dict[str, dict], retry_banned: bool = True,
+) -> Dict[int, dict]:
     if not batch_leads:
         return {}
     prompt = _build_batch_prompt(candidate, batch_leads, companies)
@@ -258,6 +260,7 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
         return {}
 
     out: Dict[int, dict] = {}
+    banned: List[dict] = []
     for lead in batch_leads:
         lid = str(lead["id"])
         if lid not in result:
@@ -269,12 +272,21 @@ def _justify_batch(candidate: dict, batch_leads: List[dict], companies: Dict[str
             continue
         if _has_banned_phrase(item):
             logger.info("[JUSTIFY] dropped lead %s — banned phrase in output", lid)
+            banned.append(lead)
             continue
         item = _strip_em_dashes(item)
         snapshot = _build_company_snapshot(lead, _resolve_company(lead, companies))
         if snapshot and len(item.get("bullets") or []) >= 2:
             item["bullets"] = [snapshot] + item["bullets"][:2]
         out[lead["id"]] = item
+
+    # UC-Q22: a banned phrase used to cost the lead its note for good. At
+    # temperature 0.4 a second draw usually avoids it, so retry those leads
+    # once, as their own batch. Only once: a lead that trips it twice keeps
+    # the fallback rather than looping on the LLM.
+    if banned and retry_banned:
+        logger.info("[JUSTIFY] retrying %d leads dropped for a banned phrase", len(banned))
+        out.update(_justify_batch(candidate, banned, companies, retry_banned=False))
     return out
 
 
