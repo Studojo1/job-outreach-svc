@@ -14,7 +14,10 @@ collector automatically loosens filters in priority order:
   6. Nuclear — fallback titles, no constraints at all
 """
 
+import time
 from typing import Dict, Any, List, Optional
+
+import requests
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -378,12 +381,12 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
     Priority order (drop the high-precision filters first; preserve the
     role-and-location intent as long as possible):
 
-      Stage 1: Drop currently-hiring-for + posting recency (narrowest filters)
-      Stage 2: Drop tech_stack
-      Stage 3: Drop niche_keywords
-      Stage 4: Drop industry filter
-      Stage 5: Drop person_past_titles + organization_job_locations
-      Stage 6: Drop org_locations (keep person_locations)
+      Stages 1-5 (each only if that filter is set, cumulative):
+        drop person_past_titles + organization_job_locations + org_locations
+        + drop tech_stack
+        + drop industry filter
+        + drop niche_keywords
+        + drop currently-hiring-for + posting recency (the strongest signal, so last)
       Stage 7: Flatten company sizes into one segment
       Stage 8: Drop person_locations (global search, keep ORIGINAL titles)
       Stage 9: Function-specific fallback titles, KEEP location
@@ -395,72 +398,29 @@ def _build_loosening_stages(filters: LeadFilter) -> List[LeadFilter]:
     """
     stages = []
 
-    # Stage 1: Drop currently-hiring-for + posting recency (drop together —
-    # they only make sense paired)
-    if filters.q_organization_job_titles or filters.organization_job_posted_at_range:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: Drop currently-hiring + posting recency", len(stages))
-
-    # Stage 2: Drop tech_stack (high-precision, often sparse on Indian companies)
-    if filters.currently_using_any_of_technology_uids:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-            currently_using_any_of_technology_uids=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: + drop tech_stack", len(stages))
-
-    # Stage 3: Drop niche_keywords
-    if filters.q_organization_keyword_tags:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-            currently_using_any_of_technology_uids=None,
-            q_organization_keyword_tags=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: + drop niche keywords", len(stages))
-
-    # Stage 4: Drop industry filter
-    if filters.organization_industries:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-            currently_using_any_of_technology_uids=None,
-            q_organization_keyword_tags=None,
-            organization_industries=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: + drop industry filter", len(stages))
-
-    # Stage 5: Drop person_past_titles + organization_job_locations
-    if filters.person_past_titles or filters.organization_job_locations:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-            currently_using_any_of_technology_uids=None,
-            q_organization_keyword_tags=None,
-            organization_industries=None,
-            person_past_titles=None,
-            organization_job_locations=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: + drop past_titles + job_locations", len(stages))
-
-    # Stage 6: Drop organization_locations (keep person_locations)
-    if filters.organization_locations:
-        stages.append(_clone_filters(filters,
-            q_organization_job_titles=None,
-            organization_job_posted_at_range=None,
-            currently_using_any_of_technology_uids=None,
-            q_organization_keyword_tags=None,
-            organization_industries=None,
-            person_past_titles=None,
-            organization_job_locations=None,
-            organization_locations=None,
-        ))
-        logger.info("[LOOSENING] Stage %d: + drop org_locations", len(stages))
-
+    # Stages 1-6 drop optional filters one group at a time, cumulatively.
+    # The order used to drop currently-hiring + posting recency FIRST, so the
+    # strongest personalisation (companies hiring for the student's role
+    # right now) was thrown away on every run, as were niche keywords (B2C
+    # UC-Q06: 6 of 6 production runs collected 0 on the original filters,
+    # killed by past_titles and org_locations, and reached 800 only after
+    # those signals were gone). The broad structural filters go first now,
+    # and the hiring signal is the last optional filter to go.
+    groups = [
+        ("drop past_titles + job_locations + org_locations",
+         ("person_past_titles", "organization_job_locations", "organization_locations")),
+        ("drop tech_stack", ("currently_using_any_of_technology_uids",)),
+        ("drop industry filter", ("organization_industries",)),
+        ("drop niche keywords", ("q_organization_keyword_tags",)),
+        ("drop currently-hiring + posting recency",
+         ("q_organization_job_titles", "organization_job_posted_at_range")),
+    ]
+    dropped: dict = {}
+    for label, fields in groups:
+        if any(getattr(filters, f) for f in fields):
+            dropped.update({f: None for f in fields})
+            stages.append(_clone_filters(filters, **dropped))
+            logger.info("[LOOSENING] Stage %d: + %s", len(stages), label)
     # Stage 7: Flatten company sizes into one segment (keep titles + person_location)
     all_titles = []
     seen = set()
@@ -544,6 +504,22 @@ class ApolloUnavailableError(RuntimeError):
     """
 
 
+class ApolloTransientError(ApolloUnavailableError):
+    """Apollo rate-limited us, errored, or timed out, even after one retry.
+
+    Used to come back as an empty page, so the student was told their search
+    was "very narrow" when Apollo was simply down (B2C UC-Q02).
+    """
+
+
+def _is_transient(e: Exception) -> bool:
+    if isinstance(e, (requests.Timeout, requests.ConnectionError)):
+        return True
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    return code == 429 or (code is not None and code >= 500)
+
+
 def _try_collect_page(apollo_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Execute one Apollo search and return the people array.
 
@@ -552,19 +528,29 @@ def _try_collect_page(apollo_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     set: every user saw "0 hiring managers found" after sitting through all ten
     loosening stages, and nothing in the funnel recorded that Apollo was down.
     """
-    try:
-        api_response = search_people_chunked(apollo_payload)
-        return api_response.get("people", [])
-    except ValueError as e:
-        # apollo_key_manager raises ValueError once every key is exhausted.
-        if "exhausted" in str(e).lower():
-            logger.error("[Apollo] No usable API key: %s", e)
-            raise ApolloUnavailableError(str(e)) from e
-        logger.error("Apollo API error: %s", e, exc_info=True)
-        return []
-    except Exception as e:
-        logger.error("Apollo API error: %s", e, exc_info=True)
-        return []
+    for attempt in (1, 2):
+        try:
+            api_response = search_people_chunked(apollo_payload)
+            return api_response.get("people", [])
+        except ValueError as e:
+            # apollo_key_manager raises ValueError once every key is exhausted.
+            if "exhausted" in str(e).lower():
+                logger.error("[Apollo] No usable API key: %s", e)
+                raise ApolloUnavailableError(str(e)) from e
+            logger.error("Apollo API error: %s", e, exc_info=True)
+            return []
+        except Exception as e:
+            if _is_transient(e):
+                if attempt == 1:
+                    logger.warning("[Apollo] transient error, retrying once: %s", e)
+                    time.sleep(2)
+                    continue
+                logger.error("[Apollo] transient error after retry: %s", e)
+                raise ApolloTransientError(str(e)) from e
+            # A 4xx other than 429 is this filter set's fault: treat it as empty.
+            logger.error("Apollo API error: %s", e, exc_info=True)
+            return []
+    return []
 
 
 MAX_LEADS_PER_COMPANY = 4
@@ -676,7 +662,11 @@ def _paginate_filters(
     while leads_collected < target_leads:
         logger.info("Paginating page %d (collected: %d/%d)", page, leads_collected, target_leads)
         apollo_payload = build_apollo_query(filters, page=page)
-        people = _try_collect_page(apollo_payload)
+        try:
+            people = _try_collect_page(apollo_payload)
+        except ApolloTransientError as e:
+            e.collected = leads_collected  # collect_leads keeps these
+            raise
 
         if not people:
             logger.info("Apollo exhausted on page %d.", page)
@@ -730,6 +720,26 @@ def collect_leads(
             "Apollo has no usable API key — every configured key is exhausted or invalid."
         )
 
+    try:
+        return _collect_in_stages(filters, candidate_id, target_leads, db, excluded_companies)
+    except ApolloTransientError as e:
+        # Apollo went down mid-run. Keep what was stored rather than walking
+        # the remaining stages against an outage; only a run with nothing at
+        # all reports Apollo as unavailable (UC-Q02).
+        collected = getattr(e, "collected", 0)
+        if collected > 0:
+            logger.warning("[Apollo] outage mid-run; stopping with %d leads", collected)
+            return collected
+        raise
+
+
+def _collect_in_stages(
+    filters: LeadFilter,
+    candidate_id: int,
+    target_leads: int,
+    db: Session,
+    excluded_companies: list[str] | None,
+) -> int:
     # Phase 1: Original filters — paginate fully
     logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
                 target_leads, len(excluded_companies or []))
