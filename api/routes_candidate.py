@@ -10,7 +10,9 @@ from pydantic import BaseModel
 
 from database.session import get_db, SessionLocal
 from database.models import User, Candidate, Lead, LeadScore
-from services.candidate_intelligence.parser import NO_TEXT_MESSAGE, UnreadableResumeError, parse_resume
+from services.candidate_intelligence.parser import (
+    NO_TEXT_MESSAGE, ScannedResumeUnreadable, UnreadableResumeError, parse_resume,
+)
 from api.dependencies import get_current_user
 from core.analytics import capture
 
@@ -154,6 +156,13 @@ async def upload_resume(
     # outages included, and showed the raw Python error to the student.
     try:
         raw_text, preview = parse_resume(contents, file.filename)
+    except ScannedResumeUnreadable as e:
+        # OP-N06: OCR of a scanned resume failed on our side (after one retry).
+        # The file may be fine, so this is a 503 with its own message, not a
+        # 400 telling the student the file is empty.
+        logger.warning("[UPLOAD] OCR unavailable for scanned resume from user %s (%s)",
+                       current_user.id, file.filename)
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except UnreadableResumeError as e:
         # A corrupt file or one with no text (UC-Q29): 422 with copy that says
         # what to do. The library's error was logged by the parser.
@@ -205,6 +214,7 @@ async def upload_resume(
             "candidate_id": existing.id,
             "preview": preview,
             "existing_results": True,
+            "looks_like_resume": bool(preview.get("looks_like_resume", True)),  # OP-N07
         }
 
     try:
@@ -251,6 +261,7 @@ async def upload_resume(
         capture("resume_uploaded", str(current_user.id), {
             "candidate_id": new_candidate.id,
             "file_type": (file.filename or "").rsplit(".", 1)[-1].lower(),
+            "looks_like_resume": bool(preview.get("looks_like_resume", True)),
         })
     except Exception:
         logger.warning("[UPLOAD] analytics capture failed", exc_info=True)
@@ -277,6 +288,11 @@ async def upload_resume(
         "status": "success",
         "candidate_id": new_candidate.id,
         "preview": preview,
+        # OP-N07: False when the text has none of the usual resume sections.
+        # The upload page should ask "This does not look like a resume. Upload
+        # a different file?" before starting the quiz. Not a refusal: the
+        # check is a keyword heuristic and the student may know better.
+        "looks_like_resume": bool(preview.get("looks_like_resume", True)),
     }
     if order_candidate_id is not None:
         # The paid order stays on this candidate's leads.
