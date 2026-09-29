@@ -124,8 +124,21 @@ def pause_for_auth(db, campaign: Campaign, email: EmailSent, message: str,
         campaign.paused_at = datetime.utcnow()
         campaign.paused_by = "system"
         campaign.pause_reason = PAUSE_REASON_GMAIL_AUTH
+        record_pause_event(db, campaign)
         logger.warning("[OUTCOME] Campaign %d paused: Gmail needs reconnecting (%s)",
                        campaign.id, message[:160])
+
+
+def record_pause_event(db, campaign: Campaign) -> None:
+    """A system_events row per pause, for the pause history (audit P40).
+    user_id stays NULL (the owner is in metadata) because the frontend shows
+    a user their own system_events rows. Caller commits."""
+    from database.models import SystemEvent
+    owner = db.query(Candidate.user_id).filter(Candidate.id == campaign.candidate_id).scalar()
+    db.add(SystemEvent(event_type="campaign_paused", user_id=None, created_at=datetime.utcnow(), meta={
+        "campaign_id": campaign.id, "owner_user_id": owner,
+        "paused_by": campaign.paused_by, "pause_reason": campaign.pause_reason,
+    }))
 
 
 def handle(db, campaign: Campaign, email: EmailSent, exc: Exception, *, phase: str,

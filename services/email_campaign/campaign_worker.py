@@ -31,7 +31,7 @@ from database.models import (
     Campaign, EmailSent, EmailAccount, Lead, LeadScore,
     Candidate, User,
 )
-from services.email_campaign.gmail_send_service import GmailAuthError, send_gmail_email, _refresh_token_sync
+from services.email_campaign.gmail_send_service import GmailAuthError, GmailSendError, send_gmail_email, _refresh_token_sync
 from services.email_campaign import outcomes
 from services.email_campaign.gmail_inbox_service import (
     list_inbox_messages,
@@ -55,6 +55,7 @@ JIT_LOOKAHEAD_HOURS = 3  # enrich/generate leads this far ahead of send time
 MAX_ENRICH_PER_CYCLE = 3  # ~0.6s at 0.2s Apollo rate limit
 MAX_GENERATE_PER_CYCLE = 2  # ~2s for LLM calls
 MAX_SEND_PER_CYCLE = 5  # ~1s for Gmail API calls
+DEGRADED_BELOW = 0.5  # a campaign finishing under half its first touches delivered is 'degraded' (P01)
 MAX_ENRICHMENT_FAILURES = 3  # skip lead after this many failures
 REPLY_CHECK_INTERVAL = 300  # 5 minutes between reply checks
 _last_reply_check: float = 0.0  # module-level timestamp for throttling
@@ -342,6 +343,20 @@ def _enrich_upcoming(db) -> int:
             email.enrichment_status = "enriched"
             db.commit()
             enriched_count += 1
+            continue
+
+        # Already exhausted in another campaign: do not pay Apollo to ask again
+        # (audit P34: 184 leads sat past the cap and still drew fresh calls).
+        if (lead.enrichment_fail_count or 0) >= MAX_ENRICHMENT_FAILURES:
+            email.enrichment_status = "skipped"
+            replaced = False
+            if email.replacement_for_id is None:
+                from services.email_campaign.replenishment import add_replacement_lead
+                replaced = add_replacement_lead(db, email.campaign_id, email.id,
+                                                reason="enrichment_exhausted") is not None
+            outcomes.fail(db, email, "Apollo could not find email for this contact (already exhausted)",
+                          replaced=replaced)
+            db.commit()
             continue
 
         result = enrich_single_lead_classified(lead)
@@ -1023,16 +1038,31 @@ def _process_followups(db) -> tuple:
         db.commit()
 
         try:
-            result = send_gmail_email(
-                access_token=access_token,
-                to_email=fu.to_email,
-                subject=parent.subject,
-                body=body,
-                from_email=account.email_address,
-                thread_id=parent.thread_id,
-                in_reply_to_header=parent.message_id_header,
-                pixel_url=pixel_url,
-            )
+            try:
+                result = send_gmail_email(
+                    access_token=access_token,
+                    to_email=fu.to_email,
+                    subject=parent.subject,
+                    body=body,
+                    from_email=account.email_address,
+                    thread_id=parent.thread_id,
+                    in_reply_to_header=parent.message_id_header,
+                    pixel_url=pixel_url,
+                )
+            except GmailSendError as e:
+                # 404 on a thread reply: the user deleted the thread. Send it
+                # once as a fresh email rather than failing it (audit P46).
+                if e.status != 404 or not parent.thread_id:
+                    raise
+                logger.info("[FOLLOWUP] Thread gone for follow-up %d; sending without threadId", fu.id)
+                result = send_gmail_email(
+                    access_token=access_token,
+                    to_email=fu.to_email,
+                    subject=parent.subject,
+                    body=body,
+                    from_email=account.email_address,
+                    pixel_url=pixel_url,
+                )
 
             fu.status = "sent"
             fu.sent_at = datetime.utcnow()
@@ -1150,6 +1180,19 @@ def finish_campaign(db, campaign: Campaign, *, reason: str, final_status: str = 
     if campaign.completed_at is None:
         campaign.completed_at = now
 
+    # How it actually went (audit P01): 'failed' must never read as progress.
+    first = ((EmailSent.campaign_id == campaign.id) & (EmailSent.followup_number == 0)
+             & (EmailSent.is_test.isnot(True)))
+    first_total = db.query(func.count(EmailSent.id)).filter(first).scalar() or 0
+    first_delivered = db.query(func.count(EmailSent.id)).filter(
+        first, EmailSent.status.in_(["sent", "replied", "bounced"])).scalar() or 0
+    if final_status == "cancelled":
+        campaign.outcome = "cancelled"
+    elif first_total and first_delivered < DEGRADED_BELOW * first_total:
+        campaign.outcome = "degraded"
+    else:
+        campaign.outcome = "delivered"
+
     released = 0
     owner = db.query(Candidate.user_id).filter(Candidate.id == campaign.candidate_id).scalar()
     if unsent_paid and owner and campaign.credits_reserved is not None:
@@ -1158,12 +1201,8 @@ def finish_campaign(db, campaign: Campaign, *, reason: str, final_status: str = 
         released = _credits.release(db, owner, unsent_paid, release_reason,
                                     campaign=campaign, note=reason)
 
-    from database.models import OutreachOrder as _OO
-    order = None
-    if campaign.outreach_order_id:
-        order = db.get(_OO, campaign.outreach_order_id)
-    if order is None:
-        order = db.query(_OO).filter_by(campaign_id=campaign.id).first()
+    from services.order_links import order_for_campaign
+    order = order_for_campaign(db, campaign)
     if order is not None and order.status != "completed":
         order.status = "completed"
         log = list(order.action_log or [])
@@ -1178,6 +1217,20 @@ def finish_campaign(db, campaign: Campaign, *, reason: str, final_status: str = 
     ).scalar() or 0
     logger.info("[SENDER] Campaign %d %s (%s): sent=%d expired=%d released=%d",
                 campaign.id, final_status, reason, sent, len(unsent), released)
+
+    if campaign.outcome == "degraded":
+        try:
+            from services.reconcile import _tell_founders
+            owner_email = db.query(User.email).join(Candidate, Candidate.user_id == User.id).filter(
+                Candidate.id == campaign.candidate_id).scalar()
+            _tell_founders(
+                "campaign finished degraded",
+                f"Campaign {campaign.id} ({owner_email}) {final_status} with only {first_delivered} of "
+                f"{first_total} first emails delivered ({reason}). {released} unused credits were returned. "
+                "The customer was emailed the real numbers; consider reaching out.",
+            )
+        except Exception:
+            logger.exception("[SENDER] degraded-campaign alert failed for %d", campaign.id)
 
     if order is not None:
         try:

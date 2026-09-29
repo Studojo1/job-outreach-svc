@@ -6,6 +6,7 @@ flip a stranger's order to enriching / enrichment_complete and overwrite its
 leads_collected.
 """
 import pathlib
+from datetime import datetime
 import sys
 from unittest import mock
 
@@ -18,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from database.models import Base, Candidate, Lead, OutreachOrder
+from database.models import Base, Candidate, EnrichmentJob, Lead, OutreachOrder, User
 
 # routes_enrichment imports the payment module for credit refunds, which pulls
 # in the payment SDKs. Payments are not under test here.
@@ -36,10 +37,12 @@ def _jsonb_as_json(type_, compiler, **kw):  # pragma: no cover - test plumbing
 @pytest.fixture()
 def Session():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine, tables=[t.__table__ for t in (Candidate, Lead, OutreachOrder)])
+    Base.metadata.create_all(engine, tables=[t.__table__ for t in (User, Candidate, Lead, OutreachOrder, EnrichmentJob)])
     S = sessionmaker(bind=engine)
     s = S()
     s.add_all([
+        User(id="attacker", email="a@x", name="a", email_verified=True, created_at=datetime.utcnow(), updated_at=datetime.utcnow()),
+        User(id="victim", email="v@x", name="v", email_verified=True, created_at=datetime.utcnow(), updated_at=datetime.utcnow()),
         Candidate(id=1, user_id="attacker", resume_text="."),
         Lead(id=1, candidate_id=1, name="n", company="c"),
         OutreachOrder(id=10, user_id="victim", candidate_id=2, status="leads_ready", leads_collected=500),
@@ -51,11 +54,11 @@ def Session():
 
 
 def _run(Session, user_id, order_id, enrich_result=None):
-    enr._enrichment_jobs["j"] = {"status": "running"}
     with mock.patch.object(enr, "SessionLocal", Session), \
          mock.patch("services.enrichment.enrichment_service._enrich_single_lead", return_value=enrich_result), \
          mock.patch.object(enr.time, "sleep"), \
          mock.patch.object(enr, "capture"):
+        enr._enrichment_jobs["j"] = {"status": "running", "user_id": user_id}
         enr._run_enrichment_in_background("j", candidate_id=1, limit=1, user_id=user_id, order_id=order_id)
 
 

@@ -65,15 +65,10 @@ def get_or_create_active_order(
 
     # 1. Campaign-stage events: bind to the order that owns this campaign.
     if campaign_id is not None:
-        order = (
-            db.query(OutreachOrder)
-            .filter(
-                OutreachOrder.user_id == user_id,
-                OutreachOrder.campaign_id == campaign_id,
-            )
-            .order_by(OutreachOrder.created_at.asc())
-            .first()
-        )
+        from database.models import Campaign
+        from services.order_links import order_for_campaign
+        found = order_for_campaign(db, db.get(Campaign, campaign_id))
+        order = found if found is not None and found.user_id == user_id else None
 
     # 2. Fall back to the most recent non-completed order.
     if order is None:
@@ -242,8 +237,12 @@ def mark_stage(
 
     if candidate_id and not order.candidate_id:
         order.candidate_id = candidate_id
-    if campaign_id and not order.campaign_id:
-        order.campaign_id = campaign_id
+    if campaign_id:
+        # Link via campaigns.outreach_order_id; the order's own single pointer
+        # is no longer written (audit P03).
+        from database.models import Campaign
+        from services.order_links import link
+        link(db.get(Campaign, campaign_id), order)
     if email_account_id and not order.email_account_id:
         order.email_account_id = email_account_id
 
