@@ -22,7 +22,38 @@ logger = logging.getLogger(__name__)
 
 # ── Answer helpers ─────────────────────────────────────────────────────────
 
-def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[str]:
+# Words that mark typed text as a sentence rather than a list of titles or
+# places (SQ-07). "Founder's office, ideally at a fintech" is prose; "Data
+# Analyst, Business Analyst" and "Chandigarh, Jaipur" are lists.
+_PROSE_WORDS = {
+    "i", "i'm", "im", "me", "my", "want", "wanted", "would", "prefer", "preferably",
+    "ideally", "maybe", "like", "looking", "open", "something", "more", "not", "or",
+    "but", "also", "etc", "if", "at", "a", "an", "the", "role", "roles", "is", "are",
+}
+
+
+def _split_title_list(text: str) -> list[str]:
+    """Split a typed "Something else" answer into separate entries if it is a list.
+
+    SQ-07: a comma-separated list typed into the box ("Product Analyst, Data
+    Analyst") was saved as ONE merged title and sent to lead search as such.
+    Split only when every piece is short (4 words or fewer) and none reads as
+    prose; otherwise keep the text whole, as before.
+    """
+    pieces = [p.strip() for p in re.split(r"\s*,\s*", text) if p.strip()]
+    if len(pieces) < 2:
+        return [text]
+
+    def title_like(piece: str) -> bool:
+        words = piece.split()
+        return len(words) <= 4 and not any(w.lower().strip(".'!?") in _PROSE_WORDS for w in words)
+
+    return pieces if all(title_like(p) for p in pieces) else [text]
+
+
+def _parse_multi(
+    answer: str, known_options: list[str] | None = None, split_typed: bool = False,
+) -> list[str]:
     """Split a multi-select MCQ answer back into the options that were chosen.
 
     The frontend joins the selected option texts with ", " (MCQSelector pushes
@@ -42,6 +73,9 @@ def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[st
     since the join used exactly that separator. Where the caller knows the
     option list, we do better still and match the real option texts first, so
     even an option containing ", " survives.
+
+    split_typed: for target_role and location, a typed run that is a list of
+    short titles or places is split into entries (SQ-07); prose stays whole.
     """
     if not answer:
         return []
@@ -67,7 +101,7 @@ def _parse_multi(answer: str, known_options: list[str] | None = None) -> list[st
         def _flush_free():
             joined = ", ".join(p for p in free if p).strip(" ,")
             if joined:
-                found.append(joined)
+                found.extend(_split_title_list(joined) if split_typed else [joined])
             free.clear()
 
         i = 0
@@ -476,7 +510,7 @@ def _build_recommended_roles(
     # comma ("Product-Growth Generalist (AI-fluent, early-stage)"). Without the
     # option list the split turned it into two junk titles that went straight
     # into the Apollo person_titles filter (quiz audit Q40/Q42).
-    for t in _parse_multi(target_role, (answer_options or {}).get("target_role")):
+    for t in _parse_multi(target_role, (answer_options or {}).get("target_role"), split_typed=True):
         if t.lower() not in ("other", "skip"):
             _add(t, 0.95, "quiz")
 
@@ -785,7 +819,7 @@ def build_payload_from_answers(
     company_stage = answers.get("company_stage", "")
     career_goal   = answers.get("career_goal", "")
 
-    locations = _parse_multi(answers.get("location", ""), answer_options.get("location"))
+    locations = _parse_multi(answers.get("location", ""), answer_options.get("location"), split_typed=True)
     # Add resume city if not already covered
     if resume_city and resume_city not in locations and not locations:
         locations = [resume_city]
