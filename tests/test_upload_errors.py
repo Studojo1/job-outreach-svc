@@ -40,6 +40,18 @@ def test_a_parse_error_is_a_400_with_the_parsers_message(monkeypatch):
     assert "Please upload a PDF or DOCX" in e.value.detail
 
 
+def test_a_parser_crash_is_a_generic_500_not_a_400(monkeypatch):
+    """A bug in the parser is ours, not the student's: 500, no raw error text."""
+    def crash(*a):
+        raise KeyError("pdfminer internal state")
+
+    monkeypatch.setattr(rc, "parse_resume", crash)
+    with pytest.raises(HTTPException) as e:
+        _upload(MagicMock())
+    assert e.value.status_code == 500
+    assert "pdfminer" not in e.value.detail
+
+
 def test_a_database_failure_is_a_generic_500(monkeypatch):
     monkeypatch.setattr(rc, "parse_resume", lambda *a: ("resume text", {"name": "A"}))
     monkeypatch.setattr(rc, "find_reusable_candidate", lambda db, uid: None)
