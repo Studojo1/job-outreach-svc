@@ -70,6 +70,23 @@ def find_reusable_candidate(db: Session, user_id) -> Optional[Candidate]:
     )
 
 
+def find_identical_candidate_with_leads(db: Session, user_id, raw_text: str) -> Optional[Candidate]:
+    """The user's newest candidate for this exact resume that already has leads.
+
+    UC-Q14: re-uploading the same file after discovery made a new candidate
+    and ran discovery again (53 byte-identical repeats in 30 days, 73,689
+    redundant lead rows). The parser is deterministic for a text layer, so a
+    byte-identical upload yields identical text; compare that.
+    """
+    has_leads = db.query(Lead.id).filter(Lead.candidate_id == Candidate.id).exists()
+    return (
+        db.query(Candidate)
+        .filter(Candidate.user_id == user_id, Candidate.resume_text == raw_text, has_leads)
+        .order_by(Candidate.created_at.desc(), Candidate.id.desc())
+        .first()
+    )
+
+
 def reset_candidate_for_new_resume(candidate: Candidate, raw_text: str, preview: dict) -> None:
     """Point a reused candidate at a new resume and forget the old quiz.
 
@@ -173,6 +190,23 @@ async def upload_resume(
         )
         raise HTTPException(status_code=422, detail=NO_TEXT_MESSAGE)
 
+    # Same resume as a run that already has leads: send them back to it rather
+    # than creating a candidate and paying for discovery again (UC-Q14).
+    try:
+        existing = find_identical_candidate_with_leads(db, current_user.id, raw_text)
+    except Exception:
+        logger.warning("[UPLOAD] identical-resume lookup failed", exc_info=True)
+        existing = None
+    if existing is not None:
+        logger.info("[UPLOAD] user %s re-uploaded the resume of candidate %s, which has leads; reusing it",
+                    current_user.id, existing.id)
+        return {
+            "status": "success",
+            "candidate_id": existing.id,
+            "preview": preview,
+            "existing_results": True,
+        }
+
     try:
         new_candidate = find_reusable_candidate(db, current_user.id)
         if new_candidate is not None:
@@ -224,15 +258,30 @@ async def upload_resume(
     # Funnel: create / advance the user's OutreachOrder to stage 1.
     # This is the entry point to the funnel — every uploaded resume
     # produces an order row so we can see drop-off from here on.
-    from services.stage_tracking import safe_mark_stage
+    from services.stage_tracking import order_for_new_resume, safe_mark_stage
+    # UC-Q28: a new resume after leads either starts a new order (unpaid) or
+    # leaves the paid order on its leads; the client is told which.
+    order_candidate_id = None
+    try:
+        order_candidate_id = order_for_new_resume(db, str(current_user.id), new_candidate.id)
+    except Exception:
+        logger.exception("[UPLOAD] order_for_new_resume failed for user %s", current_user.id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     safe_mark_stage(db, str(current_user.id), "resume_uploaded",
                     candidate_id=new_candidate.id)
 
-    return {
+    body = {
         "status": "success",
         "candidate_id": new_candidate.id,
         "preview": preview,
     }
+    if order_candidate_id is not None:
+        # The paid order stays on this candidate's leads.
+        body["order_candidate_id"] = order_candidate_id
+    return body
 
 
 @router.post("/{candidate_id}/chat/stream")

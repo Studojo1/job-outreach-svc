@@ -12,7 +12,7 @@ campaign / email account as those resources come into existence.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -205,6 +205,51 @@ def promote_paid_order(order: Optional[OutreachOrder], reason: str) -> bool:
     order.updated_at = datetime.utcnow()
     logger.info("[STAGE] Advanced outreach_order %s (%s -> campaign_setup): %s", order.id, prev, reason)
     return True
+
+
+def order_for_new_resume(db: Session, user_id: str, candidate_id: int) -> Optional[int]:
+    """Keep the order and the browser on the same resume after a re-upload (UC-Q28).
+
+    Upload points the browser at the new candidate, but an order that already
+    generated leads is frozen on the old one (get_or_create_active_order), so
+    the two split: 7 new splits between 23 and 28 Sep. The rule now:
+
+    - Unpaid order with leads on another candidate: nothing is owed on it, so
+      the new resume starts a new order, bound to the new candidate. The old
+      order is left as it was (an abandoned attempt, as the funnel should see it).
+    - Paid order: its leads are what the student paid for, so it keeps them.
+      Returns that order's candidate id for the client to tell the student.
+
+    Returns None when the order and the new candidate already agree. Commits.
+    """
+    order = (
+        db.query(OutreachOrder)
+        .filter(OutreachOrder.user_id == user_id, OutreachOrder.status != "completed")
+        .order_by(OutreachOrder.created_at.desc())
+        .first()
+    )
+    if order is None or order.candidate_id in (None, candidate_id) or order.leads_generated_at is None:
+        return None
+    if order.payment_made_at is not None or order.status not in FROZEN_BEHIND_PAYMENT:
+        logger.info("[STAGE] order=%s is paid; keeps candidate=%s over re-upload candidate=%s",
+                    order.id, order.candidate_id, candidate_id)
+        return order.candidate_id
+    now = datetime.utcnow()
+    log = list(order.action_log or [])
+    log.append({"ts": now.isoformat(), "msg": f"Superseded: new resume uploaded (candidate {candidate_id})"})
+    order.action_log = log
+    new_order = OutreachOrder(
+        user_id=user_id, candidate_id=candidate_id, status="created",
+        # A strictly later created_at so "latest non-completed" picks this one.
+        created_at=max(now, (order.created_at or now)) + timedelta(microseconds=1),
+        action_log=[{"ts": now.isoformat(),
+                     "msg": f"Order created (re-upload after leads on candidate {order.candidate_id})"}],
+    )
+    db.add(new_order)
+    db.commit()
+    logger.info("[STAGE] user=%s re-uploaded after leads; new order=%s for candidate=%s (old order=%s)",
+                user_id, new_order.id, candidate_id, order.id)
+    return None
 
 
 def mark_stage(
