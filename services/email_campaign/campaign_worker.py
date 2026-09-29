@@ -20,6 +20,7 @@ import random
 import threading
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pytz
 from sqlalchemy import func
@@ -227,16 +228,20 @@ def compute_campaign_schedule(db, campaign_id: int, resume: bool = False):
                 (emails[-1].scheduled_at - emails[0].scheduled_at).days + 1)
 
 
+SEND_WINDOW_START_HOUR = 9
+SEND_WINDOW_END_HOUR = 17  # 5 PM local, as the setup page and scheduler say
+
+
 def _push_to_business_hours(dt_utc: datetime, tz) -> datetime:
-    """If dt_utc falls outside 9am-6pm in the given timezone, push it to the next 9am."""
+    """If dt_utc falls outside 9am-5pm in the given timezone, push it to the next 9am."""
     local = dt_utc.replace(tzinfo=pytz.utc).astimezone(tz)
     hour = local.hour
 
-    if 9 <= hour < 18:
+    if SEND_WINDOW_START_HOUR <= hour < SEND_WINDOW_END_HOUR:
         return dt_utc  # Already in business hours
 
     # Push to next 9am
-    if hour >= 18:
+    if hour >= SEND_WINDOW_END_HOUR:
         next_9am_local = local.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
     else:
         next_9am_local = local.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -245,6 +250,22 @@ def _push_to_business_hours(dt_utc: datetime, tz) -> datetime:
     next_9am_local = next_9am_local + timedelta(minutes=random.uniform(0, 15))
 
     return next_9am_local.astimezone(pytz.utc).replace(tzinfo=None)
+
+
+def _campaign_tz(campaign):
+    try:
+        return pytz.timezone(campaign.user_timezone or "Asia/Kolkata")
+    except pytz.UnknownTimeZoneError:
+        return pytz.timezone("Asia/Kolkata")
+
+
+def _deferred_to_send_window(campaign, now: datetime) -> Optional[datetime]:
+    """The next allowed send time if `now` is outside the campaign's 9-5 local
+    window, else None. Enforced at send time because follow-ups, replacements
+    and resumed campaigns never went through the scheduler: 251 emails went out
+    after 6 PM or before 7 AM in 21 days (audit PS-N16)."""
+    pushed = _push_to_business_hours(now, _campaign_tz(campaign))
+    return pushed if pushed != now else None
 
 
 def shift_schedule_forward(db, campaign_id: int, shift_seconds: float):
@@ -333,6 +354,63 @@ def _enrich_upcoming(db) -> int:
     return enriched_count
 
 
+# ── Paid-credit cap (audit PP-P26) ──────────────────────────────────────────
+# Nothing stopped a campaign sending past what was paid: campaign 124 kept
+# enriching and sending hundreds of unpaid emails, and 8 paused campaigns
+# would send 1,646 uncovered emails on resume. A campaign may deliver at most
+# credits_reserved - credits_released paid first touches (outcomes
+# .holds_paid_slot: bounce replacements are free and not counted).
+_DELIVERED = ("sending", "sent", "replied", "bounced")
+_COMMITTED = _DELIVERED + ("queued",)
+OVER_CAP_MESSAGE = "Beyond the credits paid for this campaign"
+
+
+def _paid_rows(db, campaign_id: int):
+    from sqlalchemy import or_
+    return db.query(EmailSent).filter(
+        EmailSent.campaign_id == campaign_id,
+        EmailSent.is_test.isnot(True),
+        func.coalesce(EmailSent.followup_number, 0) == 0,
+        or_(EmailSent.replacement_reason.is_(None), EmailSent.replacement_reason != "bounce"),
+    )
+
+
+def _paid_slots_in(db, campaign_id: int, statuses) -> int:
+    """Paid first touches in `statuses`. For _COMMITTED this also counts rows
+    already enriched but not yet generated: enrichment leaves status at
+    'pending_enrichment' (only enrichment_status changes), and the Apollo
+    frontload enriches days ahead, so without this it would pay Apollo for
+    rows the sender will refuse (review by studojo-a0)."""
+    from sqlalchemy import and_, or_
+    cond = EmailSent.status.in_(statuses)
+    if "queued" in statuses:
+        cond = or_(cond, and_(EmailSent.status == "pending_enrichment",
+                              EmailSent.enrichment_status == "enriched"))
+    return _paid_rows(db, campaign_id).filter(cond).with_entities(func.count(EmailSent.id)).scalar() or 0
+
+
+def _over_paid_cap(db, campaign, email, statuses) -> bool:
+    """True if sending (or enriching) `email` would exceed what was paid.
+    Campaigns with no reservation recorded (NULL or 0: legacy rows from
+    before reservations, e.g. prod campaigns 34, 42 and 78) are not capped
+    here; they need a per-campaign decision, not an automatic stop."""
+    if campaign is None or not campaign.credits_reserved:
+        return False
+    if not outcomes.holds_paid_slot(email):
+        return False
+    allowed = max(0, (campaign.credits_reserved or 0) - (campaign.credits_released or 0))
+    return _paid_slots_in(db, campaign.id, statuses) >= allowed
+
+
+def _retire_over_cap(email) -> None:
+    """Retire an email the campaign has no paid credit for. 'expired' is the
+    state cancel/finish use for unsent work, so a restart with new credits
+    can bring it back. Nothing was reserved for it, so nothing is released."""
+    email.status = "expired"
+    email.error_message = OVER_CAP_MESSAGE
+    email.status_changed_at = datetime.utcnow()
+
+
 def _enrich_one(db, email) -> bool:
     """Find the recipient for one pending email. True if it is now enriched.
 
@@ -340,6 +418,13 @@ def _enrich_one(db, email) -> bool:
     handled here, so the JIT loop and the Apollo frontload behave the same.
     """
     from services.enrichment.enrichment_service import enrich_single_lead_classified
+
+    # No Apollo spend on a row the campaign has no paid credit for (PP-P26).
+    # Here rather than in _enrich_upcoming so the frontload path is capped too.
+    if _over_paid_cap(db, db.get(Campaign, email.campaign_id), email, _COMMITTED):
+        _retire_over_cap(email)
+        db.commit()
+        return False
 
     lead = db.query(Lead).filter_by(id=email.lead_id).first()
     if not lead:
@@ -664,6 +749,20 @@ def _send_ready(db) -> tuple:
         if campaign.status != "running" and not email.is_test:
             continue
 
+        # Never more paid first touches than the campaign paid for (PP-P26).
+        if _over_paid_cap(db, campaign, email, _DELIVERED):
+            _retire_over_cap(email)
+            db.commit()
+            continue
+
+        # Never outside the recipient-facing 9-5 window (PS-N16).
+        if not email.is_test:
+            later = _deferred_to_send_window(campaign, now)
+            if later is not None:
+                email.scheduled_at = later
+                db.commit()
+                continue
+
         account = db.query(EmailAccount).filter_by(id=campaign.email_account_id).first()
         if not account:
             outcomes.pause_for_auth(db, campaign, email, "Email account not found: reconnect Gmail")
@@ -722,8 +821,10 @@ def _send_ready(db) -> tuple:
         access_token = token_cache[acct_id]
 
         # Lock this email so concurrent cycles cannot re-send it. Mint the
-        # open-tracking token now so it is persisted before the send.
+        # open-tracking token now so it is persisted before the send. The
+        # timestamp lets _reap_stuck_sending find it if the send never returns.
         email.status = "sending"
+        email.status_changed_at = datetime.utcnow()
         pixel_url = _ensure_tracking_token(email)
         db.commit()
 
@@ -807,6 +908,59 @@ def _send_ready(db) -> tuple:
                 })
 
     return sent_count, failed_count
+
+
+STUCK_SENDING_MINUTES = 15
+
+
+def _reap_stuck_sending(db) -> int:
+    """Recover emails left in 'sending' for over 15 minutes (audit PP-P36).
+
+    A hung Gmail call or a pod that died mid-send left the row in 'sending'
+    forever. Blindly re-queueing could email the recipient twice, so ask Gmail
+    first: if the Sent folder has a message to that address since the send
+    started, record it as sent; otherwise put it back in the queue. If Gmail
+    cannot be asked, leave it for the next cycle.
+    """
+    from services.email_campaign.gmail_send_service import find_sent_message
+    cutoff = datetime.utcnow() - timedelta(minutes=STUCK_SENDING_MINUTES)
+    stuck = (
+        db.query(EmailSent)
+        .filter(EmailSent.status == "sending",
+                func.coalesce(EmailSent.status_changed_at, EmailSent.scheduled_at) < cutoff)
+        .limit(20)
+        .all()
+    )
+    reaped = 0
+    for email in stuck:
+        campaign = db.get(Campaign, email.campaign_id)
+        account = db.get(EmailAccount, campaign.email_account_id) if campaign else None
+        if account is None or not email.to_email:
+            continue
+        started = email.status_changed_at or email.scheduled_at or cutoff
+        try:
+            token = _refresh_token_sync(account, db)
+            found = find_sent_message(token, email.to_email, int(started.timestamp()) - 60)
+        except Exception as e:  # noqa: BLE001 - try again next cycle
+            logger.warning("[REAPER] Could not check Gmail for stuck email %d: %s", email.id, e)
+            continue
+        if found is None:
+            continue  # Gmail search failed; do not guess
+        now = datetime.utcnow()
+        if found:
+            email.status = "sent"
+            email.sent_at = email.sent_at or started
+            email.message_id = found.get("id")
+            email.thread_id = found.get("threadId")
+            logger.warning("[REAPER] Email %d was delivered; marked sent", email.id)
+        else:
+            email.status = "queued"
+            email.scheduled_at = now
+            logger.warning("[REAPER] Email %d never left; re-queued", email.id)
+        email.status_changed_at = now
+        db.commit()
+        reaped += 1
+    return reaped
 
 
 # ── JIT Phase 4: Send Follow-up Emails (thread replies) ─────────────────────
@@ -932,6 +1086,14 @@ def _process_followups(db) -> tuple:
     token_cache: dict = {}
 
     for fu in pending:
+        # Follow-ups obey the same 9-5 window as first emails (PS-N16).
+        fu_campaign = db.get(Campaign, fu.campaign_id)
+        later = _deferred_to_send_window(fu_campaign, now) if fu_campaign else None
+        if later is not None:
+            fu.scheduled_at = later
+            db.commit()
+            continue
+
         # Fetch parent (Touch 1) for reply status, thread_id, Message-Id header
         parent = db.query(EmailSent).filter_by(id=fu.parent_email_id).first()
         if not parent:
@@ -1146,6 +1308,17 @@ def _check_campaign_completion(db):
         db.flush()
         db.expire_all()
 
+        # At its paid cap (PP-P26): retire the rest of its paid first touches
+        # now, so the campaign completes and settles instead of lingering
+        # until each row reaches the enrichment guard one by one.
+        if campaign.credits_reserved:
+            allowed = max(0, campaign.credits_reserved - (campaign.credits_released or 0))
+            if _paid_slots_in(db, campaign.id, _DELIVERED) >= allowed:
+                for row in _paid_rows(db, campaign.id).filter(
+                        EmailSent.status.in_(("pending_enrichment", "queued"))).all():
+                    _retire_over_cap(row)
+                db.commit()
+
         remaining = db.query(func.count(EmailSent.id)).filter(
             EmailSent.campaign_id == campaign.id,
             EmailSent.status.in_(["pending_enrichment", "queued", "followup_pending"]),
@@ -1271,11 +1444,174 @@ def _check_credit_exhaustion(db):
 
 # ── Reply & Bounce Check ─────────────────────────────────────────────────────
 
-def _check_replies(db):
-    """Phase 4: Check Gmail inbox for replies and bounces to sent outreach emails.
+FINISHED_REPLY_WINDOW_DAYS = 30  # keep reading replies this long after a campaign ends
 
-    Throttled to run every REPLY_CHECK_INTERVAL seconds (5 minutes).
-    Only checks accounts that have running or recently completed campaigns.
+
+def _reply_check_account_ids(db, now: datetime) -> list:
+    """Mailboxes whose replies we still read: running and PAUSED campaigns (a
+    paused campaign's recipients still reply, and those replies must cancel
+    follow-ups before a resume; audit NEW-03), plus campaigns that finished or
+    were cancelled in the last 30 days. Older finished ones are left alone, so
+    dead mailboxes stop being polled forever (PS-N14)."""
+    from sqlalchemy import and_, or_
+    cutoff = now - timedelta(days=FINISHED_REPLY_WINDOW_DAYS)
+    rows = (
+        db.query(Campaign.email_account_id)
+        .filter(or_(
+            Campaign.status.in_(("running", "paused")),
+            and_(Campaign.status.in_(("completed", "cancelled")),
+                 func.coalesce(Campaign.completed_at, Campaign.created_at) >= cutoff),
+        ))
+        .distinct()
+        .all()
+    )
+    return [r[0] for r in rows if r[0]]
+
+
+def check_mailbox_replies(db, account, after_epoch: Optional[int] = None) -> tuple:
+    """Read one mailbox's new inbox messages and record replies and bounces.
+
+    Returns (replies_found, bounces_found). Raises GmailAuthError when Google
+    refuses the token. Called by the 5-minute reply check, and directly when a
+    campaign is resumed or restarted, so a reply that arrived while it was
+    paused or cancelled cancels its follow-ups before any of them can send
+    (NEW-03, PS-N18).
+    """
+    replies_found = 0
+    bounces_found = 0
+    access_token = _refresh_token_sync(account, db)
+
+    # Look back to the last check (or 24 hours), or further when the caller
+    # asks: resuming or restarting a campaign scans from its first send.
+    if account.last_reply_check_at:
+        since = int(account.last_reply_check_at.timestamp())
+    else:
+        since = int((datetime.utcnow() - timedelta(hours=24)).timestamp())
+    if after_epoch is not None:
+        since = min(since, int(after_epoch))
+    after_epoch = since
+
+    # List new inbox messages since last check
+    messages = list_inbox_messages(access_token, after_epoch)
+    if messages is None:
+        # Gmail failed: keep last_reply_check_at so the next check re-reads
+        # this window instead of skipping it.
+        return replies_found, bounces_found
+
+    if not messages:
+        account.last_reply_check_at = datetime.utcnow()
+        db.commit()
+        return replies_found, bounces_found
+
+    # Get all thread_ids from sent emails for this account's campaigns
+    campaign_ids = [
+        row[0] for row in
+        db.query(Campaign.id).filter_by(email_account_id=account.id).all()
+    ]
+    sent_emails_by_thread = {}
+    if campaign_ids:
+        sent_emails = (
+            db.query(EmailSent)
+            .filter(
+                EmailSent.campaign_id.in_(campaign_ids),
+                EmailSent.thread_id.isnot(None),
+                EmailSent.status.in_(["sent", "replied", "bounced"]),
+            )
+            .all()
+        )
+        # Every row of a thread (Touch 1 and its follow-ups) shares
+        # its thread_id. Keying on it let a reply land on whichever
+        # row won, usually a follow-up, so the next follow-up still
+        # went to someone who had answered (audit P19: 89 replies on
+        # follow-ups, 48 chasers sent after a reply). Map each thread
+        # to its Touch 1 row, where the cancellation logic looks.
+        by_id = {e.id: e for e in sent_emails}
+        for e in sent_emails:
+            root = e
+            if (e.followup_number or 0) > 0 and e.parent_email_id:
+                root = by_id.get(e.parent_email_id) or db.get(EmailSent, e.parent_email_id) or e
+            current = sent_emails_by_thread.get(e.thread_id)
+            if current is None or (root.followup_number or 0) == 0:
+                sent_emails_by_thread[e.thread_id] = root
+
+    if not sent_emails_by_thread:
+        account.last_reply_check_at = datetime.utcnow()
+        db.commit()
+        return replies_found, bounces_found
+
+    # Process each inbox message
+    for msg_stub in messages:
+        msg_thread_id = msg_stub.get("threadId")
+        if not msg_thread_id or msg_thread_id not in sent_emails_by_thread:
+            continue  # Not a reply to our outreach
+
+        email_row = sent_emails_by_thread[msg_thread_id]
+        if email_row.status == "bounced":
+            continue  # Already processed as bounce
+
+        detail = get_message_detail(access_token, msg_stub["id"])
+        if not detail:
+            continue
+
+        # Skip our own sent messages (same thread includes our outbound email)
+        if detail["from_email"] and account.email_address in detail["from_email"]:
+            continue
+
+        # Check for bounce
+        if is_bounce_message(detail["from_email"]):
+            email_row.status = "bounced"
+            email_row.status_changed_at = datetime.utcnow()
+            email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
+            from services.email_campaign.suppression import suppress
+            suppress(db, email_row.to_email, f"bounce: {(email_row.bounce_reason or '')[:200]}",
+                     source="bounce")
+            if email_row.replacement_for_id is None:
+                from services.email_campaign.replenishment import add_replacement_lead
+                add_replacement_lead(db, email_row.campaign_id, email_row.id, reason="bounce")
+            db.commit()
+            bounces_found += 1
+            logger.info("[REPLY_CHECK] Bounce detected for email %d: %s",
+                        email_row.id, (email_row.bounce_reason or "")[:100])
+            continue
+
+        # First reply only — skip if already replied
+        if email_row.status == "replied":
+            continue
+
+        # Classify sentiment
+        classification = classify_reply_sentiment(detail["body_text"])
+        email_row.status = "replied"
+        email_row.reply_text = detail["body_text"][:10000]
+        email_row.reply_received_at = datetime.utcfromtimestamp(detail["internal_date"])
+        email_row.reply_sentiment = classification.get("sentiment", "neutral")
+        # "Remove me" in a reply is a removal request (Terms §6):
+        # nobody on Studojo writes to this address again.
+        from services.email_campaign.suppression import asks_removal, suppress
+        if asks_removal(detail["body_text"]):
+            suppress(db, email_row.to_email, f"reply asked to be removed (email {email_row.id})",
+                     source="reply")
+            logger.info("[REPLY_CHECK] Email %d: reply asked to be removed, address suppressed",
+                        email_row.id)
+        db.commit()
+        replies_found += 1
+        logger.info("[REPLY_CHECK] Reply detected for email %d: sentiment=%s",
+                    email_row.id, email_row.reply_sentiment)
+
+
+
+    # Update last check timestamp for this account
+    account.last_reply_check_at = datetime.utcnow()
+    db.commit()
+    return replies_found, bounces_found
+
+
+def _check_replies(db):
+    """Phase 4: check every relevant mailbox for replies and bounces.
+
+    Throttled per process (REPLY_CHECK_INTERVAL) and per mailbox through
+    email_accounts.last_reply_check_at, which lives in the database, so two
+    replicas no longer both poll every mailbox (PS-N14). Mailboxes whose token
+    Google revoked are skipped until the owner reconnects.
 
     Returns:
         Dict with keys: replies_found, bounces_found.
@@ -1289,21 +1625,15 @@ def _check_replies(db):
     _last_reply_check = now
     replies_found = 0
     bounces_found = 0
+    now_dt = datetime.utcnow()
+    due_before = now_dt - timedelta(seconds=REPLY_CHECK_INTERVAL)
 
     logger.info("[REPLY_CHECK] Starting reply check cycle")
 
     try:
-        # Find all email accounts with running or completed campaigns
-        running_account_ids = (
-            db.query(Campaign.email_account_id)
-            .filter(Campaign.status.in_(["running", "completed"]))
-            .distinct()
-            .all()
-        )
-        account_ids = [row[0] for row in running_account_ids if row[0]]
-
+        account_ids = _reply_check_account_ids(db, now_dt)
         if not account_ids:
-            logger.debug("[REPLY_CHECK] No active campaigns — skipping")
+            logger.debug("[REPLY_CHECK] No active campaigns, skipping")
             return {"replies_found": 0, "bounces_found": 0}
 
         for account_id in account_ids:
@@ -1312,138 +1642,30 @@ def _check_replies(db):
                 continue
             if not account.access_token and not account.refresh_token:
                 continue  # the user disconnected this mailbox; nothing to read with
+            if account.token_invalid_at is not None:
+                continue  # Google revoked it; waits for a reconnect
+            if account.last_reply_check_at and account.last_reply_check_at > due_before:
+                continue  # checked recently, possibly by the other replica
 
             try:
-                # Refresh access token
-                access_token = _refresh_token_sync(account, db)
-
-                # Compute after_epoch: use last_reply_check_at or 24 hours ago
-                if account.last_reply_check_at:
-                    after_epoch = int(account.last_reply_check_at.timestamp())
-                else:
-                    after_epoch = int((datetime.utcnow() - timedelta(hours=24)).timestamp())
-
-                # List new inbox messages since last check
-                messages = list_inbox_messages(access_token, after_epoch)
-
-                if not messages:
-                    account.last_reply_check_at = datetime.utcnow()
-                    db.commit()
-                    continue
-
-                # Get all thread_ids from sent emails for this account's campaigns
-                campaign_ids = [
-                    row[0] for row in
-                    db.query(Campaign.id).filter_by(email_account_id=account_id).all()
-                ]
-                sent_emails_by_thread = {}
-                if campaign_ids:
-                    sent_emails = (
-                        db.query(EmailSent)
-                        .filter(
-                            EmailSent.campaign_id.in_(campaign_ids),
-                            EmailSent.thread_id.isnot(None),
-                            EmailSent.status.in_(["sent", "replied", "bounced"]),
-                        )
-                        .all()
-                    )
-                    # Every row of a thread (Touch 1 and its follow-ups) shares
-                    # its thread_id. Keying on it let a reply land on whichever
-                    # row won, usually a follow-up, so the next follow-up still
-                    # went to someone who had answered (audit P19: 89 replies on
-                    # follow-ups, 48 chasers sent after a reply). Map each thread
-                    # to its Touch 1 row, where the cancellation logic looks.
-                    by_id = {e.id: e for e in sent_emails}
-                    for e in sent_emails:
-                        root = e
-                        if (e.followup_number or 0) > 0 and e.parent_email_id:
-                            root = by_id.get(e.parent_email_id) or db.get(EmailSent, e.parent_email_id) or e
-                        current = sent_emails_by_thread.get(e.thread_id)
-                        if current is None or (root.followup_number or 0) == 0:
-                            sent_emails_by_thread[e.thread_id] = root
-
-                if not sent_emails_by_thread:
-                    account.last_reply_check_at = datetime.utcnow()
-                    db.commit()
-                    continue
-
-                # Process each inbox message
-                for msg_stub in messages:
-                    msg_thread_id = msg_stub.get("threadId")
-                    if not msg_thread_id or msg_thread_id not in sent_emails_by_thread:
-                        continue  # Not a reply to our outreach
-
-                    email_row = sent_emails_by_thread[msg_thread_id]
-                    if email_row.status == "bounced":
-                        continue  # Already processed as bounce
-
-                    detail = get_message_detail(access_token, msg_stub["id"])
-                    if not detail:
-                        continue
-
-                    # Skip our own sent messages (same thread includes our outbound email)
-                    if detail["from_email"] and account.email_address in detail["from_email"]:
-                        continue
-
-                    # Check for bounce
-                    if is_bounce_message(detail["from_email"]):
-                        email_row.status = "bounced"
-                        email_row.status_changed_at = datetime.utcnow()
-                        email_row.bounce_reason = extract_bounce_reason(detail["body_text"])
-                        from services.email_campaign.suppression import suppress
-                        suppress(db, email_row.to_email, f"bounce: {(email_row.bounce_reason or '')[:200]}",
-                                 source="bounce")
-                        if email_row.replacement_for_id is None:
-                            from services.email_campaign.replenishment import add_replacement_lead
-                            add_replacement_lead(db, email_row.campaign_id, email_row.id, reason="bounce")
-                        db.commit()
-                        bounces_found += 1
-                        logger.info("[REPLY_CHECK] Bounce detected for email %d: %s",
-                                    email_row.id, (email_row.bounce_reason or "")[:100])
-                        continue
-
-                    # First reply only — skip if already replied
-                    if email_row.status == "replied":
-                        continue
-
-                    # Classify sentiment
-                    classification = classify_reply_sentiment(detail["body_text"])
-                    email_row.status = "replied"
-                    email_row.reply_text = detail["body_text"][:10000]
-                    email_row.reply_received_at = datetime.utcfromtimestamp(detail["internal_date"])
-                    email_row.reply_sentiment = classification.get("sentiment", "neutral")
-                    # "Remove me" in a reply is a removal request (Terms §6):
-                    # nobody on Studojo writes to this address again.
-                    from services.email_campaign.suppression import asks_removal, suppress
-                    if asks_removal(detail["body_text"]):
-                        suppress(db, email_row.to_email, f"reply asked to be removed (email {email_row.id})",
-                                 source="reply")
-                        logger.info("[REPLY_CHECK] Email %d: reply asked to be removed, address suppressed",
-                                    email_row.id)
-                    db.commit()
-                    replies_found += 1
-                    logger.info("[REPLY_CHECK] Reply detected for email %d: sentiment=%s",
-                                email_row.id, email_row.reply_sentiment)
-
-                # Update last check timestamp for this account
-                account.last_reply_check_at = datetime.utcnow()
-                db.commit()
-
-            except GmailAuthError as e:
-                # A mailbox whose Google access was revoked. Expected until its
-                # owner reconnects (they are emailed a reconnect link); a full
-                # traceback every 5 minutes per dead mailbox buried real errors.
-                logger.warning("[REPLY_CHECK] Skipping account %d, Gmail needs reconnecting: %s", account_id, e)
+                r, b = check_mailbox_replies(db, account)
+                replies_found += r
+                bounces_found += b
+            except GmailAuthError:
+                # Expected until the owner reconnects (they are emailed a
+                # reconnect link). Account id only, never the address.
+                logger.warning("[REPLY_CHECK] Skipping account %d, Gmail needs reconnecting", account_id)
                 continue
             except Exception as e:
                 logger.error("[REPLY_CHECK] Error checking account %d: %s", account_id, e, exc_info=True)
+                db.rollback()
                 continue
 
     except Exception as e:
         logger.error("[REPLY_CHECK] Reply check cycle failed: %s", e, exc_info=True)
 
     if replies_found > 0 or bounces_found > 0:
-        logger.info("[REPLY_CHECK] Cycle complete — replies=%d bounces=%d", replies_found, bounces_found)
+        logger.info("[REPLY_CHECK] Cycle complete: replies=%d bounces=%d", replies_found, bounces_found)
 
     return {"replies_found": replies_found, "bounces_found": bounces_found}
 
@@ -1542,21 +1764,26 @@ def _process_cycle():
         result["prewritten"] = _promote_prewritten(db)
         result["generated"] = _generate_pending(db)
 
-        # Phase 3: Send ready emails (Touch 1)
+        # Phase 3a: rows stuck in 'sending' (a hung send or a dead pod)
+        result["reaped"] = _reap_stuck_sending(db)
+
+        # Phase 3b: Check for replies and bounces BEFORE sending anything, so a
+        # reply that just arrived cancels its follow-up in this same cycle
+        # (audit NEW-03 / PS-N18: follow-ups used to go first). Throttled.
+        reply_result = _check_replies(db)
+        result["replies"] = reply_result.get("replies_found", 0)
+        result["bounces"] = reply_result.get("bounces_found", 0)
+
+        # Phase 3c: Send ready emails (Touch 1)
         sent, failed = _send_ready(db)
         result["sent"] = sent
         result["failed"] = failed
 
-        # Phase 3b: Send due follow-ups as Gmail thread replies
+        # Phase 3d: Send due follow-ups as Gmail thread replies
         fu_sent, fu_cancelled, fu_failed = _process_followups(db)
         result["followups_sent"] = fu_sent
         result["followups_cancelled"] = fu_cancelled
         result["followups_failed"] = fu_failed
-
-        # Phase 4: Check for replies and bounces (throttled to every 5 min)
-        reply_result = _check_replies(db)
-        result["replies"] = reply_result.get("replies_found", 0)
-        result["bounces"] = reply_result.get("bounces_found", 0)
 
         # Post-cycle checks (after reply check so replies cancel follow-ups promptly)
         _check_campaign_completion(db)
