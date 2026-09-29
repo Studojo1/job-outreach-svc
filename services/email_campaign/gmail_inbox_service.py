@@ -17,48 +17,53 @@ logger = get_logger(__name__)
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 
+MAX_INBOX_PAGES = 20  # 20 x 100 = 2,000 messages per check, far above any real inbox burst
+
+
 def list_inbox_messages(
     access_token: str,
     after_epoch: int,
-    max_results: int = 50,
-) -> List[Dict[str, str]]:
+    max_results: int = 100,
+) -> Optional[List[Dict[str, str]]]:
     """List inbox messages received after a given epoch timestamp.
 
-    Uses Gmail search query `in:inbox after:{epoch}` to only fetch new messages
-    since the last check — avoids re-processing and keeps API calls minimal.
-
-    Args:
-        access_token: Valid Gmail OAuth access token with gmail.readonly scope.
-        after_epoch: Unix epoch seconds — only return messages after this time.
-        max_results: Max messages to return (default 50).
+    Uses Gmail search query `in:inbox after:{epoch}` and follows nextPageToken:
+    reading only the first page (50) missed replies in busy inboxes and after a
+    long pause (audit NEW-03 / PS-N03).
 
     Returns:
-        List of dicts with keys: id, threadId.
-        Empty list if no messages or API error.
+        List of dicts with keys: id, threadId. Empty list if there are none.
+        None if the Gmail API failed, so the caller does NOT advance its
+        last-checked time and skip the messages it never saw.
     """
     headers = {"Authorization": f"Bearer {access_token}"}
-    params = {
+    params: Dict[str, Any] = {
         "q": f"in:inbox after:{after_epoch}",
         "maxResults": max_results,
     }
-
+    messages: List[Dict[str, str]] = []
     try:
-        resp = requests.get(
-            f"{GMAIL_API_BASE}/messages",
-            headers=headers,
-            params=params,
-            timeout=10,
-        )
-        if not resp.ok:
-            logger.error("[INBOX] Gmail list messages failed: %d %s", resp.status_code, resp.text[:200])
-            return []
-        data = resp.json()
-        messages = data.get("messages", [])
+        for _ in range(MAX_INBOX_PAGES):
+            resp = requests.get(
+                f"{GMAIL_API_BASE}/messages",
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.error("[INBOX] Gmail list messages failed: %d %s", resp.status_code, resp.text[:200])
+                return None
+            data = resp.json()
+            messages.extend(data.get("messages", []))
+            token = data.get("nextPageToken")
+            if not token:
+                break
+            params["pageToken"] = token
         logger.info("[INBOX] Found %d inbox messages after epoch %d", len(messages), after_epoch)
         return messages  # Each item: {id, threadId}
     except Exception as e:
         logger.error("[INBOX] Gmail list messages error: %s", e)
-        return []
+        return None
 
 
 def get_message_detail(access_token: str, message_id: str) -> Optional[Dict[str, Any]]:

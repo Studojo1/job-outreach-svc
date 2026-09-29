@@ -251,3 +251,22 @@ def test_status_counts_what_is_left(db, apollo):
     _rows(db, 20, 2, 3)
     left = apollo_frontload.remaining(db)
     assert (left["running_emails"], left["paused_emails"]) == (2, 3)
+
+
+def test_frontload_stops_at_the_campaigns_paid_credits(db, apollo):
+    # PP-P26 (review by studojo-a0): enrichment leaves status at
+    # pending_enrichment, so the cap has to count enriched-but-unsent rows or
+    # frontload would pay Apollo for rows the sender later refuses.
+    campaign = db.get(Campaign, 10)
+    campaign.credits_reserved = 2
+    db.commit()
+    rows = _rows(db, 10, 1, 5, first_in=timedelta(days=10))
+    _on(db)
+
+    apollo_frontload.run_batch(db)
+
+    for r in rows:
+        db.refresh(r)
+    assert sum(r.enrichment_status == "enriched" for r in rows) == 2
+    assert sum(r.status == "expired" for r in rows) == 3
+    assert apollo.calls == 2

@@ -1,5 +1,7 @@
 import sentry_sdk
-from fastapi import FastAPI
+import os
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes_candidate import router as candidate_router
@@ -13,10 +15,8 @@ from api.routes_orders import router as orders_router
 from api.routes_payment import router as payment_router
 from api.routes_admin import router as admin_router
 from api.routes_linkedin import router as linkedin_router
-from api.routes_leadstest import router as leadstest_router
 from api.routes_linkedin_automation import router as linkedin_automation_router
 from api.routes_partners import router as partners_router
-from api.routes_marketing import router as marketing_router
 from api.routes_mesa import router as mesa_router
 from api.routes_extension import router as extension_router
 from api.routes_account import router as account_router
@@ -26,6 +26,7 @@ from core.config import settings
 from core.logger import get_logger
 from core.middleware import RequestLoggingMiddleware, SSESafeGZipMiddleware
 from core.metrics import metrics_endpoint
+from api.dependencies import require_internal_caller
 
 logger = get_logger("job_outreach_tool.api.main")
 
@@ -39,11 +40,19 @@ if settings.SENTRY_DSN:
     )
     logger.info("Sentry initialized")
 
+# Interactive docs and the OpenAPI schema list every route, admin ones
+# included, and api.studojo.com served them to anyone (audit PS-N11). They are
+# off unless ENABLE_API_DOCS=1 (set it locally when you want /docs).
+_DOCS = os.getenv("ENABLE_API_DOCS", "").strip() == "1"
+
 app = FastAPI(
     title="Job Outreach Service",
     description="Clean Backend Architecture Implementation",
     version="1.0.0",
     root_path="/job-outreach",
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
 )
 
 # Middleware (order matters — outermost first)
@@ -81,10 +90,8 @@ app.include_router(orders_router, prefix="/api/v1")
 app.include_router(payment_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(linkedin_router, prefix="/api/v1")
-app.include_router(leadstest_router, prefix="/api/v1")
 app.include_router(linkedin_automation_router, prefix="/api/v1")
 app.include_router(partners_router, prefix="/api/v1")
-app.include_router(marketing_router, prefix="/api/v1")
 app.include_router(mesa_router, prefix="/api/v1")
 app.include_router(extension_router, prefix="/api/v1")
 app.include_router(account_router, prefix="/api/v1")
@@ -189,8 +196,9 @@ def tracking_pixel(token: str):
     return _FResponse(content=_TRACKING_PIXEL, media_type="image/gif", headers=_PIXEL_HEADERS)
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(require_internal_caller)])
 def metrics():
+    # Cluster-internal only: the labels include live route paths (PS-N11).
     return metrics_endpoint()
 
 

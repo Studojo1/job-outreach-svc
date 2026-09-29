@@ -127,7 +127,8 @@ def _resolve_effective_candidate(db: Session, user_id: str, candidate_id: int) -
     HAD completed it on another record. If the requested candidate is incomplete
     but the user has a more-recent complete candidate that has leads, switch to
     it and rebind the active order so the whole flow follows. Falls back to the
-    requested id when there's no better candidate (preserves original behaviour).
+    requested id when there's no better candidate, but only if the caller owns
+    it: a foreign candidate id is a 404, never passed through (audit PS-N17).
     """
     from database.models import Candidate, Lead
 
@@ -164,6 +165,8 @@ def _resolve_effective_candidate(db: Session, user_id: str, candidate_id: int) -
             logger.exception("[CAMPAIGN] failed to rebind active order to candidate %s", c.id)
         return c.id
 
+    if requested is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
     return candidate_id
 
 
@@ -303,8 +306,16 @@ async def api_create_campaign(
                 status_code=402,
                 detail=f"Insufficient credits. You need at least {MIN_CAMPAIGN_CREDITS} credits to start a campaign but only have {available} available.",
             )
-        # Cap at available credits — prevents error when setup was done at a higher tier than paid
-        required = min(requested, available)
+        # Size the campaign to everything the user can spend, capped at the
+        # leads they have. The client's lead_limit came from one browser's
+        # localStorage tier, so a 350/500 buyer launching elsewhere got 200
+        # (PS-N05), and refunded leftovers (1-49 credits) could never be
+        # spent on their own (PS-N07). `requested` is kept for the log only.
+        from database.models import Lead as _Lead
+        lead_count = db.query(_Lead.id).filter(_Lead.candidate_id == request.candidate_id).count()
+        required = min(available, lead_count) if lead_count else available
+        logger.info("[CAMPAIGN] sizing: requested=%s available=%s leads=%s -> %s",
+                    requested, available, lead_count, required)
         request.lead_limit = required
         # Reserve credits immediately so concurrent requests see the updated balance.
         # Commit (not flush) so the reservation is durable on its own: the
@@ -355,16 +366,18 @@ async def api_create_campaign(
                 body_template=body,
                 user_timezone=request.user_timezone,
             )
+        # The campaign exists from here on and its rows hold the reservation,
+        # so the generic error handler must never refund it again (PP-P32).
+        held, reserved = reserved, 0
         # Zero leads: nothing will ever send, so give the credits straight back
         # instead of leaving them on an empty campaign (P27).
         if not result.get("queued_messages"):
             empty = db.get(Campaign, result["campaign_id"])
             credits.attach_campaign(reservation, empty)
-            credits.release(db, current_user.id, reserved, credits.RELEASE_CREATE_FAILED,
+            credits.release(db, current_user.id, held, credits.RELEASE_CREATE_FAILED,
                             campaign=empty, note="campaign had no leads")
             empty.status = "cancelled"
             db.commit()
-            reserved = 0
             raise HTTPException(
                 status_code=400,
                 detail="No leads found for this campaign, so nothing was charged. Run lead discovery first.",
@@ -378,7 +391,6 @@ async def api_create_campaign(
         except Exception:
             db.rollback()
             logger.exception("[CAMPAIGN] could not attach reservation to campaign %s", result["campaign_id"])
-        reserved = 0
         # Funnel: prefer the user's *active* OutreachOrder (created at resume
         # upload) and advance it to campaign_setup. Falls back to creating a
         # new row only if none exists, so we don't fragment a user's history.
@@ -664,18 +676,19 @@ async def get_user_latest_campaign(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the user's most recent campaign (any status). Used to recover after page reload."""
+    """The user's running or paused campaign if there is one, else the most
+    recent (any status). Used to recover after a page reload (PS-N02)."""
     from database.models import Candidate
     # Find campaigns via user's candidates
     candidate_ids = [c.id for c in db.query(Candidate).filter_by(user_id=current_user.id).all()]
     if not candidate_ids:
         return {"campaign": None}
 
+    base = db.query(Campaign).filter(Campaign.candidate_id.in_(candidate_ids))
     campaign = (
-        db.query(Campaign)
-        .filter(Campaign.candidate_id.in_(candidate_ids))
-        .order_by(Campaign.created_at.desc())
-        .first()
+        base.filter(Campaign.status.in_(("running", "paused")))
+        .order_by(Campaign.created_at.desc()).first()
+        or base.order_by(Campaign.created_at.desc()).first()
     )
     if not campaign:
         return {"campaign": None}
@@ -785,6 +798,27 @@ import json as _json
 from sqlalchemy import text as _sql_text
 
 
+def _test_recipient(db, user_id: str, account, override: Optional[str]) -> str:
+    """Where a deliverability-test email goes: always the user's own inbox.
+
+    It used to fall back to lead.email, so a "test" sent five real emails to
+    hiring managers, who then got the campaign email as well (audit PS-N13).
+    An override is honoured only when it is one of the user's own addresses.
+    """
+    own = account.email_address
+    if override:
+        from database.models import EmailAccount, User as _User
+        wanted = override.strip().lower()
+        mine = {a.lower() for (a,) in db.query(EmailAccount.email_address)
+                .filter(EmailAccount.user_id == user_id).all() if a}
+        user_email = db.query(_User.email).filter(_User.id == user_id).scalar()
+        if user_email:
+            mine.add(user_email.lower())
+        if wanted in mine:
+            return override.strip()
+    return own
+
+
 def _save_test_launch_job(db, job_id: str, job: dict) -> None:
     db.execute(
         _sql_text(
@@ -873,7 +907,7 @@ def _run_test_launch_in_background(
 
     db = SessionLocal()
     job = _load_test_launch_job(db, job_id) or {
-        "status": "processing", "progress": "Starting...", "leads": [],
+        "user_id": str(user_id), "status": "processing", "progress": "Starting...", "leads": [],
         "total": 0, "emails_sent": 0, "emails_failed": 0, "error": "",
     }
 
@@ -899,12 +933,10 @@ def _run_test_launch_in_background(
 
         access_token = _refresh_token_sync(account, db)
 
-        # Test emails go to the user's own inbox. Use the override if set, else the
-        # lead's email, else fall back to the connected account so the test always
-        # delivers somewhere valid (raw, un-enriched leads have no email).
+        # Test emails go to the user's own inbox only, never to the lead.
         job["leads"] = []
         for idx, lead in enumerate(leads_db):
-            to_email = override_map.get(idx) or lead.email or account.email_address
+            to_email = _test_recipient(db, user_id, account, override_map.get(idx))
             job["leads"].append({
                 "lead_name": lead.name or "Unknown",
                 "company": lead.company or "",
@@ -917,7 +949,7 @@ def _run_test_launch_in_background(
         _persist()
 
         for idx, lead in enumerate(leads_db):
-            to_email = override_map.get(idx) or lead.email or account.email_address
+            to_email = _test_recipient(db, user_id, account, override_map.get(idx))
             job["progress"] = f"Sending {idx + 1}/{len(leads_db)}"
             job["leads"][idx]["status"] = "sending"
             _persist()
@@ -925,8 +957,7 @@ def _run_test_launch_in_background(
             try:
                 style = assign_style(lead, selected_styles)
                 subject, body = generate_email_for_lead(lead, candidate, style)
-                if idx in override_map:
-                    subject = f"[TEST] {subject}"
+                subject = f"[TEST] {subject}"
 
                 logger.info("[TEST_LAUNCH] Sending email %d/%d to %s", idx + 1, len(leads_db), to_email)
                 send_gmail_email(access_token=access_token, to_email=to_email, subject=subject, body=body, from_email=account.email_address)
@@ -997,7 +1028,7 @@ async def test_launch_campaign(
 
     initial_leads = []
     for idx, lead in enumerate(leads_preview):
-        to_email = override_map.get(idx) or lead.email or account.email_address
+        to_email = _test_recipient(db, current_user.id, account, override_map.get(idx))
         initial_leads.append({
             "lead_name": lead.name or "Unknown",
             "company": lead.company or "",
@@ -1009,9 +1040,11 @@ async def test_launch_campaign(
 
     # Create job with pre-populated leads and spawn background thread
     from datetime import datetime as _dt
-    job_id = str(uuid.uuid4())[:8]
+    # Full uuid4, and the owner is stored so only they can poll it (PS-N12).
+    job_id = uuid.uuid4().hex
     _cleanup_old_test_launch_jobs(db)
     _save_test_launch_job(db, job_id, {
+        "user_id": str(current_user.id),
         "status": "processing",
         "progress": "Starting...",
         "started_at": _dt.utcnow().isoformat(),
@@ -1047,10 +1080,14 @@ async def test_launch_campaign(
 
 
 @router.get("/test-launch/{job_id}/status")
-async def test_launch_status(job_id: str, db: Session = Depends(get_db)):
-    """Poll for test-launch job results with per-lead status."""
+async def test_launch_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Poll for test-launch job results with per-lead status. Owner only."""
     job = _load_test_launch_job(db, job_id)
-    if not job:
+    if not job or job.get("user_id") != str(current_user.id):
         raise HTTPException(status_code=404, detail="Job not found")
 
     return {

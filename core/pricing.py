@@ -32,12 +32,12 @@ PLANS: list[PlanTier] = [
     # ── LinkedIn-only ───────────────────────────────────────────────────────
     # Two cadences only. Weekly is the coupon-eligible plan (Free100 / Oauth100);
     # monthly never accepts coupons (enforced in routes_payment.py).
-    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,   800,   50000, duration_days=7),
-    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 2500,  180000, duration_days=30),
+    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,   800,   50000, duration_days=7, retired=True),
+    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 2500,  180000, duration_days=30, retired=True),
     # ── Both channels ───────────────────────────────────────────────────────
-    PlanTier("both_200",     "both",     "Starter", 200, 200, 3500,  299900),
-    PlanTier("both_350",     "both",     "Growth",  350, 350, 4500,  399900),
-    PlanTier("both_500",     "both",     "Scale",   500, 500, 7000,  499900),
+    PlanTier("both_200",     "both",     "Starter", 200, 200, 3500,  299900, retired=True),
+    PlanTier("both_350",     "both",     "Growth",  350, 350, 4500,  399900, retired=True),
+    PlanTier("both_500",     "both",     "Scale",   500, 500, 7000,  499900, retired=True),
 ]
 
 # Test-mode plans (~$1 / ₹90) — used when RAZORPAY_TEST_MODE=true
@@ -46,11 +46,11 @@ TEST_PLANS: list[PlanTier] = [
     PlanTier("email_200",    "email",    "Growth",  200, 0,   100,   9000),
     PlanTier("email_350",    "email",    "Pro",     350, 0,   100,   9000),
     PlanTier("email_500",    "email",    "Scale",   500, 0,   100,   9000),
-    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,  100,   9000, duration_days=7),
-    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 100,   9000, duration_days=30),
-    PlanTier("both_200",     "both",     "Starter", 200, 200, 100,   9000),
-    PlanTier("both_350",     "both",     "Growth",  350, 350, 100,   9000),
-    PlanTier("both_500",     "both",     "Scale",   500, 500, 100,   9000),
+    PlanTier("linkedin_weekly",  "linkedin", "Weekly",  0, 80,  100,   9000, duration_days=7, retired=True),
+    PlanTier("linkedin_monthly", "linkedin", "Monthly", 0, 350, 100,   9000, duration_days=30, retired=True),
+    PlanTier("both_200",     "both",     "Starter", 200, 200, 100,   9000, retired=True),
+    PlanTier("both_350",     "both",     "Growth",  350, 350, 100,   9000, retired=True),
+    PlanTier("both_500",     "both",     "Scale",   500, 500, 100,   9000, retired=True),
 ]
 
 # Convenience index
