@@ -1299,3 +1299,26 @@ def worker_apollo_credits_restored(note: str = "", db: Session = Depends(get_db)
     db.commit()
     requeued = requeue_credit_paused(db)
     return {"credit_paused_before": before, "requeued": requeued}
+
+
+@router.get("/worker/apollo-frontload", dependencies=[Depends(require_internal_caller)])
+def worker_apollo_frontload_status(db: Session = Depends(get_db)):
+    """Whether frontload is on, until when, and what is left per tier."""
+    from services.email_campaign import apollo_frontload
+
+    until = apollo_frontload.deadline(db)
+    return {"active": apollo_frontload.active(db), "until": until.isoformat() if until else None,
+            "remaining": apollo_frontload.remaining(db)}
+
+
+@router.post("/worker/apollo-frontload", dependencies=[Depends(require_internal_caller)])
+def worker_apollo_frontload_start(hours: float = 72, note: str = "", db: Session = Depends(get_db)):
+    """Look up every recipient still needed while Apollo works (hours=0 stops it)."""
+    from datetime import timedelta
+
+    from services.email_campaign import apollo_frontload
+
+    until = datetime.utcnow() + timedelta(hours=max(hours, 0))
+    apollo_frontload.start(db, until, note)
+    db.commit()
+    return {"active": hours > 0, "until": until.isoformat(), "remaining": apollo_frontload.remaining(db)}
