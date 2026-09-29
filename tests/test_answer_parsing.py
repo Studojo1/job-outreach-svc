@@ -263,3 +263,36 @@ def test_archetype_label_with_a_comma_becomes_one_target_role():
     titles = [r["title"] for r in payload["career_analysis"]["recommended_roles"]]
     assert titles[:2] == [label, "Strategy Analyst"], titles
     assert "early-stage)" not in titles
+
+
+# ── SQ-07: a typed list in "Something else" becomes separate entries ────────
+
+class _EmptyCandidate:
+    resume_profile = {}
+    parsed_json = {}
+
+
+def _payload(answers, options):
+    from services.candidate_intelligence.payload_builder import build_payload_from_answers
+    return build_payload_from_answers(answers=answers, candidate=_EmptyCandidate(), answer_options=options)
+
+
+def test_typed_role_list_is_split_into_titles():
+    p = _payload({"target_role": "Strategy Analyst, Product Analyst, Data Analyst"},
+                 {"target_role": ["Strategy Analyst", "Growth Marketing Manager", "Something else"]})
+    titles = [r["title"] for r in p["career_analysis"]["recommended_roles"]]
+    assert titles[:3] == ["Strategy Analyst", "Product Analyst", "Data Analyst"], titles
+
+
+def test_typed_location_list_is_split_into_places():
+    p = _payload({"location": "Bengaluru, Chandigarh, Jaipur"},
+                 {"location": ["Bengaluru", "Mumbai", "Remote", "Other"]})
+    assert p["preferences"]["locations"] == ["Bengaluru", "Chandigarh", "Jaipur"]
+
+
+def test_typed_prose_still_stays_whole_for_roles():
+    p = _payload({"target_role": "Strategy Analyst, Founder's office, ideally at a fintech"},
+                 {"target_role": ["Strategy Analyst", "Something else"]})
+    titles = [r["title"] for r in p["career_analysis"]["recommended_roles"]]
+    assert "Founder's office, ideally at a fintech" in titles
+    assert "Founder's office" not in titles

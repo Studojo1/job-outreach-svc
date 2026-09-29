@@ -57,11 +57,29 @@ _canary_verdict: Optional[tuple[datetime, bool]] = None
 _seen_restore_at: Optional[datetime] = None
 _restore_checked = False
 
+# Backoff for the per-cycle sweep (audit PP-P34). A 429 or a 5xx pauses a row
+# without marking the key exhausted, so has_valid_key() stays true and the
+# sweep used to requeue it every 30s cycle straight into the same error. Each
+# sweep that finds rows paused again waits twice as long before the next one,
+# up to the exhausted-key re-probe interval; a sweep that finds nothing paused,
+# or a restore signal, resets it.
+SWEEP_BACKOFF_BASE = timedelta(seconds=30)
+SWEEP_BACKOFF_MAX = timedelta(minutes=30)
+_sweep_backoff = SWEEP_BACKOFF_BASE
+_next_sweep_at: Optional[datetime] = None
+
+
+def _reset_sweep_backoff() -> None:
+    global _sweep_backoff, _next_sweep_at
+    _sweep_backoff = SWEEP_BACKOFF_BASE
+    _next_sweep_at = None
+
 
 def signal_credits_restored(db: Session, note: str = "") -> None:
     """Record that Apollo was topped up. Caller commits."""
     db.add(SystemEvent(event_type=CREDITS_RESTORED_EVENT, meta={"note": note} if note else None))
     apollo_keys.reset()
+    _reset_sweep_backoff()
 
 
 def _apply_restore_signal(db: Session) -> None:
@@ -79,6 +97,7 @@ def _apply_restore_signal(db: Session) -> None:
         return
     if latest is not None and (_seen_restore_at is None or latest > _seen_restore_at):
         apollo_keys.reset()
+        _reset_sweep_backoff()
         _seen_restore_at = latest
 
 
@@ -165,10 +184,16 @@ def requeue_credit_paused(db: Session, campaign_id: Optional[int] = None) -> int
     """Put credit_paused rows back to 'pending' if Apollo looks usable again.
 
     Pass campaign_id to scope to one campaign, or None for all (the per-cycle
-    sweep). Returns the number of rows requeued.
+    sweep). Returns the number of rows requeued. Only the all-campaigns sweep
+    is subject to the backoff; a scoped call is someone asking now.
     """
+    global _sweep_backoff, _next_sweep_at
     _apply_restore_signal(db)
     if not apollo_keys.has_valid_key():
+        return 0
+    sweep = campaign_id is None
+    now = datetime.utcnow()
+    if sweep and _next_sweep_at is not None and now < _next_sweep_at:
         return 0
 
     q = db.query(EmailSent).filter(EmailSent.enrichment_status == PAUSED)
@@ -176,7 +201,12 @@ def requeue_credit_paused(db: Session, campaign_id: Optional[int] = None) -> int
         q = q.filter(EmailSent.campaign_id == campaign_id)
     campaign_ids = {cid for (cid,) in q.with_entities(EmailSent.campaign_id).distinct()}
     if not campaign_ids:
+        if sweep:
+            _reset_sweep_backoff()
         return 0
+    if sweep:
+        _next_sweep_at = now + _sweep_backoff
+        _sweep_backoff = min(_sweep_backoff * 2, SWEEP_BACKOFF_MAX)
 
     affected = q.update(
         {EmailSent.enrichment_status: "pending", EmailSent.error_message: None},

@@ -104,7 +104,8 @@ def test_outage_mid_run_keeps_what_was_collected(monkeypatch):
     import services.shared.apollo_key_manager as km
     monkeypatch.setattr(km, "apollo_keys", _Keys())
 
-    def fake_paginate(filters, candidate_id, target_leads, db, collected, excluded_companies=None):
+    def fake_paginate(filters, candidate_id, target_leads, db, collected, excluded_companies=None,
+                      in_location_ids=None):
         if collected == 0:
             return 120  # original filters found some
         e = lc.ApolloTransientError("429")
