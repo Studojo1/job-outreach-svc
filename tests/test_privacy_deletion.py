@@ -305,3 +305,10 @@ def test_retention_runs_from_the_hourly_sweep(monkeypatch):
     s = sessionmaker(bind=eng)()
     launch_nudge.maybe_sweep(s)
     assert len(ran) == 1
+
+
+def test_emailer_opt_out_table_is_classified():
+    # emailer-service creates marketing_opt_outs (user_id, email). Unclassified,
+    # it made every self-serve deletion refuse with 503 on staging.
+    from services.account_deletion import DELETE, KEEP
+    assert "marketing_opt_outs" in DELETE and "marketing_opt_outs" not in KEEP
