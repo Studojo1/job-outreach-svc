@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from database.models import Base, Candidate, Lead, LeadScore
+from database.models import Base, Campaign, Candidate, Lead, LeadScore, UserCredit
 from api.routes_candidate import get_candidate_leads, get_latest_candidate
 
 
@@ -30,7 +30,7 @@ def _jsonb_as_json(type_, compiler, **kw):  # pragma: no cover - test plumbing
 def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(
-        engine, tables=[t.__table__ for t in (Candidate, Lead, LeadScore)]
+        engine, tables=[t.__table__ for t in (Candidate, Lead, LeadScore, UserCredit, Campaign)]
     )
     session = sessionmaker(bind=engine)()
     session.add(Candidate(id=1, user_id="u1", resume_text="..."))

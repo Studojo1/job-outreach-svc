@@ -291,6 +291,10 @@ def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
         raise RuntimeError(f"Apollo key exhausted: {result.error_detail}")
     return None
 
+# Advisory-lock namespace for enrich_preview_leads (plus candidate id).
+PREVIEW_LOCK_NS = 0x50524556 << 20
+
+
 def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
     """Immediately enrich the first N unenriched leads for a candidate.
 
@@ -303,8 +307,20 @@ def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
         candidate_id: The candidate whose leads to enrich.
         n: Number of leads to enrich (default 15 — enough for 5 test emails + buffer).
     """
-    from database.session import SessionLocal
+    from database.session import SessionLocal, engine
     from database.models import LeadScore
+    from sqlalchemy import text
+
+    # One run per candidate across all replicas: concurrent order updates each
+    # started a thread and fanned out paid Apollo reveals (audit PS-N08). The
+    # lock lives on its own connection because the ORM session may hand its
+    # connection back to the pool after each commit.
+    lock_key = PREVIEW_LOCK_NS + int(candidate_id)
+    lock_conn = engine.connect()
+    if not lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_key}).scalar():
+        logger.info("[PREVIEW-ENRICH] Already running for candidate %d, skipping", candidate_id)
+        lock_conn.close()
+        return
 
     db = SessionLocal()
     try:
@@ -313,6 +329,9 @@ def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
             .filter(
                 Lead.candidate_id == candidate_id,
                 Lead.email.is_(None),
+                # Never re-reveal a lead Apollo already failed on.
+                (Lead.enrichment_fail_count.is_(None)) | (Lead.enrichment_fail_count == 0),
+                (Lead.status.is_(None)) | (Lead.status != "no_email"),
             )
             .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
             .order_by(LeadScore.overall_score.desc().nullslast(), Lead.id.asc())
@@ -340,6 +359,11 @@ def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
                     enriched += 1
                     logger.info("[PREVIEW-ENRICH] Enriched lead %d (%s) -> %s",
                                 lead.id, lead.name, result["email"])
+                else:
+                    # Count the miss like the campaign worker does, so the next
+                    # order update does not pay for the same lookup again.
+                    lead.enrichment_fail_count = (lead.enrichment_fail_count or 0) + 1
+                    db.commit()
             except Exception as e:
                 logger.warning("[PREVIEW-ENRICH] Failed to enrich lead %d: %s", lead.id, e)
 
@@ -352,4 +376,8 @@ def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
                      candidate_id, e)
     finally:
         db.close()
+        try:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
+        finally:
+            lock_conn.close()
 
