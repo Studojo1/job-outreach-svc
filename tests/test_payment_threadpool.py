@@ -19,7 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from api import routes_payment
 from api.dependencies import get_current_user
-from database.models import Base, CreditLedger, OutreachOrder, PaymentOrder, User, UserCredit
+from database.models import Base, CreditLedger, OutreachOrder, PaymentOrder, SystemEvent, User, UserCredit
 from database.session import get_db
 
 
@@ -34,7 +34,7 @@ NOW = datetime(2026, 9, 29, 12, 0, 0)
 @pytest.fixture()
 def env(monkeypatch):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine, tables=[t.__table__ for t in (User, OutreachOrder, PaymentOrder, UserCredit, CreditLedger)])
+    Base.metadata.create_all(engine, tables=[t.__table__ for t in (User, OutreachOrder, PaymentOrder, UserCredit, CreditLedger, SystemEvent)])
     S = sessionmaker(bind=engine)
     s = S()
     s.add(User(id="u", email="u@x.com", name="U", email_verified=True, created_at=NOW, updated_at=NOW))
