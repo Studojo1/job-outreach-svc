@@ -11,8 +11,9 @@ to PER_CYCLE extra leads, in this order:
   1. unsent emails in running campaigns, soonest first;
   2. unsent emails in paused campaigns (they need it when resumed);
   3. a stock of backup leads for running campaigns (about BUFFER_SHARE of
-     their unsent emails, within the replacement cap), so a no-match or a
-     bounce can still be replaced once Apollo is gone;
+     their unsent emails, within the replacement cap and the campaign's
+     unused paid credits), so a no-match or a bounce can still be replaced
+     once Apollo is gone;
   4. paid users who have not launched: their best-scored leads, as many as
      their available credits will buy, so a campaign created later starts
      with its recipients already known.
@@ -123,6 +124,8 @@ def _unused_pool(db: Session, candidate_id: int, exclude_campaign_id: Optional[i
 
 
 def _buffer_targets(db: Session, limit: int) -> list[Lead]:
+    from services.email_campaign.campaign_worker import _COMMITTED, _paid_slots_in
+
     out: list[Lead] = []
     for c in db.query(Campaign).filter(Campaign.status == "running").order_by(Campaign.id):
         rows = db.query(EmailSent).filter(EmailSent.campaign_id == c.id).all()
@@ -131,6 +134,12 @@ def _buffer_targets(db: Session, limit: int) -> list[Lead]:
         cap_left = math.ceil(initial * REPLACEMENT_CAP_PERCENT) - sum(1 for r in rows if r.replacement_for_id)
         unsent = sum(1 for r in rows if r.status in UNSENT)
         want = min(max(cap_left, 0), math.ceil(unsent * BUFFER_SHARE))
+        if c.credits_reserved:
+            # A replacement needs a paid slot (PP-P26: add_replacement_lead
+            # refuses one at the cap), so stock no more than the slots left.
+            paid_left = (c.credits_reserved - (c.credits_released or 0)
+                         - _paid_slots_in(db, c.id, _COMMITTED))
+            want = min(want, max(paid_left, 0))
         if want <= 0:
             continue
         pool = _unused_pool(db, c.candidate_id, exclude_campaign_id=c.id).limit(want).all()
