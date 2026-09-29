@@ -563,11 +563,14 @@ def _store_people(
     db: Session,
     leads_collected: int,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Parse, deduplicate, and store a batch of Apollo people. Returns updated count.
 
     Enforces a per-company cap of MAX_LEADS_PER_COMPANY to ensure diversity.
     excluded_companies: company names flagged by the probe loop LLM as hard mismatches.
+    in_location_ids: when given, the ids of stored leads are added to it. The
+    caller passes it only for a search filtered on the candidate's locations.
     """
     from sqlalchemy import func
 
@@ -640,6 +643,8 @@ def _store_people(
         )
         db.add(new_lead)
         db.flush()
+        if in_location_ids is not None:
+            in_location_ids.add(new_lead.id)
         leads_collected += 1
         company_counts[company_key] = company_counts.get(company_key, 0) + 1
 
@@ -653,11 +658,16 @@ def _paginate_filters(
     db: Session,
     leads_collected: int,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Paginate through all Apollo pages for a given filter set.
 
     Returns cumulative leads_collected.
     """
+    # Apollo filtered these people on the candidate's cities, so they are in
+    # one; stages that dropped person_locations prove nothing (UC-Q04).
+    if not filters.person_locations:
+        in_location_ids = None
     page = 1
     while leads_collected < target_leads:
         logger.info("Paginating page %d (collected: %d/%d)", page, leads_collected, target_leads)
@@ -675,6 +685,7 @@ def _paginate_filters(
         leads_collected = _store_people(
             people, candidate_id, target_leads, db, leads_collected,
             excluded_companies=excluded_companies,
+            in_location_ids=in_location_ids,
         )
 
         try:
@@ -695,6 +706,7 @@ def collect_leads(
     target_leads: int,
     db: Session,
     excluded_companies: list[str] | None = None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     """Execute iterative Apollo search logic until target_leads are secured.
 
@@ -710,6 +722,9 @@ def collect_leads(
 
     excluded_companies: company names flagged by probe-loop LLM as hard mismatches —
     skipped even when Apollo returns them during full collection.
+
+    in_location_ids: optional set that receives the ids of leads found while
+    person_locations was still applied, for location scoring (UC-Q04).
     """
     # Fail fast when Apollo has no usable credentials. Without this the run walks
     # every loosening stage making doomed calls, then reports "0 leads" several
@@ -721,7 +736,9 @@ def collect_leads(
         )
 
     try:
-        return _collect_in_stages(filters, candidate_id, target_leads, db, excluded_companies)
+        return _collect_in_stages(
+            filters, candidate_id, target_leads, db, excluded_companies, in_location_ids,
+        )
     except ApolloTransientError as e:
         # Apollo went down mid-run. Keep what was stored rather than walking
         # the remaining stages against an outage; only a run with nothing at
@@ -739,6 +756,7 @@ def _collect_in_stages(
     target_leads: int,
     db: Session,
     excluded_companies: list[str] | None,
+    in_location_ids: set[int] | None = None,
 ) -> int:
     # Phase 1: Original filters — paginate fully
     logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
@@ -746,6 +764,7 @@ def _collect_in_stages(
     leads_collected = _paginate_filters(
         filters, candidate_id, target_leads, db, 0,
         excluded_companies=excluded_companies,
+        in_location_ids=in_location_ids,
     )
 
     logger.info("[PHASE1] Original filters collected %d/%d leads", leads_collected, target_leads)
@@ -770,6 +789,7 @@ def _collect_in_stages(
             leads_collected = _paginate_filters(
                 loose_filters, candidate_id, target_leads, db, leads_collected,
                 excluded_companies=excluded_companies,
+                in_location_ids=in_location_ids,
             )
 
             logger.info(

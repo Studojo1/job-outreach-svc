@@ -146,8 +146,14 @@ class DiscoveryRequest(BaseModel):
     filters: Optional[LeadFilter] = None
 
 
-def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
-    """Score all unscored leads for a candidate and store LeadScore records."""
+def _score_candidate_leads(
+    db: Session, candidate: Candidate, in_location_ids: set[int] | None = None,
+) -> int:
+    """Score all unscored leads for a candidate and store LeadScore records.
+
+    in_location_ids: leads that discovery found under the candidate's
+    person_locations filter (UC-Q04; Apollo returns no city to score on).
+    """
     parsed = candidate.parsed_json or {}
     career = parsed.get("career_analysis", {})
     prefs = parsed.get("preferences", {})
@@ -214,6 +220,7 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
             "linkedin_url": lead.linkedin_url,
             "company_domain": lead.company_domain,
             "company_description": lead.company_description,
+            "in_preferred_location": lead.id in (in_location_ids or ()),
         }
         lead_dicts.append(d)
         lead_id_map[lead.id] = lead
@@ -477,7 +484,9 @@ def _score_candidate_leads(db: Session, candidate: Candidate) -> int:
     return count
 
 
-def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
+def _score_candidate_leads_sync(
+    candidate_id: int, user_id: str, in_location_ids: set[int] | None = None,
+) -> int:
     """Opens its own DB session, runs Phase 1 (heuristic) + Phase 3 (justification).
 
     Called via asyncio.to_thread from the search endpoint so scoring completes
@@ -491,7 +500,7 @@ def _score_candidate_leads_sync(candidate_id: int, user_id: str) -> int:
         if not candidate:
             logger.warning("[SCORE_SYNC] candidate %d not found", candidate_id)
             return 0
-        scored_count = _score_candidate_leads(db, candidate)
+        scored_count = _score_candidate_leads(db, candidate, in_location_ids)
         logger.info("[SCORE_SYNC] candidate %d: scored+justified %d leads", candidate_id, scored_count)
     except Exception as e:
         logger.error("[SCORE_SYNC] failed for candidate %d: %s", candidate_id, e, exc_info=True)
@@ -787,6 +796,7 @@ async def search_leads(
         logger.info(f"[LeadSearch] Filter generation + probe: {(t_filter - t_start)*1000:.0f}ms")
 
         # Run blocking Apollo API calls in a thread to avoid blocking the event loop
+        in_location_ids: set[int] = set()
         count = await asyncio.to_thread(
             collect_leads,
             filters=filters,
@@ -794,6 +804,7 @@ async def search_leads(
             target_leads=request.target_leads,
             db=db,
             excluded_companies=probe_exclusions or None,
+            in_location_ids=in_location_ids,
         )
 
         t_collect = time.perf_counter()
@@ -833,7 +844,7 @@ async def search_leads(
             # Leads are stored; the order is ready for the results page.
             safe_advance_discovery_status(db, str(current_user.id), candidate.id, "leads_ready")
             background_tasks.add_task(
-                _score_candidate_leads_sync, candidate.id, str(current_user.id)
+                _score_candidate_leads_sync, candidate.id, str(current_user.id), in_location_ids
             )
             background_tasks.add_task(_run_company_intel_bg, candidate.id)
 
