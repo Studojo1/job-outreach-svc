@@ -256,7 +256,7 @@ def score_and_select_leads(
       - _company_fit_score: LLM-evaluated company fit (0-15 pts from 1-10 LLM rating)
 
     company_fit_scores: dict mapping company_name_lower → 1-10 LLM fit score.
-    Missing entries default to 5 (neutral = 7.5 pts).
+    Leads whose company has no entry are scored on the heuristic alone.
     """
     if not leads:
         return []
@@ -390,6 +390,12 @@ def score_and_select_leads(
 
         # --- 5. Location Relevance (0-10) ---
         l_score = _score_location(location, pref_locations)
+        # UC-Q04: Apollo's people search never returns a person's city (0 of
+        # 65k recent leads had one), so the line above scored 0 for everyone.
+        # A lead found under a person_locations filter is known to be in one of
+        # the candidate's cities, which is worth the same as a city match.
+        if not location and lead.get("in_preferred_location"):
+            l_score = 10
 
         # --- 6. Dream Company Bonus (0 or +10) ---
         # Dream companies are protected — they get a +10 bonus AND override
@@ -441,14 +447,15 @@ def score_and_select_leads(
             elif wants_enterprise and is_tiny:
                 size_penalty = -10  # user wants large company, lead is at tiny startup
 
-        # --- 10. LLM company intelligence rating (1-10 scale, default 2.7 = unverified) ---
-        # Default is intentionally low: unverified companies must earn their rank via the
-        # heuristic, not float up on a neutral baseline. Only LLM-evaluated companies get
-        # the full 60% LLM weight working in their favour.
-        llm_rating = 2.7
+        # --- 10. LLM company intelligence rating (1-10 scale), only when one exists ---
+        # UC-Q04: this used to default every unrated company to 2.7 and blend it
+        # in at 60%, and discovery never passes ratings, so 60% of every score
+        # was the same constant and 98% of scores sat in a 16-57 band. Unrated
+        # leads now rank on the heuristic alone; a real rating still blends in.
+        llm_rating = None
         if not is_dream:
             lead_company_lower = (lead.get("company") or "").lower().strip()
-            llm_rating = (company_fit_scores or {}).get(lead_company_lower, 2.7)
+            llm_rating = (company_fit_scores or {}).get(lead_company_lower)
 
         # Heuristic score: all dimension scores without LLM contribution
         heuristic_raw = (
@@ -466,11 +473,13 @@ def score_and_select_leads(
         heuristic_clamped = max(-60, min(heuristic_raw, 100))
         heuristic_normalized = (heuristic_clamped + 60) * (100 / 160)
 
-        # Normalize LLM rating to [0, 100]
-        llm_normalized = (llm_rating / 10) * 100
-
-        # 40% heuristic, 60% LLM company intelligence
-        normalized_score = round(0.4 * heuristic_normalized + 0.6 * llm_normalized, 1)
+        if llm_rating is not None:
+            # Normalize LLM rating to [0, 100]; 40% heuristic, 60% company intelligence
+            llm_normalized = (llm_rating / 10) * 100
+            normalized_score = round(0.4 * heuristic_normalized + 0.6 * llm_normalized, 1)
+        else:
+            llm_normalized = 0
+            normalized_score = round(heuristic_normalized, 1)
 
         # Dream-company override: floor at 65 so dream matches are always visible
         if is_dream and normalized_score < 65:
