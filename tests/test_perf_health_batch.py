@@ -243,3 +243,35 @@ def test_gmail_check_honours_email_account_id(gmail_db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         _call(gmail_db, account_id=3)
     assert exc.value.status_code == 404
+
+
+# ── UC-Q40: leads_viewed only counts orders from when it was tracked ─────────
+
+def test_funnel_leads_viewed_counts_only_tracked_orders(db):
+    from api.routes_admin import _funnel_aggregate
+    from database.models import OutreachOrder
+    Base.metadata.create_all(db.info["engine"], tables=[OutreachOrder.__table__])
+    now = datetime(2026, 9, 1)
+    for uid in ("u3", "u4", "u5"):
+        db.add(User(id=uid, email=f"{uid}@x.com", name=uid, created_at=now, updated_at=now))
+    gen = datetime(2026, 9, 20)
+    # Before tracking: three users generated leads, none could have leads_viewed_at.
+    for uid in ("u1", "u2", "u3"):
+        db.add(OutreachOrder(user_id=uid, created_at=datetime(2026, 9, 20), resume_uploaded_at=gen,
+                             quiz_completed_at=gen, leads_generated_at=gen))
+    # After: two generated leads, one viewed them and one then reached payment.
+    after = datetime(2026, 9, 27, 6, 0)
+    db.add(OutreachOrder(user_id="u4", created_at=after, resume_uploaded_at=after, quiz_completed_at=after,
+                         leads_generated_at=after, leads_viewed_at=after, payment_page_reached_at=after))
+    db.add(OutreachOrder(user_id="u5", created_at=after, resume_uploaded_at=after, quiz_completed_at=after,
+                         leads_generated_at=after))
+    db.commit()
+    funnel = {s["stage"]: s for s in _funnel_aggregate(db)}
+    lv = funnel["leads_viewed"]
+    assert lv["users_reached"] == 1
+    assert (lv["drop_off_from_prev"], lv["drop_off_pct_from_prev"]) == (1, 50.0)  # vs 2 post-cutoff, not 5
+    assert "since 27 Sep" in lv["label"] and lv["counted_since"].startswith("2026-09-27T05:00")
+    # Next stage compares with the all-time leads_generated count (5), not the gated one.
+    pay = funnel["payment_page_reached"]
+    assert funnel["leads_generated"]["users_reached"] == 5
+    assert (pay["users_reached"], pay["drop_off_from_prev"]) == (1, 4)

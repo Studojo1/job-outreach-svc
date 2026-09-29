@@ -110,6 +110,89 @@ def _meaningful_ts(order, fallback_dt) -> str | None:
     return ts.isoformat() if ts else None
 
 
+# UC-Q40: leads_viewed_at is only written since the results-page ping shipped
+# (27 Sep 2026 05:00 UTC). Counting it over all orders shows every earlier
+# user as "never viewed their leads", so that stage covers newer orders only.
+LEADS_VIEWED_TRACKED_SINCE = datetime(2026, 9, 27, 5, 0)  # naive UTC, like created_at
+_DATE_GATED_STAGES = {"leads_viewed": LEADS_VIEWED_TRACKED_SINCE}
+
+
+def _funnel_aggregate(db: Session) -> list[dict]:
+    """Funnel chart rows for /overview.
+
+    MONOTONIC counting: a user is counted at stage N if they have a timestamp
+    for stage N OR any later main-flow stage. This guarantees the chart is
+    provably non-increasing (you can't have more users at a later stage than
+    at an earlier one), and corrects for backfill misses where a downstream
+    timestamp is set but an upstream one isn't.
+
+    UC-Q40: a date-gated stage counts only orders created on or after its
+    cutoff, its drop-off is against the previous stage over those same
+    orders, and the next stage's drop-off skips it.
+    """
+    from sqlalchemy import or_
+
+    def reached(i: int, since: datetime | None = None) -> int:
+        # "this stage or any later" — covers backfill gaps
+        cols_or_later = [getattr(OutreachOrder, c) for _, _, c in MAIN_FLOW_STAGES[i:]]
+        q = db.query(func.count(func.distinct(OutreachOrder.user_id))).filter(
+            or_(*[c.isnot(None) for c in cols_or_later])
+        )
+        if since is not None:
+            q = q.filter(OutreachOrder.created_at >= since)
+        return q.scalar() or 0
+
+    def drop(prev: int | None, cur: int) -> tuple[int | None, float | None]:
+        if prev is None or prev <= 0:
+            return None, None
+        d = max(prev - cur, 0)
+        return d, round((d / prev) * 100, 1)
+
+    funnel = []
+    prev_count: int | None = None
+    for i, (key, label, _column) in enumerate(MAIN_FLOW_STAGES):
+        since = _DATE_GATED_STAGES.get(key)
+        if since is not None:
+            users_reached = reached(i, since)
+            drop_off, drop_off_pct = drop(reached(i - 1, since) if i > 0 else None, users_reached)
+            funnel.append({
+                "stage": key,
+                "label": f"{label} (orders since {since.day} {since:%b})",
+                "users_reached": users_reached,
+                "drop_off_from_prev": drop_off,
+                "drop_off_pct_from_prev": drop_off_pct,
+                "counted_since": since.isoformat() + "Z",
+            })
+            continue  # prev_count stays on the last all-time stage
+        users_reached = reached(i)
+        drop_off, drop_off_pct = drop(prev_count, users_reached)
+        # Insert paused as a side-branch right before campaign_completed so
+        # the chart visually separates terminal off-ramps.
+        funnel.append({
+            "stage": key,
+            "label": label,
+            "users_reached": users_reached,
+            "drop_off_from_prev": drop_off,
+            "drop_off_pct_from_prev": drop_off_pct,
+        })
+        if key == "campaign_launched":
+            paused_col = OutreachOrder.campaign_paused_at
+            paused_count = (
+                db.query(func.count(func.distinct(OutreachOrder.user_id)))
+                .filter(paused_col.isnot(None))
+                .scalar()
+            ) or 0
+            funnel.append({
+                "stage": "campaign_paused",
+                "label": "Campaign Paused",
+                "users_reached": paused_count,
+                "drop_off_from_prev": None,
+                "drop_off_pct_from_prev": None,
+            })
+        prev_count = users_reached
+    return funnel
+
+
 @router.get("/overview")
 async def outreach_overview(
     admin: User = Depends(get_admin_user),
@@ -309,53 +392,7 @@ async def outreach_overview(
     )
 
     # ── Funnel aggregate ────────────────────────────────────────────────────
-    # MONOTONIC counting: a user is counted at stage N if they have a timestamp
-    # for stage N OR any later main-flow stage. This guarantees the chart is
-    # provably non-increasing (you can't have more users at a later stage than
-    # at an earlier one), and corrects for backfill misses where a downstream
-    # timestamp is set but an upstream one isn't.
-    from sqlalchemy import or_
-    funnel = []
-    prev_count: int | None = None
-    for i, (key, label, _column) in enumerate(MAIN_FLOW_STAGES):
-        # "this stage or any later" — covers backfill gaps
-        cols_or_later = [getattr(OutreachOrder, c) for _, _, c in MAIN_FLOW_STAGES[i:]]
-        cond = or_(*[c.isnot(None) for c in cols_or_later])
-        users_reached = (
-            db.query(func.count(func.distinct(OutreachOrder.user_id)))
-            .filter(cond)
-            .scalar()
-        ) or 0
-        drop_off = None
-        drop_off_pct = None
-        if prev_count is not None and prev_count > 0:
-            drop_off = max(prev_count - users_reached, 0)
-            drop_off_pct = round((drop_off / prev_count) * 100, 1)
-        entry = {
-            "stage": key,
-            "label": label,
-            "users_reached": users_reached,
-            "drop_off_from_prev": drop_off,
-            "drop_off_pct_from_prev": drop_off_pct,
-        }
-        # Insert paused as a side-branch right before campaign_completed so
-        # the chart visually separates terminal off-ramps.
-        funnel.append(entry)
-        if key == "campaign_launched":
-            paused_col = OutreachOrder.campaign_paused_at
-            paused_count = (
-                db.query(func.count(func.distinct(OutreachOrder.user_id)))
-                .filter(paused_col.isnot(None))
-                .scalar()
-            ) or 0
-            funnel.append({
-                "stage": "campaign_paused",
-                "label": "Campaign Paused",
-                "users_reached": paused_count,
-                "drop_off_from_prev": None,
-                "drop_off_pct_from_prev": None,
-            })
-        prev_count = users_reached
+    funnel = _funnel_aggregate(db)
 
     # Period reply rates — cohort by month of first contact.
     # Buckets each unique lead by when they first received an initial email,
