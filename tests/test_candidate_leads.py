@@ -125,3 +125,16 @@ def test_latest_candidate_is_the_callers_newest(db):
     db.commit()
     assert get_latest_candidate(current_user=USER, db=db) == {"candidate_id": 7}
     assert get_latest_candidate(current_user=SimpleNamespace(id="nobody"), db=db) == {"candidate_id": None}
+
+
+def test_broader_matches_are_flagged_and_strong_total_counts_the_rest(db):
+    """UC-Q09: a title sharing no word with the target roles (-25) is a broader match."""
+    db.query(LeadScore).filter(LeadScore.lead_id == 1).update({"title_relevance": -25})
+    db.commit()
+    resp = _call(db)
+    flags = {l["id"]: l["broader"] for l in resp["leads"]}
+    assert flags == {1: True, 2: False, 3: False, 4: False, 5: False}  # unscored is not "broader"
+    assert resp["strong_total"] == 4 and resp["total"] == 5
+    paged = _call(db, limit=1, offset=0)
+    assert paged["strong_total"] == 4  # counted before paging, like total
+    assert "strong_total" not in _call(db, fields="justification")  # the cheap poll stays cheap
