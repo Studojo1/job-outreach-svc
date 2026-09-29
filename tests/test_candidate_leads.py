@@ -66,7 +66,8 @@ def _call(db, **kw):
 
 def test_default_returns_everything_ranked_with_id_tiebreak(db):
     resp = _call(db)
-    assert [l["id"] for l in resp["leads"]] == [4, 2, 3, 1, 5]
+    # Unscored lead 5 ranks at the median (80.0), not last (B2C UC-Q35).
+    assert [l["id"] for l in resp["leads"]] == [4, 2, 3, 5, 1]
     assert resp["total"] == 5
     # The decimal survives, so 80.4 outranks the two 80.0s.
     assert resp["leads"][0]["score"]["overall"] == pytest.approx(80.4)
@@ -81,15 +82,15 @@ def test_limit_offset_pages_the_ranked_list_and_total_is_unpaged(db):
     resp = _call(db, limit=2, offset=1)
     assert [l["id"] for l in resp["leads"]] == [2, 3]
     assert resp["total"] == 5
-    assert [l["id"] for l in _call(db, offset=3)["leads"]] == [1, 5]
+    assert [l["id"] for l in _call(db, offset=3)["leads"]] == [5, 1]  # unscored at the median
 
 
 def test_justification_mode_is_id_and_score_only(db):
     resp = _call(db, fields="justification")
-    assert [l["id"] for l in resp["leads"]] == [4, 2, 3, 1, 5]
+    assert [l["id"] for l in resp["leads"]] == [4, 2, 3, 5, 1]  # unscored at the median
     assert set(resp["leads"][0]) == {"id", "score"}
     assert resp["leads"][0]["score"]["justification"] == {"bullets": ["b4"]}
-    assert resp["leads"][-1]["score"] is None
+    assert next(l for l in resp["leads"] if l["id"] == 5)["score"] is None
 
 
 def test_someone_elses_candidate_is_404(db):
