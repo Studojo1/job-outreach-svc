@@ -145,8 +145,9 @@ async def upload_resume(
         logger.exception("[UPLOAD] Parser crashed on resume from user %s (%s)",
                          current_user.id, file.filename)
         raise HTTPException(
-            status_code=400,
-            detail="We could not read that file. Please upload a text-based PDF or a Word document.",
+            status_code=500,
+            detail="Something went wrong on our side reading that file. Please try again, "
+                   "or upload it as a text-based PDF or a Word document.",
         ) from e
 
     # Refuse a resume we could not read, instead of reporting success.
