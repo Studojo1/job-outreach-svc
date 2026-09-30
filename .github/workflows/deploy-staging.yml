@@ -100,6 +100,13 @@ jobs:
           BOB_ACCESS_CODE: ${{ secrets.BOB_ACCESS_CODE }}
           LEADSFORGE_API_KEY: ${{ secrets.LEADSFORGE_API_KEY }}
         run: |
+          # PRESTOP_DRAIN (audit AR-B01): the pod kept serving for a few seconds after
+          # SIGTERM while ingress-nginx still routed to it, so every rollout
+          # answered a burst of 502s to live users. Sleep before shutdown so
+          # the endpoint is removed first. Native sleep action (k8s >= 1.30),
+          # so it needs no shell in the image.
+          kubectl patch deployment/${{ env.SERVICE_NAME }} -n ${{ env.NAMESPACE }} --type strategic -p \
+            '{"spec":{"template":{"spec":{"containers":[{"name":"${{ env.SERVICE_NAME }}","lifecycle":{"preStop":{"sleep":{"seconds":10}}}}]}}}}'
           kubectl set image deployment/${{ env.SERVICE_NAME }} \
             ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
