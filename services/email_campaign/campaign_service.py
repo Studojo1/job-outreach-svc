@@ -292,6 +292,12 @@ def transition_campaign(db: Session, campaign_id: int, target_status: str,
 
     old_status = campaign.status
     restarting = old_status in ("paused", "cancelled") and target_status == "running"
+    if old_status != "draft" and target_status == "running":
+        # A campaign from before per-campaign reservations holds none, so
+        # nothing capped it at what was paid (PP-P26). Reserve its unsent
+        # emails from the wallet first; raises ValueError when none can be.
+        from services.email_campaign.campaign_worker import adopt_legacy_reservation
+        adopt_legacy_reservation(db, campaign)
     if restarting:
         _scan_replies_before_restart(db, campaign)
     if old_status == "cancelled" and target_status == "running":

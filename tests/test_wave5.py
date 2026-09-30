@@ -43,8 +43,9 @@ def db():
         UserCredit(user_id="u", total_credits=200, used_credits=200),
         Campaign(id=10, candidate_id=1, email_account_id=5, name="a", status="running", daily_limit=20,
                  credits_reserved=200, credits_released=0),
+        # Reserved too: a reservation of 0 is now a cap of 0 (PP-P26, 30 Sep).
         Campaign(id=11, candidate_id=1, email_account_id=5, name="b", status="running", daily_limit=20,
-                 credits_reserved=0, credits_released=0),
+                 credits_reserved=200, credits_released=0),
     ])
     s.commit()
     yield s

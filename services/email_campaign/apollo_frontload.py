@@ -134,7 +134,7 @@ def _buffer_targets(db: Session, limit: int) -> list[Lead]:
         cap_left = math.ceil(initial * REPLACEMENT_CAP_PERCENT) - sum(1 for r in rows if r.replacement_for_id)
         unsent = sum(1 for r in rows if r.status in UNSENT)
         want = min(max(cap_left, 0), math.ceil(unsent * BUFFER_SHARE))
-        if c.credits_reserved:
+        if c.credits_reserved is not None:
             # A replacement needs a paid slot (PP-P26: add_replacement_lead
             # refuses one at the cap), so stock no more than the slots left.
             paid_left = (c.credits_reserved - (c.credits_released or 0)

@@ -472,6 +472,21 @@ async def outreach_overview(
     }
 
 
+@router.get("/reply-rate/first-100-by-launch-week")
+def reply_rate_first_100_by_launch_week(
+    weeks: int = Query(12, ge=1, le=52),
+    min_age_days: int = Query(10, ge=0, le=60),
+    admin: User = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Reply rate of each campaign's first 100 emails, grouped by launch week
+    (audit PS-N03): the like-for-like number for the founders' digest. The
+    monthly period_reply_rates mix fresh campaigns with the low-ranked tail
+    of old ones. below_alert marks a week under 1.5%."""
+    from services.reply_rate_cohorts import first_100_reply_rate_by_launch_week
+    return first_100_reply_rate_by_launch_week(db, weeks=weeks, min_age_days=min_age_days)
+
+
 def _admin_campaign_row(db: Session, c, order_ids: set, pointed_at: set) -> dict:
     e_stats = dict(
         db.query(EmailSent.status, func.count())
@@ -1685,6 +1700,14 @@ def campaign_restart_admin(
     if campaign.status != "paused":
         raise HTTPException(status_code=400, detail=f"Only a paused campaign can be restarted; this one is {campaign.status}.")
     was = campaign.pause_reason
+    # Same paid-credit cap as a user's resume (PP-P26): a legacy campaign with
+    # no reservation reserves its unsent emails from the wallet first.
+    from services.email_campaign.campaign_worker import adopt_legacy_reservation
+    try:
+        adopt_legacy_reservation(db, campaign)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
     campaign.status = "running"
     campaign.pause_reason = None
     campaign.paused_at = None

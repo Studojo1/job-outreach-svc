@@ -143,7 +143,9 @@ def add_replacement_lead(
       - the source row already has a replacement
       - no candidate leads remain in the user's pool
     """
-    src = db.query(EmailSent).filter(EmailSent.id == replaced_email_id).first()
+    # Locked, so two replicas handling the same bounce cannot both pass the
+    # one-stand-in check below before either inserts (PP-P45).
+    src = db.query(EmailSent).filter(EmailSent.id == replaced_email_id).with_for_update().first()
     if not src:
         return None
     if src.replacement_for_id is not None:
@@ -160,7 +162,7 @@ def add_replacement_lead(
 
     # A no-match stand-in takes a paid slot; none once the campaign has used
     # every credit it paid for (PP-P26). Bounce stand-ins are free.
-    if reason != "bounce" and campaign.credits_reserved:
+    if reason != "bounce" and campaign.credits_reserved is not None:
         from services.email_campaign.campaign_worker import _COMMITTED, _paid_slots_in
         allowed = max(0, campaign.credits_reserved - (campaign.credits_released or 0))
         if _paid_slots_in(db, campaign_id, _COMMITTED) >= allowed:
