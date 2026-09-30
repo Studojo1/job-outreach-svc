@@ -1,5 +1,6 @@
 """Admin endpoints for outreach order monitoring dashboard."""
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -723,6 +724,8 @@ async def admin_payments(
         q = q.filter(PaymentOrder.status == "paid")
     elif status_filter == "abandoned":
         q = q.filter(PaymentOrder.status == "created")
+    elif status_filter == "refunded":
+        q = q.filter((PaymentOrder.status.in_(("refunded", "refunding"))) | (PaymentOrder.refunded_cents > 0))
     # "all" → no status filter
 
     if search:
@@ -743,8 +746,11 @@ async def admin_payments(
     paid_rows = stats_q.filter(PaymentOrder.status == "paid").all()
     abandoned_count = stats_q.filter(PaymentOrder.status == "created").count()
 
-    total_inr = sum(r.PaymentOrder.amount_cents for r in paid_rows if r.PaymentOrder.currency == "INR")
-    total_usd = sum(r.PaymentOrder.amount_cents for r in paid_rows if r.PaymentOrder.currency == "USD")
+    # Net of partial refunds (a fully refunded payment is no longer 'paid').
+    def _net(po):
+        return po.amount_cents - (po.refunded_cents or 0)
+    total_inr = sum(_net(r.PaymentOrder) for r in paid_rows if r.PaymentOrder.currency == "INR")
+    total_usd = sum(_net(r.PaymentOrder) for r in paid_rows if r.PaymentOrder.currency == "USD")
 
     result = []
     for po, u, coupon in rows:
@@ -773,6 +779,12 @@ async def admin_payments(
             "razorpay_payment_id": po.razorpay_payment_id,
             "dodo_checkout_id": po.dodo_checkout_id,
             "dodo_payment_id": po.dodo_payment_id,
+            # PP-P05: what the admin panel's Refund button needs.
+            "refunded_cents": po.refunded_cents or 0,
+            "refunded_at": po.refunded_at.isoformat() if po.refunded_at else None,
+            "refund_id": po.refund_id,
+            "refundable": po.status in ("paid", "completed") and po.provider in ("razorpay", "dodo")
+                          and (po.amount_cents or 0) > (po.refunded_cents or 0),
             "outreach_order_status": latest_order.status if latest_order else None,
             "created_at": po.created_at.isoformat() if po.created_at else None,
         })
@@ -1624,6 +1636,12 @@ async def refund_payment_admin(
         return await refund_payment(db, payment_id, actor=str(admin.id), reason=body.reason.strip())
     except RefundError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        # The provider refused (or could not be reached). Nothing was settled:
+        # refund_payment releases its claim before re-raising. Admin-only, so
+        # the provider's own message is shown to help decide what to do.
+        logging.getLogger(__name__).exception("[REFUND] provider refund failed for payment %s", payment_id)
+        raise HTTPException(status_code=502, detail=f"The payment provider refused the refund: {e}") from e
 
 
 # ── Refund Policy v3.0 §3.3: campaign refund check ────────────────────────────

@@ -201,5 +201,5 @@ def test_reconciler_reports_the_payment(monkeypatch):
                          amount_cents=182500, currency="INR", tier=200)
     payment_reconciler._report_recovered_payment(None, order, "dodo")
     assert captured and captured[0][0] == "payment_confirmed"
-    assert captured[0][1]["source"] == "reconciler"
+    assert captured[0][1]["trigger"] == "reconciler"  # "source" is overwritten with "server" by capture()
     assert meta == [605]
