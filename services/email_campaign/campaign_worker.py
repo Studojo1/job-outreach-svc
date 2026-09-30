@@ -391,15 +391,64 @@ def _paid_slots_in(db, campaign_id: int, statuses) -> int:
 
 def _over_paid_cap(db, campaign, email, statuses) -> bool:
     """True if sending (or enriching) `email` would exceed what was paid.
-    Campaigns with no reservation recorded (NULL or 0: legacy rows from
-    before reservations, e.g. prod campaigns 34, 42 and 78) are not capped
-    here; they need a per-campaign decision, not an automatic stop."""
-    if campaign is None or not campaign.credits_reserved:
+
+    A reservation of 0 is a cap of 0: legacy campaigns created before
+    per-campaign reservations (prod 34, 42 and 78) send nothing more until
+    they are resumed, which re-reserves from the wallet first
+    (adopt_legacy_reservation). Only NULL, a reservation never recorded at
+    all, is left uncapped."""
+    if campaign is None or campaign.credits_reserved is None:
         return False
     if not outcomes.holds_paid_slot(email):
         return False
     allowed = max(0, (campaign.credits_reserved or 0) - (campaign.credits_released or 0))
     return _paid_slots_in(db, campaign.id, statuses) >= allowed
+
+
+def adopt_legacy_reservation(db, campaign) -> int:
+    """Put a campaign with no reservation under the paid-credit cap before it
+    runs again (PP-P26). Returns the credits newly reserved.
+
+    Campaigns created before per-campaign reservations carry
+    credits_reserved = 0 (or NULL), so nothing capped them: resumed, prod
+    campaigns 34, 42 and 78 would have sent hundreds of emails nobody paid
+    for. Here the paid first touches already delivered become the baseline
+    (they were paid for under the old flow; no ledger entry, no wallet
+    change), the wallet reserves credits for as many unsent ones as it can
+    cover, best-scheduled first, and the rest are retired as over the cap.
+
+    Raises ValueError, changing nothing, when unsent paid emails exist and the
+    wallet cannot cover any of them. Caller commits.
+    """
+    if campaign.credits_reserved:
+        return 0
+    from services import credits as _credits
+    delivered = _paid_slots_in(db, campaign.id, _DELIVERED)
+    unsent = (
+        _paid_rows(db, campaign.id)
+        .filter(EmailSent.status.in_(("pending_enrichment", "queued")))
+        .order_by(EmailSent.scheduled_at.is_(None), EmailSent.scheduled_at.asc(), EmailSent.id.asc())
+        .all()
+    )
+    n = 0
+    owner = None
+    if unsent:
+        owner = db.query(Candidate.user_id).filter(Candidate.id == campaign.candidate_id).scalar()
+        n = min(len(unsent), _credits.available(db, owner) if owner else 0)
+        if n <= 0:
+            raise ValueError(
+                f"This campaign was set up before credits were held per campaign, and you have no "
+                f"free credits for its {len(unsent)} unsent emails. Add credits to resume it."
+            )
+    campaign.credits_reserved = delivered + (campaign.credits_released or 0)
+    if n and _credits.reserve(db, owner, n, _credits.RESERVE_CAMPAIGN, campaign=campaign,
+                              note="legacy campaign resumed: its unsent emails (PP-P26)") is None:
+        raise ValueError("Not enough free credits to resume this campaign.")
+    for row in unsent[n:]:
+        _retire_over_cap(row)
+    logger.info("[CAMPAIGN] Legacy campaign #%d put under the paid cap: baseline=%d reserved=%d retired=%d",
+                campaign.id, delivered, n, max(0, len(unsent) - n))
+    return n
 
 
 def _retire_over_cap(email) -> None:
@@ -1311,7 +1360,7 @@ def _check_campaign_completion(db):
         # At its paid cap (PP-P26): retire the rest of its paid first touches
         # now, so the campaign completes and settles instead of lingering
         # until each row reaches the enrichment guard one by one.
-        if campaign.credits_reserved:
+        if campaign.credits_reserved is not None:
             allowed = max(0, campaign.credits_reserved - (campaign.credits_released or 0))
             if _paid_slots_in(db, campaign.id, _DELIVERED) >= allowed:
                 for row in _paid_rows(db, campaign.id).filter(
