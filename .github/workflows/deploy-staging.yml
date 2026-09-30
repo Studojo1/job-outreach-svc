@@ -124,6 +124,15 @@ jobs:
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             --from=secret/app-secrets --keys=azure-storage-account-name,azure-storage-account-key,POSTHOG_PERSONAL_API_KEY,POSTHOG_PROJECT_ID \
             -n ${{ env.NAMESPACE }}
+          # Razorpay webhook signature (UC-Q05). The same app-secrets key the
+          # frontend's own Razorpay webhook uses; kubectl names it
+          # RAZORPAY_WEBHOOK_SECRET. Without it the webhook refuses every call
+          # and payments are confirmed only by the reconciler.
+          if [ -n "$(kubectl get secret app-secrets -n staging -o jsonpath='{.data.razorpay-webhook-secret}')" ]; then
+            kubectl set env deployment/${{ env.SERVICE_NAME }} \
+              --from=secret/app-secrets --keys=razorpay-webhook-secret \
+              -n staging
+          fi
           # Emailer's send-template secret, for the paid-not-launched nudges
           # (services/launch_nudge.py). Only wired once the app-secrets key
           # exists; without it the nudges are off and nothing else changes.
