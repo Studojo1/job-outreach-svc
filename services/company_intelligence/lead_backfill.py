@@ -24,6 +24,26 @@ logger = logging.getLogger(__name__)
 _DESCRIPTION_MAX = 500  # same cap parse_apollo_person applies
 
 
+def profile_by_name(db: Session, name: Optional[str]) -> Optional[CompanyProfile]:
+    """The cached profile whose name equals `name`, ignoring case and spaces.
+
+    Compares lower(name) = :name so the expression index
+    idx_company_profiles_lower_name (migration 075) serves it. The old
+    name ILIKE :name could use no index: 4.1M full scans of the 94k-row table
+    by 30 Sep (audit AR-D02). ILIKE also read '_' and '%' in a company name as
+    wildcards, so "A_B Labs" matched "AXB Labs".
+    """
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    return (
+        db.query(CompanyProfile)
+        .filter(func.lower(CompanyProfile.name) == key)
+        .order_by(CompanyProfile.id)
+        .first()
+    )
+
+
 def company_size_bucket(num_employees) -> Optional[str]:
     """Employee count as the size band stored on leads."""
     if num_employees is None:

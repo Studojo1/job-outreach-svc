@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from database.models import CompanyProfile
 
+from .lead_backfill import profile_by_name
 from .llm_company_research import research_companies_bulk
 from .apollo_company_resolver import resolve_canonical_domain
 
@@ -265,11 +266,7 @@ def bulk_enrich_top_companies(
         # CompanyProfile for a same-named-but-different company (e.g. cache
         # for 'Swish'@swish.nu hijacking a fresh resolver hit on justswish.in).
         if name and not domain:
-            existing = (
-                db.query(CompanyProfile)
-                .filter(CompanyProfile.name.ilike(name))
-                .first()
-            )
+            existing = profile_by_name(db, name)
             if existing and not _apollo_stale(existing):
                 key = existing.domain or name.lower()
                 profiles[key] = existing
