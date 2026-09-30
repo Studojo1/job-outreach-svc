@@ -160,6 +160,22 @@ jobs:
             exit 1
           }
 
+      - name: Apply ops CronJobs (k8s/ops-alerts)
+        run: |
+          # Keep the live CronJobs equal to the repo. They used to be applied by
+          # hand only, so a fix could merge and never reach the cluster (the
+          # Mesa daily scrape 401'd for days and never existed in prod, audit
+          # IN-N07). These files contain no Secret objects: the alert webhook
+          # secret is created by hand (see restart-alert.yaml), so applying
+          # them cannot wipe it.
+          for f in k8s/ops-alerts/*.yaml; do
+            if grep -qE '^kind: Secret' "$f"; then
+              echo "::error::$f contains a Secret; applying it would overwrite the live one"
+              exit 1
+            fi
+          done
+          kubectl apply -f k8s/ops-alerts/
+
       - name: Record deployment
         run: |
           curl -X POST https://api.studojo.com/v1/dev/deployments \
