@@ -32,7 +32,9 @@ subjects:
     name: ops-alerter
     namespace: studojo
 ---
-# Secret with the alert sink URL + shared token.
+# The alert sink URL + shared token live in the Secret ops-alert-webhook,
+# created BY HAND (it is deliberately not declared here: the deploy workflow
+# applies this file, and an empty Secret in it would wipe the live values).
 #
 # Defaults to posting to admin.studojo.com/api/ops-alerts (built-in Ops
 # Alerts page in the admin panel) using a shared-secret header. To enable:
@@ -43,17 +45,8 @@ subjects:
 #         OPS_ALERT_INGEST_TOKEN on the admin-panel deployment>' \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
-# The CronJob runs without alerting (logs only) until both fields are set,
-# so it's safe to deploy this manifest before the secret is populated.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ops-alert-webhook
-  namespace: studojo
-type: Opaque
-stringData:
-  url: ""
-  token: ""
+# The CronJob runs without alerting (logs only) until both fields are set
+# (the secret refs are optional).
 ---
 # CronJob: every 5 minutes, scan all pods cluster-wide. For any pod whose
 # container has restarted >= RESTART_THRESHOLD times AND has restarted in
@@ -77,7 +70,9 @@ spec:
           restartPolicy: Never
           containers:
             - name: alerter
-              image: bitnami/kubectl:latest
+              # Pinned by digest (audit IN-N08): bitnami/kubectl only publishes a
+              # moving :latest tag now, so a digest is the only reproducible pin.
+              image: bitnami/kubectl@sha256:558420daf32bbc382e3e9af4537f4073085b336ddd47399a3b70e70087115978
               imagePullPolicy: IfNotPresent
               env:
                 - name: RESTART_THRESHOLD

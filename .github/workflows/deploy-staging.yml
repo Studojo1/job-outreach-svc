@@ -172,3 +172,12 @@ jobs:
             fi
             exit 1
           }
+
+      - name: Apply staging Mesa daily-scrape CronJob
+        run: |
+          # Same manifest as prod, pointed at the staging namespace and service
+          # (audit IN-N07: the staging cron drifted and ran without the internal
+          # auth header, so every run 401'd).
+          sed -e 's/namespace: studojo/namespace: staging/' \
+              -e 's/job-outreach-svc\.studojo\.svc/job-outreach-svc.staging.svc/' \
+              k8s/ops-alerts/mesa-daily-scrape.yaml | kubectl apply -f -
