@@ -103,3 +103,32 @@ def test_resume_name_still_wins_over_account_name(db, prompts):
     db.commit()
     gen.generate_email_for_lead(db.get(Lead, 1), cand, "warm_intro")
     assert "Ruchika" in prompts[0] and "Goel," not in prompts[0]
+
+
+# Ticket #40: "A J Mohamed Nihal" signed his emails as "A".
+
+@pytest.mark.parametrize("name,expected", [
+    ("A J Mohamed Nihal", "A J Mohamed Nihal"),
+    ("A. J. Mohamed Nihal", "A. J. Mohamed Nihal"),
+    ("Ruchika Goel R", "Ruchika"),
+    ("Priya", "Priya"),
+    ("", ""),
+])
+def test_signoff_name_keeps_names_that_start_with_an_initial(name, expected):
+    assert gen._signoff_name(name) == expected
+
+
+def test_initial_first_name_signs_email_with_full_name(db, prompts):
+    db.get(Candidate, 1).parsed_json = {"personal_info": {"name": "A J MOHAMED NIHAL"}}
+    db.commit()
+    gen.generate_email_for_lead(db.get(Lead, 1), db.get(Candidate, 1), "warm_intro")
+    assert "A J Mohamed Nihal" in prompts[0]
+    assert '"Best,\nA"' not in prompts[0] and '"A"' not in prompts[0]
+
+
+@pytest.mark.parametrize("touch", [1, 2])
+def test_initial_first_name_signs_followups_with_full_name(db, prompts, touch):
+    db.get(Candidate, 1).parsed_json = {"personal_info": {"name": "A J Mohamed Nihal"}}
+    db.commit()
+    gen.generate_followup_email(db.get(Lead, 1), db.get(Candidate, 1), "Hi Pratistha, earlier note.", touch)
+    assert 'Sign off: "A J Mohamed Nihal"' in prompts[0]

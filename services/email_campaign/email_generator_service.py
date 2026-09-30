@@ -272,6 +272,20 @@ def _is_valid_name(n: str) -> bool:
     return True
 
 
+def _signoff_name(full_name: str) -> str:
+    """The name to sign an email with: the first name, unless it is an initial.
+
+    "A J Mohamed Nihal" used to sign as "A" (ticket #40). When the name opens
+    with an initial, sign with the full name instead.
+    """
+    words = (full_name or "").split()
+    if not words:
+        return ""
+    if len(words[0].strip(".")) <= 1:
+        return " ".join(words)
+    return words[0]
+
+
 def _account_name(candidate: Candidate) -> str:
     """Name on the candidate's Studojo account, used when the resume gives none."""
     db = object_session(candidate)
@@ -761,7 +775,7 @@ def _build_generation_prompt(
     closing = random.choice(CLOSINGS)
     # With no name anywhere, sign off without one. This used to fall back to
     # "Me", which went out to real recruiters as "Best,\nMe".
-    sender_first = ((candidate_profile["candidate_name"] or "").split() or [""])[0]
+    sender_first = _signoff_name(candidate_profile["candidate_name"])
     signoff = random.choice(SIGNOFFS).replace("{name}", sender_first) if sender_first else "Best,"
 
     has_flex = candidate_profile.get("has_flex_notes", False)
@@ -1124,7 +1138,7 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
     if candidate_name.isupper():
         candidate_name = candidate_name.title()
 
-    first_name_candidate = candidate_name.split()[0] if candidate_name else ""
+    first_name_candidate = _signoff_name(candidate_name)
     sign_as = f'"{first_name_candidate}"' if first_name_candidate else "nothing (no name)"
     candidate_name = candidate_name or "the sender"
     lead_first = (lead.name or "").split()[0] if lead.name else "there"
