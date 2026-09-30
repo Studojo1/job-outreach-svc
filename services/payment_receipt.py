@@ -7,6 +7,7 @@ commit. One receipt per payment order: the claim is a system_events row whose
 primary key is the order id, so two paths confirming the same payment (or two
 replicas) cannot both send.
 """
+import uuid
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -36,19 +37,38 @@ def _plan_name(order: PaymentOrder) -> str:
         return "Outreach"
 
 
+# Namespace for the receipt claim ids: uuid5(ns, order id) is deterministic,
+# so two paid paths confirming the same payment still collide on the primary
+# key, and it is a real uuid, which the column requires (see below).
+_CLAIM_NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://studojo.com/payment-receipt")
+
+
 def send_receipt(db: Session, order: PaymentOrder) -> bool:
     """Email the receipt once. Never raises: the payment is already committed."""
     if db is None:
         return False
+    order_id = None
     try:
+        # Read everything off the ORM objects up front. If the commit below
+        # fails, the session is left pending-rollback and even reading
+        # order.id raises, which is how the first version broke its
+        # never-raises contract (30 Sep: /payment/verify returned 500 after
+        # the money moved).
+        order_id = order.id
         amount = _amount(order)
         if amount is None:
             return False  # free (100% coupon) orders get no receipt
         user = db.get(User, order.user_id)
         if user is None or not user.email:
             return False
-        claim = SystemEvent(id=f"payment_receipt:{order.id}", event_type="payment_receipt_sent",
-                            user_id=str(order.user_id), meta={"payment_order_id": order.id})
+        # The claim id must be a valid uuid: system_events.id is a uuid column
+        # in the real database (the table belongs to the frontend schema; the
+        # model here says Text and SQLite let a prefixed string through, which
+        # is why tests missed it). uuid5 keeps the one-receipt-per-order
+        # dedupe: same order, same id, primary-key conflict.
+        claim = SystemEvent(id=str(uuid.uuid5(_CLAIM_NS, str(order_id))),
+                            event_type="payment_receipt_sent",
+                            user_id=str(order.user_id), meta={"payment_order_id": order_id})
         db.add(claim)
         try:
             db.commit()
@@ -71,7 +91,13 @@ def send_receipt(db: Session, order: PaymentOrder) -> bool:
             db.commit()
         return ok
     except Exception:
-        logger.exception("[RECEIPT] could not send the receipt for payment order %s", order.id)
+        # Roll back FIRST: until the session is rolled back, touching any ORM
+        # attribute (including order.id in a log line) raises again and the
+        # error escapes to the payment endpoint.
         if db is not None:
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001 - a dead connection stays dead
+                pass
+        logger.exception("[RECEIPT] could not send the receipt for payment order %s", order_id)
         return False

@@ -310,3 +310,45 @@ def test_free_orders_get_no_receipt(db, sent):
     order.amount_cents = 0
     db.commit()
     assert send_receipt(db, order) is False and sent == []
+
+
+def test_receipt_claim_id_is_a_valid_deterministic_uuid(db, sent):
+    # system_events.id is a uuid column in the real database. The first
+    # receipt version used "payment_receipt:<n>", which SQLite accepted and
+    # Postgres rejected, so every /payment/verify 500ed after the money moved
+    # (30 Sep). The id must parse as a uuid and stay deterministic per order
+    # so the primary-key dedupe still works.
+    import uuid as _uuid
+    from services.payment_receipt import _CLAIM_NS, send_receipt
+    _user(db, "uuidpayer", credits=350)
+    order = db.query(PaymentOrder).filter_by(user_id="uuidpayer").one()
+    order.plan_id = "email_350"
+    db.commit()
+    assert send_receipt(db, order) is True
+    [claim] = db.query(SystemEvent).filter_by(event_type="payment_receipt_sent").all()
+    _uuid.UUID(claim.id)  # raises if not a real uuid
+    assert claim.id == str(_uuid.uuid5(_CLAIM_NS, str(order.id)))
+
+
+def test_receipt_never_raises_when_the_claim_insert_fails(db, sent, monkeypatch):
+    # A failed claim commit leaves the session pending-rollback; the handler
+    # must roll back before logging (reading order.id on a broken session
+    # raises again) and return False instead of 500ing the payment endpoint.
+    from sqlalchemy.exc import DataError
+    from services.payment_receipt import send_receipt
+    _user(db, "crashpayer", credits=350)
+    order = db.query(PaymentOrder).filter_by(user_id="crashpayer").one()
+    order.plan_id = "email_350"
+    db.commit()
+
+    real_commit, calls = db.commit, {"n": 0}
+
+    def failing_commit():
+        calls["n"] += 1
+        raise DataError("INSERT INTO system_events ...", {}, Exception("invalid input syntax for type uuid"))
+
+    monkeypatch.setattr(db, "commit", failing_commit)
+    assert send_receipt(db, order) is False   # must not raise
+    monkeypatch.setattr(db, "commit", real_commit)
+    assert calls["n"] == 1
+    assert [c for c in sent if c["template"] == "payment-thankyou"] == []
