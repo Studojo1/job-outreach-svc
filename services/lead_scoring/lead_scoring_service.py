@@ -181,6 +181,136 @@ def _score_location(lead_location: str, pref_locations: List[str]) -> int:
     return 0
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INDUSTRY MATCHING (UC-Q04)
+# ══════════════════════════════════════════════════════════════════════════════
+# Candidates pick industries as quiz slugs ("b2b-saas", "financial_services",
+# "healthtech", "edtech"); leads carry free-text industries from the company
+# cache ("Software Development", "Financial Services", "Hospitals and Health
+# Care"). Exact equality matched almost nothing, so after the 2.7 blend was
+# removed industry_relevance was still 5 on 98% of production scores (30 Sep:
+# 2,376 of 2,415). Each group: trigger words found in the candidate's term ->
+# phrases that count as the same industry in a lead's industry text.
+_INDUSTRY_GROUPS: list[tuple[frozenset, tuple[str, ...]]] = [
+    (frozenset({"saas", "software", "developer", "devtools", "enterprise", "cloud", "it", "tech",
+                "technology", "internet", "consumerapps", "apps", "b2bsaas"}),
+     ("software", "saas", "internet", "information technology", "it services", "cloud",
+      "computer software", "technology")),
+    (frozenset({"fintech", "financial", "finance", "banking", "bank", "bfsi", "asset", "investment",
+                "insurance", "insurtech", "wealth", "payments", "lending", "capital", "accounting",
+                "vc", "venture", "trading"}),
+     ("financial", "fintech", "banking", "bank", "investment", "insurance", "capital markets",
+      "asset management", "payments", "lending", "wealth", "accounting", "venture capital")),
+    (frozenset({"edtech", "education", "elearning", "learning", "career", "careertech"}),
+     ("education", "e learning", "elearning", "edtech", "training", "higher education")),
+    (frozenset({"healthtech", "healthcare", "health", "medtech", "biotech", "pharma", "medical",
+                "hospital", "wellness", "lifesciences"}),
+     ("health", "healthcare", "medical", "hospital", "pharma", "pharmaceutical", "biotech",
+      "biotechnology", "wellness", "life sciences", "medtech", "healthtech")),
+    (frozenset({"ecommerce", "retail", "marketplace", "d2c", "dtc", "consumer", "fmcg", "cpg"}),
+     ("retail", "e commerce", "ecommerce", "consumer", "marketplace", "fmcg", "consumer goods",
+      "apparel")),
+    (frozenset({"ai", "ml", "artificial", "machine", "genai", "llm", "data"}),
+     ("artificial intelligence", "ai", "machine learning", "data")),
+    (frozenset({"cybersecurity", "security", "infosec"}),
+     ("security", "cybersecurity")),
+    (frozenset({"media", "mediatech", "creator", "creatortech", "publishing", "entertainment",
+                "gaming", "games", "content"}),
+     ("media", "publishing", "entertainment", "broadcast", "games", "gaming", "content",
+      "film", "music")),
+    (frozenset({"marketing", "advertising", "adtech", "martech", "agency", "agencies"}),
+     ("marketing", "advertising", "adtech", "martech")),
+    (frozenset({"manufacturing", "robotics", "industrial", "hardware", "automotive", "electronics",
+                "semiconductor", "semiconductors", "deeptech", "aerospace"}),
+     ("manufacturing", "industrial", "machinery", "robotics", "automation", "automotive",
+      "electronics", "hardware", "semiconductor", "semiconductors", "aerospace")),
+    (frozenset({"logistics", "supply", "supplychain", "mobility", "transport", "transportation"}),
+     ("logistics", "supply chain", "transportation", "shipping", "mobility", "freight")),
+    (frozenset({"consulting", "bpo", "outsourcing", "kpo"}),
+     ("consulting", "outsourcing", "professional services", "bpo")),
+    (frozenset({"nonprofit", "ngo", "philanthropy", "impact"}),
+     ("non profit", "nonprofit", "ngo", "philanthropy", "social impact")),
+    (frozenset({"agritech", "agriculture", "agri", "farming", "food", "foodtech"}),
+     ("agriculture", "agritech", "farming", "food")),
+    (frozenset({"govtech", "government", "public", "policy"}),
+     ("government", "public sector", "public policy")),
+    (frozenset({"travel", "traveltech", "hospitality", "tourism"}),
+     ("travel", "hospitality", "tourism", "leisure")),
+    (frozenset({"realestate", "proptech", "construction"}),
+     ("real estate", "construction", "property")),
+    (frozenset({"energy", "climate", "climatetech", "cleantech", "renewable", "renewables",
+                "sustainability", "ev"}),
+     ("energy", "renewable", "climate", "environmental", "solar", "sustainability")),
+    (frozenset({"telecom", "telecommunications"}),
+     ("telecom", "telecommunications")),
+    (frozenset({"legal", "legaltech", "law"}),
+     ("legal", "law")),
+    (frozenset({"hr", "hrtech", "recruiting", "recruitment", "staffing", "talent"}),
+     ("human resources", "staffing", "recruiting", "recruitment")),
+]
+
+# Words that say nothing about the industry on their own.
+_INDUSTRY_STOPWORDS = frozenset({
+    "and", "or", "of", "the", "b2b", "b2c", "startup", "startups", "native", "company", "companies",
+    "industry", "services", "service", "other", "any", "early", "stage", "growth",
+})
+
+_GENERIC_TECH_INDUSTRIES = frozenset({
+    "computer software", "internet", "information technology and services",
+    "information technology", "it services", "it services and it consulting",
+    "software development", "software",
+})
+
+
+def _normalize_industry(text: str) -> str:
+    """Lower-case, '&', '-', '_' and '/' become spaces, whitespace collapsed."""
+    return " ".join(re.sub(r"[-_/&,.()]+", " ", (text or "").lower()).split())
+
+
+def _industry_tokens(term: str) -> set:
+    norm = _normalize_industry(term)
+    tokens = set(norm.split()) - _INDUSTRY_STOPWORDS
+    if len(tokens) > 1:
+        tokens.discard("tech")  # "media-tech" is media, not software; a bare "tech" still is
+    compact = norm.replace(" ", "")
+    if compact:
+        tokens.add(compact)  # "e-commerce" -> "ecommerce", "non_profit" -> "nonprofit"
+    return tokens
+
+
+def _industry_phrases(term: str) -> set:
+    """Lead-industry phrases that count as a match for one candidate term."""
+    tokens = _industry_tokens(term)
+    phrases = set()
+    for triggers, group_phrases in _INDUSTRY_GROUPS:
+        if tokens & triggers:
+            phrases.update(group_phrases)
+    # The term's own words also match ("robotics" matches "Robotics").
+    phrases.update(t for t in tokens if len(t) >= 4 and t != "tech")
+    return phrases
+
+
+def industry_matches(lead_industry: str, candidate_industries) -> bool:
+    """Does the lead's industry text fall in any industry the candidate picked?
+
+    Word-boundary phrase matching, so "ai" never matches "retail". UC-Q04.
+    """
+    lead_norm = _normalize_industry(lead_industry)
+    if not lead_norm or not candidate_industries:
+        return False
+    if isinstance(candidate_industries, str):
+        candidate_industries = [candidate_industries]
+    for term in candidate_industries:
+        for phrase in _industry_phrases(str(term or "")):
+            if re.search(r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b", lead_norm):
+                return True
+    return False
+
+
+def _is_generic_tech_industry(industry: str) -> bool:
+    return _normalize_industry(industry) in _GENERIC_TECH_INDUSTRIES
+
+
 _C_LEVEL_RE = re.compile(r"\b(ceo|cto|cfo|coo)\b")
 _VP_RE = re.compile(r"\b[sea]?vp\b")  # VP, SVP, EVP, AVP
 
@@ -410,9 +540,10 @@ def score_and_select_leads(
 
         # --- 3. Industry Match (0-15) ---
         i_score = 5
-        if any(mi == industry for mi in mapped_apollo_industries) and industry:
+        if industry and (any(mi == industry for mi in mapped_apollo_industries)
+                         or industry_matches(industry, raw_cand_industries)):
             i_score = 15
-        elif industry in ["computer software", "internet", "information technology and services"]:
+        elif _is_generic_tech_industry(industry):
             i_score = 12
 
         # --- 4. Seniority Fit (0-10) ---

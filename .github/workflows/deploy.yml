@@ -78,6 +78,15 @@ jobs:
             --name studojo-aks \
             --overwrite-existing
 
+      - name: Spread replicas across nodes
+        run: |
+          # Two replicas on one node is still one point of failure: on 30 Sep
+          # both prod frontend pods sat on the same node (audit IN-N01 recheck).
+          # ScheduleAnyway never blocks a rollout when only one node has room.
+          # Idempotent; a no-op once set.
+          kubectl patch deployment/${{ env.SERVICE_NAME }} -n studojo --type=merge -p \
+            '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"kubernetes.io/hostname","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"app":"job-outreach-svc"}}}]}}}}'
+
       - name: Deploy to Kubernetes
         env:
           META_CAPI_TOKEN: ${{ secrets.META_CAPI_TOKEN }}
