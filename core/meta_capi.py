@@ -119,3 +119,53 @@ async def send_purchase(
     except Exception as e:
         logger.warning("[META_CAPI] Purchase send failed for event_id=%s: %s", event_id, e)
         return False
+
+
+# ── Consent (audit HP-N13) ───────────────────────────────────────────────────
+# EU/UK visitors must accept tracking before anything reaches Meta. The browser
+# pixel is held by the frontend consent gate; the server-side copies (this
+# module's Purchase, the frontend's /api/meta-event) are held here, from the
+# consent state and device time zone the browser sends with the order.
+#
+# Mirrors consentRegion() in the frontend's app/lib/consent.ts.
+_EXTRA_ZONES = {
+    "Atlantic/Canary", "Atlantic/Madeira", "Atlantic/Azores", "Atlantic/Reykjavik",
+    "Atlantic/Faroe", "Atlantic/Faeroe", "Arctic/Longyearbyen",
+    "GB", "GB-Eire", "Eire", "Portugal", "Iceland", "Poland", "WET", "CET", "MET", "EET",
+}
+
+# EU, EEA and UK, for requests that carry no time zone (older clients).
+CONSENT_COUNTRIES = {
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU",
+    "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES",
+    "SE", "IS", "LI", "NO", "GB", "GI",
+}
+
+# Stored in PaymentOrder.meta_fbp when the buyer has not consented, so the
+# Purchase reported later (often from a webhook, with no browser behind it)
+# knows to stay silent. A real _fbp always starts "fb.", so this cannot clash.
+NO_CONSENT_MARK = "no-consent"
+
+
+def consent_region(time_zone: str | None) -> bool:
+    """Does a visitor in this time zone need to opt in? Unknown counts as yes."""
+    if not time_zone:
+        return True
+    return time_zone.startswith("Europe/") or time_zone in _EXTRA_ZONES
+
+
+def meta_allowed(consent: str | None, time_zone: str | None, country: str | None) -> bool:
+    """May this buyer's conversion be reported to Meta?
+
+    An explicit choice wins. With none, a visitor outside the EU/UK is fine
+    and one inside it (by time zone, or by IP country when the client sent no
+    time zone) is a no. Nothing known at all is a no: the safe side.
+    """
+    if consent == "denied":
+        return False
+    if consent == "granted":
+        return True
+    if time_zone:
+        return not consent_region(time_zone)
+    c = (country or "").upper()
+    return bool(c) and c != "UNKNOWN" and c not in CONSENT_COUNTRIES
