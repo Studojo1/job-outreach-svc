@@ -150,3 +150,24 @@ def apply_coupon(amount_cents: int, discount_type: str, discount_value: float) -
     remaining = max(0, amount_cents - discount)
     # Floor to the whole currency unit (100 paise / 100 cents).
     return (remaining // 100) * 100
+
+
+# ── Packs vs the pool of good leads (B2C UC-Q09) ─────────────────────────────
+# A student with 120 strong matches was offered, and could buy, 500 contacts:
+# most of those credits would go to broader matches whose titles do not fit
+# their target roles, or sit unused. A pack is sellable only while at least
+# STRONG_SHARE of it can be spent on strong matches. The smallest pack is
+# always sellable, so nobody with leads is left with nothing to buy.
+STRONG_SHARE = 0.8
+
+
+def sellable_email_packs(strong_total: int | None, test_mode: bool = False) -> list[int]:
+    """Email pack sizes this student may buy, smallest first.
+
+    strong_total None means the pool is unknown (no candidate with leads,
+    e.g. an extension user drafting one-off emails): every pack is sellable.
+    """
+    sizes = sorted({p.email_credits for p in get_plans(test_mode) if p.plan_type == "email" and p.email_credits})
+    if strong_total is None or not sizes:
+        return sizes
+    return [s for i, s in enumerate(sizes) if i == 0 or strong_total >= s * STRONG_SHARE]

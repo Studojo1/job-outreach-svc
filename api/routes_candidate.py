@@ -808,7 +808,7 @@ def get_candidate_leads(
     lead_cols = (Lead.id,) if light else (
         Lead.id, Lead.name, Lead.title, Lead.company, Lead.company_domain,
         Lead.industry, Lead.location, Lead.linkedin_url, Lead.email,
-        Lead.email_verified, Lead.company_size, Lead.status,
+        Lead.email_verified, Lead.company_size, Lead.status, Lead.apollo_id,
     )
     leads = (
         db.query(*lead_cols)
@@ -837,6 +837,7 @@ def get_candidate_leads(
     # quality comes from the sort order. Unscored leads (discovery may still be
     # running for them) are included too.
     results = []
+    by_id = {lead.id: lead for lead in leads}
     for lead in leads:
         score = scores_by_lead.get(lead.id)
         if light:
@@ -883,6 +884,8 @@ def get_candidate_leads(
 
     total = len(results)
     strong_total = sum(1 for r in results if not r.get("broader"))
+    # Best first, before paging: the sample email comes from the top leads.
+    ranked_rows = [] if light else [(by_id[r["id"]]) for r in results[:_SAMPLE_SCAN]]
     if offset or limit is not None:
         results = results[offset: offset + limit if limit is not None else None]
 
@@ -900,6 +903,17 @@ def get_candidate_leads(
     if not light:
         # Counted before paging, like total.
         body["strong_total"] = strong_total
+        # UC-Q09: the packs this student may buy, so the pricing page and
+        # create-order apply one rule.
+        from core.config import settings as _settings
+        from core.pricing import sellable_email_packs
+        body["sellable_email_packs"] = sellable_email_packs(
+            strong_total if total else None, _settings.RAZORPAY_TEST_MODE
+        )
+        # UC-Q13: one masked address as proof an email exists, for a student
+        # who cannot see the addresses yet. Only from emails already known;
+        # this never triggers a paid reveal (PS-N08).
+        body["sample_email"] = None if show_emails else _sample_email(db, ranked_rows)
     if total == 0:
         # UC-Q25: the browser can hold a stale candidate id (a newer upload
         # with no leads) and was told "no matches" while an older candidate
@@ -914,6 +928,68 @@ def get_candidate_leads(
     if etag in [t.strip() for t in if_none_match.split(",")]:
         return Response(status_code=304, headers=headers)
     return Response(content, media_type="application/json", headers=headers)
+
+
+_SAMPLE_SCAN = 50
+
+
+def mask_email(email: str | None) -> str | None:
+    """"jane.doe@acme.com" -> "j•••@acme.com". None for anything that is not
+    a plausible address."""
+    e = (email or "").strip()
+    local, at, domain = e.partition("@")
+    if not at or not local or "." not in domain:
+        return None
+    return f"{local[0]}\u2022\u2022\u2022@{domain.lower()}"
+
+
+def _sample_email(db: Session, rows) -> Optional[dict]:
+    """A masked address for one of the student's top leads (UC-Q13).
+
+    In order: an address already on one of these leads; one already known for
+    the same person on another student's list (same Apollo id); otherwise
+    only the company's domain, "•••@acme.com". Reads stored data only, so no
+    paid lookup ever runs for an unpaid user (PS-N08).
+    """
+    for r in rows:
+        masked = mask_email(r.email)
+        if masked:
+            return {"masked": masked, "kind": "email", "company": r.company}
+    apollo_ids = [r.apollo_id for r in rows if getattr(r, "apollo_id", None)]
+    if apollo_ids:
+        known = (
+            db.query(Lead.apollo_id, Lead.email)
+            .filter(Lead.apollo_id.in_(apollo_ids), Lead.email.isnot(None), Lead.email != "")
+            .limit(len(apollo_ids))
+            .all()
+        )
+        by_apollo = {k.apollo_id: k.email for k in known}
+        for r in rows:
+            masked = mask_email(by_apollo.get(getattr(r, "apollo_id", None)))
+            if masked:
+                return {"masked": masked, "kind": "email", "company": r.company}
+    for r in rows:
+        domain = (r.company_domain or "").strip().lower()
+        if domain and "." in domain and "@" not in domain:
+            return {"masked": f"\u2022\u2022\u2022@{domain}", "kind": "domain", "company": r.company}
+    return None
+
+
+def count_strong_leads(db: Session, candidate_id: int) -> tuple[int, int]:
+    """(total, strong) for a candidate: the same numbers GET /leads reports as
+    total and strong_total, without building the lead list."""
+    rows = (
+        db.query(Lead.id, Lead.title, LeadScore.title_relevance)
+        .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
+        .filter(Lead.candidate_id == candidate_id)
+        .order_by(Lead.id, LeadScore.id)
+        .all()
+    )
+    latest = {}
+    for r in rows:
+        latest[r.id] = r  # the newest score row wins, as in GET /leads
+    strong = sum(1 for r in latest.values() if not _is_broader(r, r.title))
+    return len(latest), strong
 
 
 def _active_candidate_with_leads(db: Session, user_id, exclude_id: int) -> Optional[int]:
