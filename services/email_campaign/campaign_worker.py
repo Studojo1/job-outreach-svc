@@ -61,6 +61,13 @@ MAX_ENRICHMENT_FAILURES = 3  # skip lead after this many failures
 REPLY_CHECK_INTERVAL = 300  # 5 minutes between reply checks
 _last_reply_check: float = 0.0  # module-level timestamp for throttling
 
+# Open tracking is off. A hidden 1x1 pixel in the HTML part sent otherwise
+# identical mail to Gmail's Spam folder, while plain text and HTML without the
+# pixel landed in the Inbox (ticket #40, tested 30 Sep 2026 between two Gmail
+# accounts). Opens were only ever an approximate admin metric; deliverability
+# is the product. The /track endpoint stays up for mail already sent.
+TRACK_OPENS = False
+
 
 def _ensure_tracking_token(email) -> str:
     """Assign a random open-tracking token to an email row if it lacks one.
@@ -874,7 +881,7 @@ def _send_ready(db) -> tuple:
         # timestamp lets _reap_stuck_sending find it if the send never returns.
         email.status = "sending"
         email.status_changed_at = datetime.utcnow()
-        pixel_url = _ensure_tracking_token(email)
+        pixel_url = _ensure_tracking_token(email) if TRACK_OPENS else None
         db.commit()
 
         # Send the email
@@ -1253,10 +1260,10 @@ def _process_followups(db) -> tuple:
                 continue
         access_token = token_cache[acct_id]
 
-        # Lock this follow-up as sending. Mint its own open-tracking token.
+        # Lock this follow-up as sending.
         fu.status = "sending"
         fu.body = body
-        pixel_url = _ensure_tracking_token(fu)
+        pixel_url = _ensure_tracking_token(fu) if TRACK_OPENS else None
         db.commit()
 
         try:
