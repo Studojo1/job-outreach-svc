@@ -79,6 +79,8 @@ jobs:
             --overwrite-existing
 
       - name: Deploy to Kubernetes
+        env:
+          META_CAPI_TOKEN: ${{ secrets.META_CAPI_TOKEN }}
         run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} -n studojo
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
@@ -87,20 +89,26 @@ jobs:
             AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
             AZURE_OPENAI_API_VERSION=2025-04-01-preview \
             AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small \
-            POSTHOG_KEY=${{ secrets.POSTHOG_KEY }} \
             -n studojo
           # Wire the residential proxy (LinkedIn discovery + sending) from app-secrets.
           kubectl set env deployment/${{ env.SERVICE_NAME }} -n studojo \
             --from=secret/app-secrets --keys=linkedin-proxy-url
           # Bob (Mesa) secrets — only set when configured in GitHub secrets,
           # so an empty secret never wipes a value already on the deployment.
-          # Meta Conversions API — authoritative server-side Purchase. Guarded so an
-          # unset secret disables CAPI instead of blanking a working value.
-          if [ -n "${{ secrets.META_CAPI_TOKEN }}" ]; then
-            kubectl set env deployment/${{ env.SERVICE_NAME }} \
-              META_CAPI_TOKEN="${{ secrets.META_CAPI_TOKEN }}" \
-              -n studojo
-          fi
+          # Secrets reach the pod only as secretKeyRef, never as literal values in
+          # the Deployment spec (audit ST-N07). scripts/ci/secret_env.sh explains.
+          # Meta Conversions API token: the GitHub secret is stored in app-secrets
+          # (an empty one changes nothing, so a working value is never blanked).
+          # Keys set by hand on the Deployment are adopted into app-secrets once.
+          export NS=studojo DEP=${{ env.SERVICE_NAME }}
+          . scripts/ci/secret_env.sh
+          secret_put   meta-capi-token "$META_CAPI_TOKEN"
+          secret_adopt META_CAPI_TOKEN meta-capi-token
+          secret_ref   POSTHOG_KEY POSTHOG_KEY
+          secret_ref   RAZORPAY_KEY_SECRET razorpay-key-prod-secret
+          secret_ref   LINKEDIN_ENCRYPTION_KEY linkedin-encryption-key
+          secret_adopt DODO_PAYMENTS_API_KEY dodo-api-key
+          secret_adopt DODO_WEBHOOK_SECRET dodo-webhook-secret
           # Service-to-service secret: X-User-Id is only trusted next to a matching
           # x-studojo-internal header. Read from the same app-secrets key the
           # frontend uses, so the two can never drift. Without it the header path is

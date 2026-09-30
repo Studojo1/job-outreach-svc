@@ -55,6 +55,11 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS else None,
 )
 
+# CF-N05: no 5xx ever shows a student SQL or a driver error.
+from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
+from core.deploy_guards import safe_http_exception_handler  # noqa: E402
+app.add_exception_handler(_StarletteHTTPException, safe_http_exception_handler)
+
 # Middleware (order matters — outermost first)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
@@ -102,6 +107,10 @@ app.include_router(privacy_admin_router, prefix="/api/v1")
 @app.on_event("startup")
 def on_startup():
     """App startup hook."""
+    # CF-N05: refuse to serve a build whose models are ahead of the database
+    # (the old pods keep serving and the deploy's rollout check fails).
+    from core.deploy_guards import check_schema
+    check_schema()
     logger.info("Job outreach service started")
     from services.linkedin_outreach.automation_service import start_automation_daemon
     start_automation_daemon()
