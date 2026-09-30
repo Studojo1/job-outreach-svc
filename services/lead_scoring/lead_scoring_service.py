@@ -83,6 +83,41 @@ _IRRELEVANT_TITLE_RE = re.compile(
 )
 
 
+def role_keywords(roles) -> set:
+    """The words (over 3 letters) of the student's target roles. A lead whose
+    title contains none of them gets the scorer's -25 title penalty."""
+    out = set()
+    for role in roles or []:
+        for word in (role or "").lower().split():
+            if len(word) > 3:  # skip short words like "of", "and"
+                out.add(word)
+    return out
+
+
+# People who hire for any role at their company. Discovery searches for them
+# on purpose (founders and C-level are most of every startup search), but
+# their titles rarely contain the student's role words, so the -25 penalty
+# lands on them: in 4 days of prod leads (30 Sep), 80% of the 32,886 leads
+# with title_relevance -25 were founders or C-level (UC-Q09). "Vice
+# president", "product owner" and "founding engineer" are function roles.
+_DECISION_MAKER_RE = re.compile(
+    r"\b(?:co-?\s?founder|founder|(?<!product )owner|ceo|cto|coo|cpo|cmo|cfo|chief|c\.e\.o|managing director"
+    r"|(?<!vice )(?<!vice-)president)\b",
+    re.IGNORECASE,
+)
+
+
+def is_decision_maker_title(title) -> bool:
+    return bool(_DECISION_MAKER_RE.search(title or ""))
+
+
+def is_relevant_title(title, keywords) -> bool:
+    """A lead worth listing as a match: the title shares a word with the
+    student's target roles, or the person hires for the whole company."""
+    t = (title or "").lower()
+    return any(kw in t for kw in keywords) or is_decision_maker_title(t)
+
+
 def _resolve_city(text: str) -> str:
     """Resolve a location string to its canonical city name using aliases."""
     text_lower = text.lower().strip()
@@ -297,11 +332,7 @@ def score_and_select_leads(
                     candidate_profile.get("target_roles", [])]
 
     # Extract keywords from target roles for cluster matching
-    role_keywords = set()
-    for role in target_roles:
-        for word in role.split():
-            if len(word) > 3:  # skip short words like "of", "and"
-                role_keywords.add(word)
+    role_keywords_ = role_keywords(target_roles)
 
     # ── Company stage preference for size-mismatch penalty ────────────────
     stage_pref_raw = str(
@@ -345,7 +376,7 @@ def score_and_select_leads(
         exact_role_match = any(tr == title for tr in target_roles)
         partial_role_match = any(tr in title or title in tr for tr in target_roles if tr)
 
-        keyword_matches = [kw for kw in role_keywords if kw in title]
+        keyword_matches = [kw for kw in role_keywords_ if kw in title]
         match_count = len(keyword_matches)
 
         if exact_role_match:
@@ -369,7 +400,7 @@ def score_and_select_leads(
 
         # --- 2. Department Relevance (0-20) ---
         d_score = 5
-        dept_keywords = list(role_keywords)
+        dept_keywords = list(role_keywords_)
         if any(kw in title for kw in dept_keywords):
             d_score = 20
         elif any(kw in title for kw in ["engineering", "software", "tech", "product", "data", "design"]):

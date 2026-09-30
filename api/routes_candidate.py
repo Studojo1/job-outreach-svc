@@ -869,9 +869,9 @@ def get_candidate_leads(
                 "justification": score.justification_json,
             } if score else None,
             # The title shares no word with the student's target roles (the
-            # scorer's -25). About 70% of leads, listed and sold as if they
-            # matched (B2C UC-Q09). The page shows these as broader matches.
-            "broader": _is_broader(score),
+            # scorer's -25) and the person is not a founder or C-level, who
+            # hire for every role (B2C UC-Q09). Shown as broader matches.
+            "broader": _is_broader(score, lead.title),
         })
 
     # Sort by score descending, lead id ascending as a total-order tiebreak.
@@ -943,9 +943,16 @@ def _active_candidate_with_leads(db: Session, user_id, exclude_id: int) -> Optio
     return row[0] if row else None
 
 
-def _is_broader(score) -> bool:
+def _is_broader(score, title=None) -> bool:
+    """A lead the student should see apart from their strong matches (UC-Q09).
+
+    The scorer's -25 means the title shares no word with the target roles.
+    Most such leads (80% on 30 Sep) are founders and C-level at the very
+    companies discovery searched, who hire for any role, so those count as
+    strong; only the rest are broader."""
+    from services.lead_scoring.lead_scoring_service import is_decision_maker_title
     tr = getattr(score, "title_relevance", None) if score else None
-    return tr is not None and tr <= -25
+    return tr is not None and tr <= -25 and not is_decision_maker_title(title)
 
 
 class FlexNotesRequest(BaseModel):

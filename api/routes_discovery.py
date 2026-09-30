@@ -761,6 +761,9 @@ async def search_leads(
         }
 
     probe_exclusions: list[str] = []  # populated inside else block; empty for pre-built filters path
+    # The student's role words, for capping loosening (UC-Q09); set with the
+    # generated filters, so pre-built filters keep the old behaviour.
+    loosening_role_keywords: set | None = None
 
     try:
         if request.filters:
@@ -843,6 +846,10 @@ async def search_leads(
 
             from services.lead_calibration.filter_generator_service import generate_apollo_filters
             filters = generate_apollo_filters(profile, db, search_strategy=search_strategy)
+            # Same roles the scorer judges titles against (_score_candidate_leads).
+            from services.lead_scoring.lead_scoring_service import role_keywords
+            loosening_role_keywords = role_keywords(
+                list(preferred_roles) + list(candidate.target_roles or preferred_roles))
 
             logger.info(f"[LeadSearch] Filters generated (path={'llm' if search_strategy else 'rules'}) — "
                         f"segments={len(filters.target_segments)}, "
@@ -887,6 +894,7 @@ async def search_leads(
             db=db,
             excluded_companies=probe_exclusions or None,
             in_location_ids=in_location_ids,
+            role_keywords=loosening_role_keywords,
         )
 
         t_collect = time.perf_counter()
