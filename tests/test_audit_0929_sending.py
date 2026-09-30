@@ -125,7 +125,9 @@ def test_bounce_replacements_are_free_and_not_capped(db, monkeypatch):
     assert sent == ["r@x.com"]
 
 
-def test_legacy_campaign_without_a_reservation_is_not_capped(db, monkeypatch):
+def test_legacy_campaign_without_a_reservation_sends_nothing_more(db, monkeypatch):
+    # Audit 30 Sep (PP-P26): a reservation of 0 is a cap of 0. Legacy campaigns
+    # re-reserve from the wallet when resumed (test_audit_0930_campaign.py).
     sent = []
     _mock_send(monkeypatch, sent)
     db.get(Campaign, 10).credits_reserved = 0
@@ -133,7 +135,8 @@ def test_legacy_campaign_without_a_reservation_is_not_capped(db, monkeypatch):
                      scheduled_at=datetime.utcnow() - timedelta(minutes=1)))
     db.commit()
     campaign_worker._send_ready(db)
-    assert sent == ["a@x.com"]
+    assert sent == []
+    assert db.query(EmailSent).one().error_message == campaign_worker.OVER_CAP_MESSAGE
 
 
 def test_no_apollo_spend_beyond_the_paid_count(db, monkeypatch):

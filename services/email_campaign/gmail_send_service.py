@@ -220,7 +220,7 @@ def _refresh_token_sync(email_account, db) -> str:
             email_account.id,
         )
         raise GmailAuthError(
-            f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
+            f"Gmail auth expired for account {email_account.id}: the owner must reconnect their Gmail account"
         )
 
     logger.info("Refreshing expired Gmail token for account %d", email_account.id)
@@ -259,7 +259,7 @@ def _refresh_token_sync(email_account, db) -> str:
             except Exception:
                 db.rollback()
             raise GmailAuthError(
-                f"Gmail auth expired — {email_account.email_address} must reconnect their Gmail account"
+                f"Gmail auth expired for account {email_account.id}: the owner must reconnect their Gmail account"
             )
         else:
             logger.error(
