@@ -167,6 +167,7 @@ def evaluate_company_fit(
         Missing entries default to 5 (neutral) in the caller.
     """
     from database.models import CompanyProfile
+    from services.company_intelligence.lead_backfill import profile_by_name
 
     # Deduplicate by company name (lowercased)
     unique: dict[str, dict] = {}
@@ -193,7 +194,7 @@ def evaluate_company_fit(
         if domain:
             cp = db.query(CompanyProfile).filter(CompanyProfile.domain == domain).first()
         if cp is None:
-            cp = db.query(CompanyProfile).filter(CompanyProfile.name.ilike(name_lower)).first()
+            cp = profile_by_name(db, name_lower)
 
         if cp:
             if getattr(cp, "company_fit_score", None) is not None:
