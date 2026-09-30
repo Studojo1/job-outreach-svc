@@ -75,6 +75,39 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: jwt-secret-key
+            # Payment, ad and encryption secrets: secretKeyRef only, never a
+            # literal value (audit ST-N07). The deploy workflow maintains these
+            # through scripts/ci/secret_env.sh.
+            - name: RAZORPAY_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: razorpay-key-prod-secret
+            - name: RAZORPAY_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: razorpay-webhook-secret
+            - name: DODO_PAYMENTS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: dodo-api-key
+            - name: DODO_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: dodo-webhook-secret
+            - name: META_CAPI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: meta-capi-token
+            - name: LINKEDIN_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: linkedin-encryption-key
             - name: GMAIL_REDIRECT_URI
               valueFrom:
                 configMapKeyRef:

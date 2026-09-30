@@ -18,7 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from database.models import (
     Base, Campaign, CampaignNotice, Candidate, Coupon, CreditLedger, EmailSent, OutreachOrder,
-    PaymentOrder, SystemEvent, User, UserCredit,
+    PaymentOrder, PaymentRefund, SystemEvent, User, UserCredit,
 )
 from services import refunds
 from services.refund_check import campaign_refund_check
@@ -38,7 +38,7 @@ def db():
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=[t.__table__ for t in (
         User, Candidate, Campaign, EmailSent, CampaignNotice, SystemEvent, Coupon, OutreachOrder,
-        PaymentOrder, UserCredit, CreditLedger)])
+        PaymentOrder, PaymentRefund, UserCredit, CreditLedger)])
     s = sessionmaker(bind=engine)()
     s.add_all([
         User(id="u", email="aarav@example.com", name="Aarav", email_verified=True, created_at=START, updated_at=START),

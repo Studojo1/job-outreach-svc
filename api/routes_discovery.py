@@ -953,7 +953,12 @@ async def search_leads(
         ) from e
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # Never str(e): a database error carries its SQL, and on 23 Sep 26
+        # uploads showed students raw SQL (audit CF-N05). Logged above.
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong on our side while finding hiring managers. Your progress is saved; please try again.",
+        ) from e
 
 
 @router.get("/scoring-ready/{candidate_id}")

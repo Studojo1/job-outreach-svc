@@ -16,12 +16,13 @@ refund_payment, in order:
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.logger import get_logger
-from database.models import Campaign, Candidate, PaymentOrder
+from database.models import Campaign, Candidate, PaymentOrder, PaymentRefund
 from services import credits
 
 logger = get_logger(__name__)
@@ -81,29 +82,85 @@ async def _provider_refund(order: PaymentOrder, reason: str, amount_cents: int |
     raise RefundError(f"Cannot refund a '{order.provider}' order through a provider.")
 
 
-async def refund_payment(db: Session, order_id: int, *, actor: str, reason: str) -> dict:
-    order = db.get(PaymentOrder, order_id)
-    if order is None:
-        raise RefundError("Payment not found.")
-    if order.status == "refunded":
+# A refund is claimed before the provider is asked (status 'refunding',
+# committed), so a double click cannot refund twice and the provider's own
+# refund webhook, which can land before we have settled, waits instead of
+# settling the same refund a second time. No row lock is held across the
+# provider call (the PP-P15 stall). A claim older than this is a crashed run.
+CLAIM_STALE_AFTER = timedelta(minutes=10)
+REFUNDABLE = ("paid", "completed")
+
+
+class RefundInFlight(Exception):
+    """A refund of this payment is being made right now; try again shortly."""
+
+
+def _claim(db: Session, order: PaymentOrder) -> str:
+    """Move the order to 'refunding' if it is still refundable. Returns the
+    status to restore if the provider refuses."""
+    prev = order.status
+    if prev == "refunding" and order.updated_at and datetime.utcnow() - order.updated_at < CLAIM_STALE_AFTER:
+        raise RefundError("A refund of this payment is already in progress.")
+    if prev == "refunded":
         raise RefundError("This payment is already refunded.")
-    if order.status not in ("paid", "completed") or not order.amount_cents or order.amount_cents <= 0:
+    if prev == "refunding":
+        prev = "paid"  # a crashed run's claim; the payment itself was paid
+    elif prev not in REFUNDABLE or not order.amount_cents or order.amount_cents <= 0:
         raise RefundError("Only a paid, real-money payment can be refunded.")
+    claimed = (
+        db.query(PaymentOrder)
+        .filter(PaymentOrder.id == order.id, PaymentOrder.status == order.status)
+        .update({"status": "refunding", "updated_at": datetime.utcnow()}, synchronize_session=False)
+    )
+    db.commit()
+    if not claimed:
+        raise RefundError("A refund of this payment is already in progress.")
+    db.refresh(order)
+    return prev
 
-    # 2. The provider first: if it refuses, nothing in the app changes.
-    refund_id = await _provider_refund(order, reason)
 
-    # 3. Money is back, so stop the service: unfinished campaigns are cancelled
-    #    (their unsent work retired, their credits released through the ledger).
+def _release_claim(db: Session, order: PaymentOrder, prev: str) -> None:
+    db.rollback()
+    db.query(PaymentOrder).filter(PaymentOrder.id == order.id, PaymentOrder.status == "refunding") \
+        .update({"status": prev, "updated_at": datetime.utcnow()}, synchronize_session=False)
+    db.commit()
+
+
+def _credits_already_revoked(db: Session, order_id: int) -> int:
+    return int(db.query(func.coalesce(func.sum(PaymentRefund.credits_revoked), 0))
+               .filter(PaymentRefund.payment_order_id == order_id).scalar() or 0)
+
+
+def _cancel_live_campaigns(db: Session, user_id: str, why: str) -> list[int]:
     from services.email_campaign.campaign_worker import finish_campaign
     live = (
         db.query(Campaign).join(Candidate, Candidate.id == Campaign.candidate_id)
-        .filter(Candidate.user_id == order.user_id,
+        .filter(Candidate.user_id == user_id,
                 Campaign.status.in_(("draft", "running", "paused")))
         .all()
     )
     for c in live:
-        finish_campaign(db, c, reason=f"payment {order.id} refunded", final_status="cancelled")
+        finish_campaign(db, c, reason=why, final_status="cancelled")
+    return [c.id for c in live]
+
+
+async def refund_payment(db: Session, order_id: int, *, actor: str, reason: str) -> dict:
+    order = db.get(PaymentOrder, order_id)
+    if order is None:
+        raise RefundError("Payment not found.")
+    prev = _claim(db, order)
+    remaining = order.amount_cents - (order.refunded_cents or 0)
+
+    # 2. The provider first: if it refuses, nothing in the app changes.
+    try:
+        refund_id = await _provider_refund(order, reason)
+    except Exception:
+        _release_claim(db, order, prev)
+        raise
+
+    # 3. Money is back, so stop the service: unfinished campaigns are cancelled
+    #    (their unsent work retired, their credits released through the ledger).
+    cancelled = _cancel_live_campaigns(db, order.user_id, f"payment {order.id} refunded")
 
     # 4. Settle.
     now = datetime.utcnow()
@@ -112,22 +169,94 @@ async def refund_payment(db: Session, order_id: int, *, actor: str, reason: str)
     order.refunded_at = now
     order.refund_id = refund_id
     order.updated_at = now
-    bought = order.credits_granted or 0
+    bought = max(0, (order.credits_granted or 0) - _credits_already_revoked(db, order.id))
     revoked = credits.revoke(db, order.user_id, bought, credits.REVOKE_REFUND,
                              payment_order_id=order.id, actor=actor, note=reason[:200])
+    db.add(PaymentRefund(payment_order_id=order.id, provider=order.provider,
+                         provider_refund_id=refund_id or f"order-{order.id}-{now.isoformat()}",
+                         amount_cents=remaining, currency=order.currency, source="admin",
+                         actor=actor, reason=reason[:500], credits_revoked=revoked, created_at=now))
     db.commit()
     logger.info("[REFUND] order %s refunded by %s: %s cents, %s of %s credits revoked, refund_id=%s",
-                order.id, actor, order.amount_cents, revoked, bought, refund_id)
+                order.id, actor, remaining, revoked, bought, refund_id)
     return {
         "order_id": order.id,
         "status": "refunded",
-        "refunded_cents": order.amount_cents,
+        "refunded_cents": remaining,
         "currency": order.currency,
         "refund_id": refund_id,
-        "campaigns_cancelled": [c.id for c in live],
+        "campaigns_cancelled": cancelled,
         "credits_revoked": revoked,
         "credits_already_used": bought - revoked,
     }
+
+
+def apply_provider_refund(db: Session, *, provider: str, payment_id: str, refund_id: str,
+                          amount_cents: int | None, currency: str | None = None) -> str:
+    """Settle a refund the provider reports by webhook (PP-P05).
+
+    Refunds we made ourselves are already recorded under their provider id, so
+    their webhook is a no-op. Anything else was refunded outside the app (the
+    Razorpay or Dodo dashboard), and used to leave the credits granted and the
+    payment counted as revenue. It is settled here the way the Refund button
+    settles: a full refund cancels unfinished campaigns and revokes the
+    credits the payment bought; a partial one revokes the same share of them.
+
+    Returns 'duplicate', 'unknown' (no such payment), or 'settled'. Raises
+    RefundInFlight while our own refund of this payment is mid-way.
+    """
+    if not refund_id or not payment_id:
+        return "unknown"
+    if db.query(PaymentRefund.id).filter(PaymentRefund.provider_refund_id == refund_id).first():
+        return "duplicate"
+    col = PaymentOrder.razorpay_payment_id if provider == "razorpay" else PaymentOrder.dodo_payment_id
+    order = db.query(PaymentOrder).filter(col == payment_id).with_for_update().first()
+    if order is None:
+        db.rollback()
+        logger.warning("[REFUND_WEBHOOK] %s refund %s for unknown payment %s", provider, refund_id, payment_id)
+        return "unknown"
+    now = datetime.utcnow()
+    if order.status == "refunding" and order.updated_at and now - order.updated_at < CLAIM_STALE_AFTER:
+        db.rollback()
+        raise RefundInFlight(f"payment {order.id} is being refunded")
+    already = order.refunded_cents or 0
+    amount = amount_cents if amount_cents is not None else order.amount_cents - already
+    amount = max(0, min(amount, order.amount_cents - already))
+    full = already + amount >= order.amount_cents
+
+    cancelled = _cancel_live_campaigns(db, order.user_id, f"payment {order.id} refunded at {provider}") if full else []
+    prior = _credits_already_revoked(db, order.id)
+    granted = order.credits_granted or 0
+    if full:
+        owed = granted - prior
+    else:
+        owed = (granted * amount) // order.amount_cents if order.amount_cents else 0
+    revoked = credits.revoke(db, order.user_id, max(0, owed), credits.REVOKE_REFUND,
+                             payment_order_id=order.id, actor=f"{provider}-webhook",
+                             note=f"refund {refund_id} made outside the app")
+    order.refunded_cents = already + amount
+    order.refunded_at = now
+    order.refund_id = refund_id
+    order.updated_at = now
+    order.status = "refunded" if full else ("paid" if order.status == "refunding" else order.status)
+    db.add(PaymentRefund(payment_order_id=order.id, provider=provider, provider_refund_id=refund_id,
+                         amount_cents=amount, currency=currency or order.currency, source="webhook",
+                         actor=f"{provider}-webhook", reason="refunded outside the app",
+                         credits_revoked=revoked, created_at=now))
+    db.commit()
+    logger.warning("[REFUND_WEBHOOK] settled %s refund %s on payment %s: %s cents (%s), %s credits revoked, "
+                   "campaigns cancelled %s", provider, refund_id, order.id, amount,
+                   "full" if full else "partial", revoked, cancelled)
+    try:
+        from services.reconcile import _tell_founders
+        _tell_founders("refund made outside the app was settled",
+                       f"Payment {order.id} ({provider}) was refunded at the provider: {amount} "
+                       f"{order.currency} ({'full' if full else 'partial'}). {revoked} credits revoked; "
+                       f"campaigns cancelled: {cancelled or 'none'}. Use the admin Refund button next time "
+                       "so the reason is recorded.")
+    except Exception:
+        logger.exception("[REFUND_WEBHOOK] founder alert failed for payment %s", order.id)
+    return "settled"
 
 
 async def refund_campaign_unsent(db: Session, campaign_id: int, *, reported_on, actor: str, reason: str) -> dict:
@@ -153,10 +282,13 @@ async def refund_campaign_unsent(db: Session, campaign_id: int, *, reported_on, 
     if not info or info["amount_cents"] <= 0:
         raise RefundError("No paid, unrefunded payment is linked to this campaign.")
     order = db.get(PaymentOrder, info["payment_id"])
-    if order.status == "refunded":
-        raise RefundError("This payment is already refunded.")
+    prev = _claim(db, order)
 
-    refund_id = await _provider_refund(order, reason, amount_cents=info["amount_cents"])
+    try:
+        refund_id = await _provider_refund(order, reason, amount_cents=info["amount_cents"])
+    except Exception:
+        _release_claim(db, order, prev)
+        raise
 
     campaign = db.get(Campaign, campaign_id)
     if campaign.status in ("draft", "running", "paused"):
@@ -177,8 +309,11 @@ async def refund_campaign_unsent(db: Session, campaign_id: int, *, reported_on, 
     order.refunded_at = now
     order.refund_id = refund_id
     order.updated_at = now
-    if order.refunded_cents >= order.amount_cents:
-        order.status = "refunded"
+    order.status = "refunded" if order.refunded_cents >= order.amount_cents else prev
+    db.add(PaymentRefund(payment_order_id=order.id, provider=order.provider,
+                         provider_refund_id=refund_id or f"campaign-{campaign_id}-{now.isoformat()}",
+                         amount_cents=info["amount_cents"], currency=order.currency, source="policy_3_3",
+                         actor=actor, reason=reason[:500], credits_revoked=revoked, created_at=now))
     db.commit()
     logger.info("[REFUND] campaign %s: %s cents of payment %s refunded by %s (§3.3), %s credits revoked, refund_id=%s",
                 campaign_id, info["amount_cents"], order.id, actor, revoked, refund_id)

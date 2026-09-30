@@ -16,6 +16,9 @@ Runs from the launch-nudge sweep (hourly, one replica at a time).
            (audit P16: one $27 order sat like that from June, its user with no
            wallet at all). After 5 minutes the grant it should have made is
            made, through the normal _finalize_credits, and the founders are told.
+  leads    An unpaid order still at created/profile_complete whose leads
+           exist moves to leads_ready (OP-N10).
+  coupons  coupons.uses is raised to the payments each code paid for (PP-P14).
   wallets  Credits reserved by a user who owns no campaign and whose wallet
            has not moved in 24 hours are a reservation for something that no
            longer exists (P31/P44: 51 credits for one paying user). They are
@@ -203,6 +206,52 @@ def release_orphan_reservations(db: Session, now: datetime) -> int:
     return released
 
 
+def advance_orders_with_leads(db: Session, now: datetime) -> int:
+    """An unpaid order whose leads exist is at leads_ready (audit OP-N10).
+
+    Discovery moves the order forward itself (stage_tracking.advance_
+    discovery_status), but that step is fire-and-forget and skips an order
+    pinned to another resume, so 2,737 orders sat at 'created' holding leads:
+    My Orders said 'Created' and the admin status counts were wrong. Paid
+    orders are left to promote_paid_order.
+    """
+    orders = (
+        db.query(OutreachOrder)
+        .filter(OutreachOrder.status.in_(("created", "profile_complete")),
+                OutreachOrder.leads_generated_at.isnot(None),
+                OutreachOrder.payment_made_at.is_(None))
+        .all()
+    )
+    for o in orders:
+        prev = o.status
+        o.status = "leads_ready"
+        log = list(o.action_log or [])
+        log.append({"ts": now.isoformat(), "msg": f"Status: {prev} → leads_ready (leads exist; {ACTOR})"})
+        o.action_log = log
+        o.updated_at = now
+    db.commit()
+    return len(orders)
+
+
+def sync_coupon_counts(db: Session, now: datetime) -> int:
+    """coupons.uses never below the payments each code paid for (PP-P14)."""
+    from database.models import Coupon, PaymentOrder
+    from api.routes_payment import REDEEMED_STATUSES
+    counts = dict(
+        db.query(PaymentOrder.coupon_id, func.count(PaymentOrder.id))
+        .filter(PaymentOrder.coupon_id.isnot(None), PaymentOrder.status.in_(REDEEMED_STATUSES))
+        .group_by(PaymentOrder.coupon_id).all()
+    )
+    fixed = 0
+    for c in db.query(Coupon).filter(Coupon.id.in_(list(counts))).all():
+        if (c.uses or 0) < counts[c.id]:
+            logger.warning("[RECONCILE] coupon %s uses %s < %s paid redemptions; corrected", c.id, c.uses, counts[c.id])
+            c.uses = counts[c.id]
+            fixed += 1
+    db.commit()
+    return fixed
+
+
 def run(db: Session, now: datetime = None) -> dict:
     now = now or datetime.utcnow()
     out = {}
@@ -212,6 +261,8 @@ def run(db: Session, now: datetime = None) -> dict:
                      ("ledger_drift", check_ledger),
                      ("enrichment_credits_released", release_dead_enrichment_jobs),
                      ("orders_reset", reset_orders_without_campaign),
+                     ("orders_advanced_to_leads_ready", advance_orders_with_leads),
+                     ("coupon_counts_corrected", sync_coupon_counts),
                      ("credits_released", release_orphan_reservations)):
         try:
             out[name] = fn(db, now)

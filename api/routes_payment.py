@@ -5,7 +5,7 @@ import hmac
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, text
@@ -26,6 +26,7 @@ from core.analytics import capture
 from services.payment_receipt import send_receipt
 from core import meta_capi
 import services.dodo_payments as dodo_svc
+from services import webhook_health
 from services import credits
 
 logger = logging.getLogger(__name__)
@@ -54,8 +55,55 @@ def _already_redeemed(db: Session, coupon_id: int, user_id: str) -> bool:
     return db.query(PaymentOrder.id).filter(
         PaymentOrder.coupon_id == coupon_id,
         PaymentOrder.user_id == user_id,
-        PaymentOrder.status.in_(("paid", "completed")),
+        PaymentOrder.status.in_(REDEEMED_STATUSES),
     ).first() is not None
+
+
+# A coupon's use count is the number of payments it actually paid for (audit
+# PP-P14). It used to be a counter bumped by hand in six places, one per
+# confirmation path, so any path that ran twice or forgot the bump left it
+# wrong, and max_uses was checked against it. Every path now sets it from the
+# payments themselves, never lowering it (an admin may have raised it on
+# purpose to close a code), and the hourly reconcile repairs any drift.
+REDEEMED_STATUSES = ("paid", "completed", "refunding", "refunded")
+# A checkout started with a capped code holds one of its remaining uses for
+# this long, so a burst of checkouts cannot all pass the cap before any of
+# them is paid. The buyer's own earlier checkouts do not count against them,
+# so retrying a checkout never locks a student out of their own code.
+CHECKOUT_HOLDS_COUPON = timedelta(minutes=30)
+
+
+def coupon_redemptions(db: Session, coupon_id: int) -> int:
+    return db.query(func.count(PaymentOrder.id)).filter(
+        PaymentOrder.coupon_id == coupon_id,
+        PaymentOrder.status.in_(REDEEMED_STATUSES),
+    ).scalar() or 0
+
+
+def sync_coupon_uses(db: Session, coupon_id: int | None) -> None:
+    """Set coupons.uses from the payments it paid for. Idempotent; does not commit."""
+    if not coupon_id:
+        return
+    db.flush()
+    n = coupon_redemptions(db, coupon_id)
+    db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.uses < n) \
+        .update({"uses": n}, synchronize_session=False)
+
+
+def coupon_exhausted(db: Session, coupon: Coupon, user_id: str, now: datetime | None = None) -> bool:
+    """True when a capped coupon has no use left for this buyer: paid uses plus
+    other buyers' checkouts still in flight."""
+    if coupon.max_uses is None:
+        return False
+    now = now or datetime.utcnow()
+    held = db.query(func.count(PaymentOrder.id)).filter(
+        PaymentOrder.coupon_id == coupon.id,
+        PaymentOrder.status == "created",
+        PaymentOrder.user_id != user_id,
+        PaymentOrder.created_at >= now - CHECKOUT_HOLDS_COUPON,
+    ).scalar() or 0
+    used = max(coupon.uses or 0, coupon_redemptions(db, coupon.id))
+    return used + held >= coupon.max_uses
 
 
 def _get_razorpay_client():
@@ -169,7 +217,7 @@ async def validate_coupon(
         raise HTTPException(status_code=400, detail="Coupon has expired")
     if coupon.valid_from and coupon.valid_from > now:
         raise HTTPException(status_code=400, detail="Coupon is not yet active")
-    if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
+    if coupon_exhausted(db, coupon, current_user.id, now):
         raise HTTPException(status_code=400, detail="Coupon usage limit reached")
     # High-discount internal codes work on staging only. Same 404 an unknown
     # code gets, so probing can't distinguish "blocked" from "does not exist".
@@ -342,7 +390,7 @@ async def create_order(
                 valid = False
             if coupon.valid_from and coupon.valid_from > now:
                 valid = False
-            if coupon.max_uses is not None and coupon.uses >= coupon.max_uses:
+            if coupon_exhausted(db, coupon, current_user.id, now):
                 valid = False
             # High-discount internal codes are staging-only.
             if not settings.RAZORPAY_TEST_MODE and is_internal_only_coupon(
@@ -377,7 +425,7 @@ async def create_order(
         if coupon_id:
             locked = db.query(Coupon).filter_by(id=coupon_id).with_for_update().first()
             if (locked is None or not locked.is_active
-                    or (locked.max_uses is not None and locked.uses >= locked.max_uses)
+                    or coupon_exhausted(db, locked, current_user.id)
                     or _already_redeemed(db, coupon_id, current_user.id)):
                 db.rollback()
                 raise HTTPException(status_code=400, detail="This coupon has already been used.")
@@ -408,8 +456,7 @@ async def create_order(
         if plan.email_credits:
             _grant_credits(db, current_user.id, plan.email_credits,
                            reason=credits.GRANT_COUPON, payment_order_id=order.id)
-        if coupon_id:
-            db.query(Coupon).filter_by(id=coupon_id).update({"uses": Coupon.uses + 1})
+        sync_coupon_uses(db, coupon_id)
         _set_plan_on_order(db, outreach_order_id, plan)
         # Same safety net as a paid order (_finalize_credits): this path never
         # goes through it, so a coupon user was left frozen at 'created'.
@@ -631,8 +678,7 @@ def verify_payment(
 
     _finalize_credits(db, order)
 
-    if order.coupon_id:
-        db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+    sync_coupon_uses(db, order.coupon_id)
 
     db.commit()
 
@@ -714,8 +760,7 @@ def verify_dodo_payment(
         order.updated_at = datetime.utcnow()
         _finalize_credits(db, order)
 
-        if order.coupon_id:
-            db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+        sync_coupon_uses(db, order.coupon_id)
 
         db.commit()
         logger.info("[PAYMENT] Dodo payment verified via API: checkout=%s, plan=%s",
@@ -752,21 +797,29 @@ async def dodo_webhook(request: Request, db: Session = Depends(get_db)):
     """Dodo Payments webhook handler. Verifies Standard Webhooks signature."""
     body = await request.body()
 
-    if settings.DODO_WEBHOOK_SECRET:
-        try:
-            from standardwebhooks.webhooks import Webhook
-            wh = Webhook(settings.DODO_WEBHOOK_SECRET)
-            wh.verify(
-                body.decode(),
-                {
-                    "webhook-id": request.headers.get("webhook-id", ""),
-                    "webhook-timestamp": request.headers.get("webhook-timestamp", ""),
-                    "webhook-signature": request.headers.get("webhook-signature", ""),
-                },
-            )
-        except Exception as e:
-            logger.error("[DODO_WEBHOOK] Signature verification failed: %s", e)
-            raise HTTPException(status_code=400, detail="Invalid webhook signature") from e
+    # Fail closed, like the Razorpay webhook: with no secret every request was
+    # accepted unsigned, so anyone could mark their own Dodo order paid (it is
+    # unset on staging today). A rejected real webhook is not lost; verify-dodo
+    # and payment_reconciler confirm the payment from Dodo's API.
+    if not settings.DODO_WEBHOOK_SECRET:
+        logger.error("[DODO_WEBHOOK] DODO_WEBHOOK_SECRET is not set; rejecting webhook")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+    try:
+        from standardwebhooks.webhooks import Webhook
+        wh = Webhook(settings.DODO_WEBHOOK_SECRET)
+        wh.verify(
+            body.decode(),
+            {
+                "webhook-id": request.headers.get("webhook-id", ""),
+                "webhook-timestamp": request.headers.get("webhook-timestamp", ""),
+                "webhook-signature": request.headers.get("webhook-signature", ""),
+            },
+        )
+    except Exception as e:
+        logger.error("[DODO_WEBHOOK] Signature verification failed: %s", e)
+        webhook_health.record("dodo", ok=False)
+        raise HTTPException(status_code=400, detail="Invalid webhook signature") from e
+    webhook_health.record("dodo", ok=True)
 
     # Signature checked on the raw body above; the DB work runs on the
     # threadpool so a row lock can never stall the event loop (audit P15).
@@ -805,8 +858,7 @@ def _dodo_webhook_apply(body: bytes, db: Session):
 
         _finalize_credits(db, order)
 
-        if order.coupon_id:
-            db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+        sync_coupon_uses(db, order.coupon_id)
 
         db.commit()
         logger.info("[DODO_WEBHOOK] Payment succeeded: checkout=%s, plan=%s, user %s",
@@ -830,6 +882,11 @@ def _dodo_webhook_apply(body: bytes, db: Session):
 
         send_receipt(db, order)  # PS-N10
 
+    elif event_type == "refund.succeeded":
+        # A refund made in the Dodo dashboard, or the echo of one we made (PP-P05).
+        _settle_provider_refund(db, "dodo", data.get("payment_id"), data.get("refund_id"),
+                                data.get("amount"), data.get("currency"))
+
     elif event_type == "payment.failed":
         checkout_id = data.get("checkout_id", "")
         if checkout_id:
@@ -841,6 +898,20 @@ def _dodo_webhook_apply(body: bytes, db: Session):
                 logger.warning("[DODO_WEBHOOK] Payment failed: %s", checkout_id)
 
     return {"status": "ok"}
+
+
+def _settle_provider_refund(db: Session, provider: str, payment_id, refund_id, amount, currency) -> None:
+    """Write a provider-side refund back into the app (PP-P05). A refund we are
+    making right now answers 409 so the provider retries once we have settled."""
+    from services.refunds import RefundInFlight, apply_provider_refund
+    try:
+        outcome = apply_provider_refund(
+            db, provider=provider, payment_id=str(payment_id or ""), refund_id=str(refund_id or ""),
+            amount_cents=int(amount) if amount is not None else None, currency=currency,
+        )
+        logger.info("[REFUND_WEBHOOK] %s refund %s on payment %s: %s", provider, refund_id, payment_id, outcome)
+    except RefundInFlight as e:
+        raise HTTPException(status_code=409, detail="Refund in progress; retry") from e
 
 
 # ── Razorpay Webhook (server-to-server) ──────────────────────────────────────
@@ -866,7 +937,9 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     if not hmac.compare_digest(expected, signature):
         logger.error("[PAYMENT_WEBHOOK] Signature mismatch")
+        webhook_health.record("razorpay", ok=False)
         raise HTTPException(status_code=400, detail="Invalid signature")
+    webhook_health.record("razorpay", ok=True)
 
     # Signature checked on the raw body above; the DB work runs on the
     # threadpool so a row lock can never stall the event loop (audit P15).
@@ -891,8 +964,7 @@ def _razorpay_webhook_apply(body: bytes, db: Session):
                 order.status = "paid"
                 order.updated_at = datetime.utcnow()
                 _finalize_credits(db, order)
-                if order.coupon_id:
-                    db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+                sync_coupon_uses(db, order.coupon_id)
                 db.commit()
                 logger.info("[PAYMENT_WEBHOOK] Payment captured: %s, plan=%s", rz_order_id, order.plan_id)
                 capture("payment_confirmed", str(order.user_id), {
@@ -909,6 +981,12 @@ def _razorpay_webhook_apply(body: bytes, db: Session):
                 safe_mark_stage(db, str(order.user_id), "payment_made")
                 _run_async(_report_purchase_to_meta, db, order)
                 send_receipt(db, order)  # PS-N10
+
+    elif event == "refund.processed":
+        # A refund made in the Razorpay dashboard, or the echo of one we made (PP-P05).
+        refund = payload.get("payload", {}).get("refund", {}).get("entity", {})
+        _settle_provider_refund(db, "razorpay", refund.get("payment_id"), refund.get("id"),
+                                refund.get("amount"), refund.get("currency"))
 
     elif event == "payment.failed":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
