@@ -18,7 +18,7 @@ from database.models import User, Coupon, PaymentOrder, UserCredit, OutreachOrde
 from core.config import settings
 from core.pricing import (
     get_plan, get_plans, get_tier_pricing, get_dodo_product_id, apply_coupon,
-    is_internal_only_coupon,
+    is_internal_only_coupon, sellable_email_packs,
 )
 from core.geo import detect_country, get_client_ip, is_india
 from api.dependencies import get_current_user
@@ -269,6 +269,14 @@ class CreateOrderRequest(BaseModel):
     # blockers and cookie refusals leave them absent, and that is fine.
     fbp: Optional[str] = None
     fbc: Optional[str] = None
+    # HP-N13: the visitor's cookie choice ("granted" / "denied" / None when
+    # they were never asked) and device time zone, so the server-side Meta
+    # Purchase honours the same consent as the browser pixel.
+    tracking_consent: Optional[str] = None
+    time_zone: Optional[str] = None
+    # UC-Q09: the candidate whose leads the pricing page showed. Optional; the
+    # server falls back to the user's active candidate.
+    candidate_id: Optional[int] = None
 
 
 def _meta_signal(value: Optional[str]) -> Optional[str]:
@@ -281,12 +289,18 @@ def _meta_signal(value: Optional[str]) -> Optional[str]:
     return v[:255] if v.startswith("fb.") else None
 
 
-def _meta_signals(body: CreateOrderRequest, req: Request) -> dict:
+def _meta_signals(body: CreateOrderRequest, req: Request, country: Optional[str] = None) -> dict:
     """PaymentOrder columns holding the buyer's match signals (EX-07).
 
     Captured at create-order because the Purchase is reported later, often
     from a webhook that has no browser behind it.
+
+    Without consent (HP-N13) none of them is kept, and meta_fbp carries a
+    mark that tells _report_purchase_to_meta not to report this order.
     """
+    if not meta_capi.meta_allowed(body.tracking_consent, body.time_zone, country):
+        return {"meta_fbp": meta_capi.NO_CONSENT_MARK, "meta_fbc": None,
+                "client_ip": None, "client_user_agent": None}
     ip = get_client_ip(req)
     return {
         "meta_fbp": _meta_signal(body.fbp),
@@ -313,6 +327,29 @@ def _has_something_to_send(db: Session, user_id: str) -> bool:
         # Never block a payment on a failed check.
         logger.warning("[PAYMENT] extension_drafts check failed for %s; allowing", user_id)
         return True
+
+
+def _strong_pool(db: Session, user_id: str, candidate_id: Optional[int]) -> Optional[int]:
+    """Strong matches on the candidate being bought for, or None when the user
+    has no candidate with leads (the pack cap then does not apply)."""
+    from api.routes_candidate import _active_candidate_with_leads, count_strong_leads
+    from database.models import Candidate
+    try:
+        with db.begin_nested():
+            cid = None
+            if candidate_id is not None and db.query(Candidate.id).filter(
+                    Candidate.id == candidate_id, Candidate.user_id == user_id).first():
+                cid = candidate_id
+            if cid is None:
+                cid = _active_candidate_with_leads(db, user_id, exclude_id=-1)
+            if cid is None:
+                return None
+            total, strong = count_strong_leads(db, cid)
+            return strong if total else None
+    except Exception:
+        # Never block a payment on a failed check.
+        logger.warning("[PAYMENT] strong-pool check failed for %s; allowing every pack", user_id)
+        return None
 
 
 @router.post("/create-order")
@@ -360,6 +397,20 @@ async def create_order(
             status_code=409,
             detail="We have not found hiring managers for you yet, so there is nothing to buy. Run the search again first.",
         )
+
+    # Do not sell a pack much bigger than the student's pool of strong matches
+    # (B2C UC-Q09). The smallest pack always stays sellable.
+    if plan.plan_type == "email" and plan.email_credits:
+        strong = _strong_pool(db, current_user.id, body.candidate_id)
+        allowed = sellable_email_packs(strong, settings.RAZORPAY_TEST_MODE)
+        if plan.email_credits not in allowed:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"We found {strong} strong matches for you, so a {plan.email_credits}-contact pack "
+                    f"would mostly go to weaker matches. Please choose the {max(allowed)}-contact pack."
+                ),
+            )
 
     # email_50 is India-only (no USD price); block non-India orders
     if resolved_plan_id == "email_50" and not is_india(req):
@@ -526,7 +577,7 @@ async def create_order(
             geo_country=country,
             status="created",
             idempotency_key=idem_key,
-            **_meta_signals(body, req),
+            **_meta_signals(body, req, country),
         )
         db.add(order)
         _set_plan_on_order(db, outreach_order_id, plan)
@@ -593,7 +644,7 @@ async def create_order(
         geo_country=country,
         status="created",
         idempotency_key=idem_key,
-        **_meta_signals(body, req),
+        **_meta_signals(body, req, country),
     )
     db.add(order)
     _set_plan_on_order(db, outreach_order_id, plan)
@@ -1099,6 +1150,10 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
     so a payment confirmed while the user's tab is closed is still reported.
     """
     if not meta_capi.is_configured():
+        return
+    if order.meta_fbp == meta_capi.NO_CONSENT_MARK:
+        # An EU/UK buyer who did not accept tracking (HP-N13).
+        logger.info("[META_CAPI] Order %s: no tracking consent; Purchase not sent", order.id)
         return
     try:
         event_id = order.razorpay_order_id or order.dodo_checkout_id
