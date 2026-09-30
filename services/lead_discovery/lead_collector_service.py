@@ -771,6 +771,18 @@ def _paginate_filters(
     return leads_collected
 
 
+# Loosening stops once this many relevant leads are stored (UC-Q09): the
+# largest tier sold is 500, and every further stage only adds people further
+# from the student's target (the last one drops location entirely).
+RELEVANT_LEADS_ENOUGH = 500
+
+
+def _relevant_lead_count(db: Session, candidate_id: int, keywords: set) -> int:
+    from services.lead_scoring.lead_scoring_service import is_relevant_title
+    titles = db.query(Lead.title).filter(Lead.candidate_id == candidate_id).all()
+    return sum(1 for (t,) in titles if is_relevant_title(t, keywords))
+
+
 def collect_leads(
     filters: LeadFilter,
     candidate_id: int,
@@ -778,6 +790,7 @@ def collect_leads(
     db: Session,
     excluded_companies: list[str] | None = None,
     in_location_ids: set[int] | None = None,
+    role_keywords: set | None = None,
 ) -> int:
     """Execute iterative Apollo search logic until target_leads are secured.
 
@@ -796,6 +809,10 @@ def collect_leads(
 
     in_location_ids: optional set that receives the ids of leads found while
     person_locations was still applied, for location scoring (UC-Q04).
+
+    role_keywords: the words of the student's target roles
+    (lead_scoring_service.role_keywords). When given, loosening stops once
+    RELEVANT_LEADS_ENOUGH stored leads are relevant (UC-Q09).
     """
     # Fail fast when Apollo has no usable credentials. Without this the run walks
     # every loosening stage making doomed calls, then reports "0 leads" several
@@ -809,6 +826,7 @@ def collect_leads(
     try:
         return _collect_in_stages(
             filters, candidate_id, target_leads, db, excluded_companies, in_location_ids,
+            role_keywords=role_keywords,
         )
     except ApolloTransientError as e:
         # Apollo went down mid-run. Keep what was stored rather than walking
@@ -828,6 +846,7 @@ def _collect_in_stages(
     db: Session,
     excluded_companies: list[str] | None,
     in_location_ids: set[int] | None = None,
+    role_keywords: set | None = None,
 ) -> int:
     # Phase 1: Original filters — paginate fully
     logger.info("Collecting leads — Phase 1: original filters (target=%d, exclusions=%d)",
@@ -851,6 +870,15 @@ def _collect_in_stages(
         for stage_idx, loose_filters in enumerate(loosening_stages, 1):
             if leads_collected >= target_leads:
                 break
+            # Enough good leads already: a looser stage would only pad the
+            # list with people further from the target (UC-Q09: about 70% of
+            # leads shared no title word with it, and were sold as matches).
+            if role_keywords:
+                relevant = _relevant_lead_count(db, candidate_id, role_keywords)
+                if relevant >= RELEVANT_LEADS_ENOUGH:
+                    logger.info("[LOOSENING] Stopping before stage %d: %d relevant leads of %d stored",
+                                stage_idx, relevant, leads_collected)
+                    break
 
             logger.info(
                 "[LOOSENING] Stage %d/%d (collected so far: %d/%d)",
