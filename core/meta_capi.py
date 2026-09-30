@@ -34,6 +34,12 @@ def _hash(value: str) -> str:
 
 
 def is_configured() -> bool:
+    # Test-mode payments are not revenue. Staging runs Razorpay in test mode and
+    # its ₹90 / ₹1 test orders were landing in the live ad dataset, because the
+    # token was the live one (audit ST-N07). Even if a token reaches staging
+    # again, nothing is reported from there.
+    if settings.RAZORPAY_TEST_MODE:
+        return False
     return bool(settings.META_CAPI_TOKEN and settings.META_PIXEL_ID)
 
 

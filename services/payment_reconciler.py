@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timedelta
 
 from database.session import SessionLocal
-from database.models import PaymentOrder, Coupon
+from database.models import PaymentOrder
 from core.analytics import capture
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ _thread: threading.Thread | None = None
 def _flip_to_paid(db, order: PaymentOrder, *, payment_id: str | None, provider: str) -> None:
     """Mark an order paid and run the shared finalisation path (credits +
     funnel stage). Mirrors the verify endpoints exactly."""
-    from api.routes_payment import _finalize_credits
+    from api.routes_payment import _finalize_credits, sync_coupon_uses
     from services.stage_tracking import safe_mark_stage
 
     # Re-read under a row lock and re-check status to avoid a double-grant race
@@ -64,8 +64,7 @@ def _flip_to_paid(db, order: PaymentOrder, *, payment_id: str | None, provider: 
     order.updated_at = datetime.utcnow()
     _finalize_credits(db, order)
 
-    if order.coupon_id:
-        db.query(Coupon).filter_by(id=order.coupon_id).update({"uses": Coupon.uses + 1})
+    sync_coupon_uses(db, order.coupon_id)
 
     db.commit()
     logger.warning(
@@ -95,7 +94,9 @@ def _report_recovered_payment(db, order: PaymentOrder, provider: str) -> None:
             "amount_cents": order.amount_cents,
             "currency": order.currency,
             "country": order.geo_country,
-            "source": "reconciler",
+            # 'source' is overwritten with 'server' by capture() (ST-N09), so
+            # the path goes under 'trigger', as the webhooks do (ST-N04).
+            "trigger": "reconciler",
         })
     except Exception:
         logger.exception("[RECONCILER] PostHog capture failed for order %s", order.id)

@@ -448,7 +448,12 @@ async def api_create_campaign(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         _release_create_reservation(db, current_user.id, reserved)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        # Never str(e) to the student: a database error carries its SQL (CF-N05).
+        logger.exception("[CAMPAIGN] create failed for user %s", current_user.id)
+        raise HTTPException(
+            status_code=500,
+            detail="We could not create your campaign because of a problem on our side. Nothing was charged; please try again.",
+        ) from e
 
 
 def _release_create_reservation(db: Session, user_id: str, reserved: int) -> None:
@@ -526,7 +531,11 @@ async def preview_email(
             detail="Preview generation timed out. Your campaign will still work — emails are generated fresh per lead just before sending.",
         ) from None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}") from e
+        logger.exception("[CAMPAIGN] preview generation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Preview generation failed. Your campaign will still work — emails are generated fresh per lead just before sending.",
+        ) from e
 
 
 @router.post("/{campaign_id}/transition")
@@ -1345,7 +1354,7 @@ def worker_send_ready():
         return result
     except Exception as e:
         logger.error("[WORKER] send-ready failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="send-ready failed; see the service log") from e
 
 
 @router.get("/worker/apollo-credits", dependencies=[Depends(require_internal_caller)])

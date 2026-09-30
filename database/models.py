@@ -374,6 +374,28 @@ class PaymentOrder(Base):
     coupon = relationship("Coupon", back_populates="payment_orders")
 
 
+class PaymentRefund(Base):
+    """One provider refund on one payment (migration 070, audit PP-P05).
+
+    Written by services/refunds.py only: the admin Refund button, the §3.3
+    campaign refund and the providers' refund webhooks (a refund clicked in
+    the Razorpay/Dodo dashboard). provider_refund_id is unique, so each refund
+    settles money and credits exactly once whichever path sees it first.
+    """
+    __tablename__ = "payment_refunds"
+    id = Column(Integer, primary_key=True)
+    payment_order_id = Column(Integer, ForeignKey("payment_orders.id", ondelete="CASCADE"), nullable=False)
+    provider = Column(String(20), nullable=False)
+    provider_refund_id = Column(Text, nullable=False, unique=True)
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String(10), nullable=True)
+    source = Column(String(20), nullable=False)  # admin | policy_3_3 | webhook
+    actor = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    credits_revoked = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class UserCredit(Base):
     __tablename__ = "user_credits"
     id = Column(Integer, primary_key=True, index=True)
