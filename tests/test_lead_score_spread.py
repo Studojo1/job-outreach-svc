@@ -172,3 +172,51 @@ def test_leads_generated_is_stamped_before_the_justification_pass(db, monkeypatc
     rd._score_candidate_leads(db, cand)
     assert "stamp" in seen, "justification pass did not run"
     assert seen["stamp"] is not None
+
+
+# ── Industry relevance (UC-Q04, recon 30 Sep) ────────────────────────────────
+# After the 2.7 blend went, industry_relevance was still 5 on 98% of prod
+# scores: candidates pick quiz slugs ("b2b-saas", "financial_services") and
+# leads carry company-cache text ("Software Development", "Financial
+# Services"), and the scorer compared them for exact equality.
+
+from services.lead_scoring.lead_scoring_service import industry_matches  # noqa: E402
+
+
+@pytest.mark.parametrize("lead_industry, picked", [
+    ("Software Development", ["b2b-saas"]),
+    ("Financial Services", ["fintech"]),
+    ("Fintech", ["financial_services"]),
+    ("Hospitals and Health Care", ["healthtech"]),
+    ("E-Learning", ["edtech"]),
+    ("Artificial Intelligence", ["ai-native-startup"]),
+    ("Non-profit Organizations", ["non_profit"]),
+    ("Computer & Network Security", ["cybersecurity"]),
+])
+def test_quiz_slugs_match_company_cache_industries(lead_industry, picked):
+    assert industry_matches(lead_industry, picked)
+
+
+@pytest.mark.parametrize("lead_industry, picked", [
+    ("Retail", ["ai"]),              # word boundary: "ai" is not in "retail"
+    ("Real Estate", ["b2b-saas"]),
+    ("IT Services", ["media-tech"]),  # "-tech" alone does not mean software
+    ("", ["fintech"]),
+    ("Banking", []),
+])
+def test_unrelated_industries_do_not_match(lead_industry, picked):
+    assert not industry_matches(lead_industry, picked)
+
+
+def test_industry_relevance_discriminates_in_the_real_scorer():
+    profile = {**PROFILE, "company_preferences": {"industries": ["fintech", "b2b-saas"]}}
+    leads = [
+        {"apollo_person_id": "fin", "title": "Product Manager", "company": "A", "industry": "Financial Services"},
+        {"apollo_person_id": "soft", "title": "Product Manager", "company": "B", "industry": "Software Development"},
+        {"apollo_person_id": "other", "title": "Product Manager", "company": "C", "industry": "Real Estate"},
+    ]
+    out = score_and_select_leads([dict(ld) for ld in leads], profile, ROLE_INTEL, target_count=3)
+    by = {ld["apollo_person_id"]: ld for ld in out}
+    assert by["fin"]["_industry_score"] == 15
+    assert by["soft"]["_industry_score"] == 15
+    assert by["other"]["_industry_score"] == 5

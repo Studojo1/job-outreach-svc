@@ -56,6 +56,10 @@ class NextStep:
     # holding credits (a finished campaign handed back its unsent work) gets
     # "launch another campaign", not "nothing has been sent yet".
     has_launched: bool = False
+    # Unpaid users who already have leads: how many, so the /outreach button
+    # can say "See your N hiring managers" instead of restarting upload
+    # (audit UC-Q14). 0 in every other state.
+    lead_count: int = 0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -91,8 +95,9 @@ def _launchable_candidate(db: Session, user_id: str, preferred: Optional[int]) -
     return ok[0] if ok else None
 
 
-def _candidate_with_leads(db: Session, user_id: str, preferred: Optional[int]) -> Optional[int]:
-    """The order's candidate if it has leads, else the newest one that does."""
+def _candidate_with_leads(db: Session, user_id: str, preferred: Optional[int]) -> tuple[Optional[int], int]:
+    """(candidate id, lead count): the order's candidate if it has leads,
+    else the newest one that does; (None, 0) when none has."""
     rows = (
         db.query(Candidate.id, func.count(Lead.id))
         .outerjoin(Lead, Lead.candidate_id == Candidate.id)
@@ -101,20 +106,23 @@ def _candidate_with_leads(db: Session, user_id: str, preferred: Optional[int]) -
         .order_by(Candidate.created_at.desc())
         .all()
     )
-    with_leads = [cid for cid, n in rows if n]
+    with_leads = {cid: n for cid, n in rows if n}
     if preferred in with_leads:
-        return preferred
-    return with_leads[0] if with_leads else None
+        return preferred, with_leads[preferred]
+    for cid, n in rows:  # newest first
+        if n:
+            return cid, n
+    return None, 0
 
 
 def _not_paid(db: Session, user_id: str, order, available: int, has_launched: bool) -> NextStep:
     """Unpaid. If they already have leads, point them at those, not at a new
     upload: /outreach used to restart upload, which then hid the leads they
     had behind a resume with none (audit OP-N03)."""
-    cid = _candidate_with_leads(db, user_id, order.candidate_id if order else None)
+    cid, lead_count = _candidate_with_leads(db, user_id, order.candidate_id if order else None)
     return NextStep(NOT_PAID, "/leads/results" if cid else None, available,
                     order_id=order.id if order else None, candidate_id=cid,
-                    has_launched=has_launched)
+                    has_launched=has_launched, lead_count=lead_count)
 
 
 def resolve_next_step(db: Session, user_id: str, *, heal: bool = True) -> NextStep:
