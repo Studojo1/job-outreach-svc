@@ -134,12 +134,16 @@ def test_unpaid_user_with_leads_is_sent_to_them(db):
     assert step.state == "not_paid"
     assert step.path == "/leads/results"
     assert step.candidate_id == 1
+    # UC-Q14: the /outreach button says how many ("See your 30 hiring managers").
+    assert step.lead_count == 30
+    assert step.as_dict()["lead_count"] == 30
 
 
 def test_unpaid_user_without_leads_gets_no_path(db):
     from services.next_step import resolve_next_step
     step = resolve_next_step(db, "u", heal=False)
     assert step.state == "not_paid" and step.path is None
+    assert step.lead_count == 0
 
 
 # ── PS-N02 ──────────────────────────────────────────────────────────────────
