@@ -169,8 +169,16 @@ def _resume_auth_paused_campaigns(db: Session, user_id: str, email_address: str)
             .all()
         )
         for campaign in paused:
-            transition_campaign(db, campaign.id, "running", actor="system")
-            logger.info("[GmailOAuth] Resumed campaign %s after %s reconnected", campaign.id, email_address)
+            # One campaign that cannot resume (e.g. a legacy one with no
+            # credits to cover it, PP-P26) must not stop the others.
+            try:
+                transition_campaign(db, campaign.id, "running", actor="system")
+            except ValueError as e:
+                db.rollback()
+                logger.info("[GmailOAuth] Campaign %s stays paused after reconnect: %s", campaign.id, e)
+                continue
+            logger.info("[GmailOAuth] Resumed campaign %s after account %s reconnected",
+                        campaign.id, campaign.email_account_id)
     except Exception:
         db.rollback()
         logger.exception("[GmailOAuth] Could not resume auth-paused campaigns for %s", user_id)
