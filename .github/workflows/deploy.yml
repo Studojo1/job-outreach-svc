@@ -81,6 +81,9 @@ jobs:
       - name: Deploy to Kubernetes
         env:
           META_CAPI_TOKEN: ${{ secrets.META_CAPI_TOKEN }}
+          CONTEXT_DEV_API_KEY: ${{ secrets.CONTEXT_DEV_API_KEY }}
+          BOB_ACCESS_CODE: ${{ secrets.BOB_ACCESS_CODE }}
+          LEADSFORGE_API_KEY: ${{ secrets.LEADSFORGE_API_KEY }}
         run: |
           kubectl set image deployment/${{ env.SERVICE_NAME }} ${{ env.SERVICE_NAME }}=${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${{ env.IMAGE_TAG }} -n studojo
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
@@ -93,8 +96,6 @@ jobs:
           # Wire the residential proxy (LinkedIn discovery + sending) from app-secrets.
           kubectl set env deployment/${{ env.SERVICE_NAME }} -n studojo \
             --from=secret/app-secrets --keys=linkedin-proxy-url
-          # Bob (Mesa) secrets — only set when configured in GitHub secrets,
-          # so an empty secret never wipes a value already on the deployment.
           # Secrets reach the pod only as secretKeyRef, never as literal values in
           # the Deployment spec (audit ST-N07). scripts/ci/secret_env.sh explains.
           # Meta Conversions API token: the GitHub secret is stored in app-secrets
@@ -123,21 +124,23 @@ jobs:
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             --from=secret/app-secrets --keys=azure-storage-account-name,azure-storage-account-key,POSTHOG_PERSONAL_API_KEY,POSTHOG_PROJECT_ID \
             -n studojo
-          if [ -n "${{ secrets.CONTEXT_DEV_API_KEY }}" ]; then
+          # Razorpay webhook signature (UC-Q05). The same app-secrets key the
+          # frontend's own Razorpay webhook uses; kubectl names it
+          # RAZORPAY_WEBHOOK_SECRET. Without it the webhook refuses every call
+          # and payments are confirmed only by the reconciler.
+          if [ -n "$(kubectl get secret app-secrets -n studojo -o jsonpath='{.data.razorpay-webhook-secret}')" ]; then
             kubectl set env deployment/${{ env.SERVICE_NAME }} \
-              CONTEXT_DEV_API_KEY="${{ secrets.CONTEXT_DEV_API_KEY }}" \
+              --from=secret/app-secrets --keys=razorpay-webhook-secret \
               -n studojo
           fi
-          if [ -n "${{ secrets.BOB_ACCESS_CODE }}" ]; then
-            kubectl set env deployment/${{ env.SERVICE_NAME }} \
-              BOB_ACCESS_CODE="${{ secrets.BOB_ACCESS_CODE }}" \
-              -n studojo
-          fi
-          if [ -n "${{ secrets.LEADSFORGE_API_KEY }}" ]; then
-            kubectl set env deployment/${{ env.SERVICE_NAME }} \
-              LEADSFORGE_API_KEY="${{ secrets.LEADSFORGE_API_KEY }}" \
-              -n studojo
-          fi
+          # Bob (Mesa) keys: stored in app-secrets, referenced, never literal
+          # (ST-N07). An empty GitHub secret changes nothing.
+          secret_put   context-dev-api-key "$CONTEXT_DEV_API_KEY"
+          secret_put   bob-access-code "$BOB_ACCESS_CODE"
+          secret_put   leadsforge-api-key "$LEADSFORGE_API_KEY"
+          secret_adopt CONTEXT_DEV_API_KEY context-dev-api-key
+          secret_adopt BOB_ACCESS_CODE bob-access-code
+          secret_adopt LEADSFORGE_API_KEY leadsforge-api-key
           # Emailer's send-template secret, for the paid-not-launched nudges
           # (services/launch_nudge.py). Only wired once the app-secrets key
           # exists; without it the nudges are off and nothing else changes.
