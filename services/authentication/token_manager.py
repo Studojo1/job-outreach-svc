@@ -7,6 +7,10 @@ from services.authentication.google_oauth import refresh_gmail_access_token
 
 logger = logging.getLogger(__name__)
 
+class MailboxOwnedElsewhere(Exception):
+    """This Gmail address is already connected to a different Studojo account."""
+
+
 async def store_user_tokens(db: Session, user_id: str, email_address: str, access_token: str, refresh_token: Optional[str], expires_in: int):
     """Stores or updates the user's Gmail tokens in the database."""
     try:
@@ -25,8 +29,12 @@ async def store_user_tokens(db: Session, user_id: str, email_address: str, acces
                 EmailAccount.provider == "gmail"
             ).first()
 
+        # Moving the row would hand the other account's mailbox, and every
+        # campaign sending from it, to this user (audit NEW-01).
+        if account and account.user_id != str(user_id):
+            raise MailboxOwnedElsewhere(email_address)
+
         if account:
-            account.user_id = str(user_id)
             account.access_token = access_token
             if refresh_token:
                 account.refresh_token = refresh_token
