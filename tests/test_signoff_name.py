@@ -199,3 +199,36 @@ def test_prewritten_body_is_repaired_before_it_is_sent(db, monkeypatch):
 
     assert len(sent) == 1
     assert sent[0]["body"].splitlines()[-1] == "A J Mohamed Nihal"
+
+
+# Found in a dry run over every production email: one account name is a
+# username, so "there" would have been "repaired" to "faizannmohammad0016".
+
+def test_username_account_name_is_never_used_to_sign(db, prompts):
+    db.get(User, "u").name = "faizannmohammad0016"
+    db.commit()
+    gen.generate_email_for_lead(db.get(Lead, 1), db.get(Candidate, 1), "warm_intro")
+    assert "faizannmohammad0016" not in prompts[0]
+    assert 'sign off with "Best,"' in prompts[0]
+
+
+def test_repair_drops_the_line_when_there_is_no_real_name(db):
+    db.get(User, "u").name = "faizannmohammad0016"
+    db.commit()
+    body = "Hi Pratistha,\n\nJust bumping this up.\n\nWould you know who I should reach out to?\nthere"
+    out = gen.repair_signoff(body, db.get(Candidate, 1))
+    assert out == "Hi Pratistha,\n\nJust bumping this up.\n\nWould you know who I should reach out to?"
+
+
+def test_repair_never_empties_a_body(db):
+    db.get(User, "u").name = ""
+    db.commit()
+    assert gen.repair_signoff("Me", db.get(Candidate, 1)) == "Me"
+
+
+@pytest.mark.parametrize("touch", [1, 2])
+def test_followups_never_sign_with_a_username(db, prompts, touch):
+    db.get(User, "u").name = "faizannmohammad0016"
+    db.commit()
+    gen.generate_followup_email(db.get(Lead, 1), db.get(Candidate, 1), "Hi Pratistha, earlier note.", touch)
+    assert "faizannmohammad0016" not in prompts[0]
