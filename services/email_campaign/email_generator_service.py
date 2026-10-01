@@ -252,6 +252,9 @@ _HEADER_WORDS = {
 def _is_valid_name(n: str) -> bool:
     if not n:
         return False
+    # Usernames and emails ("faizannmohammad0016") are not names to sign with.
+    if re.search(r"[\d@_]", n):
+        return False
     low = n.lower()
     if any(w in low for w in _DEGREE_WORDS):
         return False
@@ -300,7 +303,7 @@ def repair_signoff(body: str, candidate: Candidate) -> str:
     """
     lines = (body or "").rstrip().split("\n")
     last = lines[-1].strip()
-    if not _BROKEN_SIGNOFF.fullmatch(last):
+    if len(lines) < 2 or not _BROKEN_SIGNOFF.fullmatch(last):
         return body
     try:
         profile = extract_candidate_profile(candidate, fallback_name=_account_name(candidate))
@@ -308,8 +311,11 @@ def repair_signoff(body: str, candidate: Candidate) -> str:
     except Exception:
         logger.warning("[EmailGen] Could not resolve a sign-off name for candidate %s", candidate.id, exc_info=True)
         return body
-    if not name or name == last:
+    if name == last:
         return body
+    if not name:
+        # No real name anywhere: drop the line rather than send "there".
+        return "\n".join(lines[:-1]).rstrip()
     lines[-1] = lines[-1].replace(last, name)
     return "\n".join(lines)
 
@@ -337,7 +343,7 @@ def extract_candidate_profile(candidate: Candidate, fallback_name: str = "") -> 
     prefs = parsed.get("preferences", {})
 
     raw_name = personal.get("name") or parsed.get("name") or ""
-    name = raw_name if _is_valid_name(raw_name) else (fallback_name or "")
+    name = raw_name if _is_valid_name(raw_name) else (fallback_name if _is_valid_name(fallback_name) else "")
     # A name typed in caps on the resume should not sign the email as "KAAVYA".
     if name.isupper():
         name = name.title()
@@ -1162,7 +1168,8 @@ def generate_followup_email(lead: Lead, candidate: Candidate, parent_body: str, 
     # No full name on the resume: use the account name rather than signing the
     # follow-up as "there".
     if not candidate_name:
-        candidate_name = _account_name(candidate)
+        account_name = _account_name(candidate)
+        candidate_name = account_name if _is_valid_name(account_name) else ""
     if candidate_name.isupper():
         candidate_name = candidate_name.title()
 
