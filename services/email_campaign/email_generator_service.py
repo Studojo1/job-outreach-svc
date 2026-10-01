@@ -286,6 +286,34 @@ def _signoff_name(full_name: str) -> str:
     return words[0]
 
 
+# Sign-off lines that name nobody. "Me" and "there" are old fallbacks; a lone
+# initial is a name like "A J Mohamed Nihal" cut to its first word.
+_BROKEN_SIGNOFF = re.compile(r"(?i:me|there)|[A-Za-z]\.?")
+
+
+def repair_signoff(body: str, candidate: Candidate) -> str:
+    """Replace a sign-off that names nobody with the sender's real name.
+
+    Runs at send time, so it also covers bodies written before a generator
+    fix and stored until their send date (ticket #40: two emails written on
+    30 Sep went out signed "A" on 1 Oct, after the generator was fixed).
+    """
+    lines = (body or "").rstrip().split("\n")
+    last = lines[-1].strip()
+    if not _BROKEN_SIGNOFF.fullmatch(last):
+        return body
+    try:
+        profile = extract_candidate_profile(candidate, fallback_name=_account_name(candidate))
+        name = _signoff_name(profile["candidate_name"])
+    except Exception:
+        logger.warning("[EmailGen] Could not resolve a sign-off name for candidate %s", candidate.id, exc_info=True)
+        return body
+    if not name or name == last:
+        return body
+    lines[-1] = lines[-1].replace(last, name)
+    return "\n".join(lines)
+
+
 def _account_name(candidate: Candidate) -> str:
     """Name on the candidate's Studojo account, used when the resume gives none."""
     db = object_session(candidate)

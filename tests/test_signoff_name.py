@@ -132,3 +132,70 @@ def test_initial_first_name_signs_followups_with_full_name(db, prompts, touch):
     db.commit()
     gen.generate_followup_email(db.get(Lead, 1), db.get(Candidate, 1), "Hi Pratistha, earlier note.", touch)
     assert 'Sign off: "A J Mohamed Nihal"' in prompts[0]
+
+
+# Ticket #40, again: two emails written on 30 Sep, before the fix, were stored
+# and sent on 1 Oct still signed "A". The sign-off is now repaired at send time.
+
+NIHAL_BODY = (
+    "Hi Meghna,\n\nI built two platforms recently.\n\n"
+    "Would you know if there's an opening, or who on the product side to talk to?\n\nA"
+)
+
+
+@pytest.mark.parametrize("body,expected_last", [
+    (NIHAL_BODY, "A J Mohamed Nihal"),
+    ("Hi,\n\nNote.\n\nCheers,\nMe", "A J Mohamed Nihal"),
+    ("Hi,\n\nNote.\n\nthere", "A J Mohamed Nihal"),
+    ("Hi,\n\nNote.\n\nBest,\nA.", "A J Mohamed Nihal"),
+])
+def test_repair_signoff_fixes_names_that_name_nobody(db, body, expected_last):
+    db.get(Candidate, 1).parsed_json = {"personal_info": {"name": "A J MOHAMED NIHAL"}}
+    db.commit()
+    out = gen.repair_signoff(body, db.get(Candidate, 1))
+    assert out.splitlines()[-1] == expected_last
+    assert out.splitlines()[:-1] == body.rstrip().splitlines()[:-1]
+
+
+@pytest.mark.parametrize("body", [
+    "Hi,\n\nNote.\n\nBest,\nRuchika",
+    "Hi,\n\nThanks again for your time, really appreciate it.",
+    "",
+])
+def test_repair_signoff_leaves_good_bodies_alone(db, body):
+    assert gen.repair_signoff(body, db.get(Candidate, 1)) == body
+
+
+def test_prewritten_body_is_repaired_before_it_is_sent(db, monkeypatch):
+    """Drive the real send loop with his stored 30 Sep body."""
+    from datetime import timedelta
+
+    from database.models import Campaign, CreditLedger, EmailAccount, EmailSent, OutreachOrder, PaymentOrder
+    from database.models import LeadScore, SuppressedEmail, UserCredit
+    from services.email_campaign import campaign_worker
+
+    engine = db.get_bind()
+    Base.metadata.create_all(engine, tables=[t.__table__ for t in (
+        LeadScore, Campaign, EmailAccount, EmailSent, OutreachOrder, PaymentOrder,
+        UserCredit, CreditLedger, SuppressedEmail)])
+    db.get(Candidate, 1).parsed_json = {"personal_info": {"name": "A J MOHAMED NIHAL"}}
+    db.add_all([
+        EmailAccount(id=5, user_id="u", email_address="aj@gmail.com", provider="gmail",
+                     access_token="t", refresh_token="r",  # noqa: S106
+                     token_expiry=datetime.utcnow() + timedelta(days=1)),
+        UserCredit(user_id="u", total_credits=200, used_credits=200),
+        Campaign(id=142, candidate_id=1, email_account_id=5, name="c", status="running", daily_limit=20,
+                 user_timezone="Asia/Kolkata", credits_reserved=3, credits_released=0),
+        EmailSent(campaign_id=142, lead_id=1, to_email="meghna@x.ai", subject="quick question Meghna",
+                  body=NIHAL_BODY, status="queued", scheduled_at=datetime.utcnow() - timedelta(minutes=1)),
+    ])
+    db.commit()
+    sent = []
+    monkeypatch.setattr(campaign_worker, "send_gmail_email", lambda **kw: sent.append(kw) or {"id": "m", "threadId": "t"})
+    monkeypatch.setattr(campaign_worker, "ph_capture", lambda *a, **k: None)
+    monkeypatch.setattr(campaign_worker, "_deferred_to_send_window", lambda c, now: None)
+
+    campaign_worker._send_ready(db)
+
+    assert len(sent) == 1
+    assert sent[0]["body"].splitlines()[-1] == "A J Mohamed Nihal"

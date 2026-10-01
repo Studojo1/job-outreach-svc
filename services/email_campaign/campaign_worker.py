@@ -69,6 +69,13 @@ _last_reply_check: float = 0.0  # module-level timestamp for throttling
 TRACK_OPENS = False
 
 
+def _repair_signoff(db, body, campaign):
+    """Fix a stored body's sign-off if it names nobody. See repair_signoff."""
+    from services.email_campaign.email_generator_service import repair_signoff
+    candidate = db.get(Candidate, campaign.candidate_id) if campaign.candidate_id else None
+    return repair_signoff(body, candidate) if candidate else body
+
+
 def _ensure_tracking_token(email) -> str:
     """Assign a random open-tracking token to an email row if it lacks one.
 
@@ -881,6 +888,7 @@ def _send_ready(db) -> tuple:
         # timestamp lets _reap_stuck_sending find it if the send never returns.
         email.status = "sending"
         email.status_changed_at = datetime.utcnow()
+        email.body = _repair_signoff(db, email.body, campaign)
         pixel_url = _ensure_tracking_token(email) if TRACK_OPENS else None
         db.commit()
 
@@ -1101,7 +1109,7 @@ def _process_followups(db) -> tuple:
     Returns (sent_count, cancelled_count, failed_count).
     """
     from services.email_campaign.gmail_send_service import fetch_message_id_header
-    from services.email_campaign.email_generator_service import generate_followup_email
+    from services.email_campaign.email_generator_service import generate_followup_email, repair_signoff
 
     sent_count = 0
     cancelled_count = 0
@@ -1262,7 +1270,8 @@ def _process_followups(db) -> tuple:
 
         # Lock this follow-up as sending.
         fu.status = "sending"
-        fu.body = body
+        fu.body = repair_signoff(body, candidate)
+        body = fu.body
         pixel_url = _ensure_tracking_token(fu) if TRACK_OPENS else None
         db.commit()
 
