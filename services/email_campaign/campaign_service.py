@@ -117,10 +117,17 @@ def create_campaign(
             .outerjoin(LeadScore, LeadScore.lead_id == Lead.id)
             .order_by(LeadScore.overall_score.desc().nullslast(), Lead.id.asc())
         )
+        # Leave out people this user already emailed in an earlier campaign
+        # (ticket #45), before lead_limit so they do not take a paid slot.
+        from services.email_campaign.contacted import contacted
+        contacted_ids, contacted_addresses = contacted(db, user_id)
+        all_leads = [
+            lead for lead in leads_query.all()
+            if lead.id not in contacted_ids
+            and (lead.email or "").strip().lower() not in contacted_addresses
+        ]
         if lead_limit:
-            leads_query = leads_query.limit(lead_limit)
-
-        all_leads = leads_query.all()
+            all_leads = all_leads[:lead_limit]
 
         for lead in all_leads:
             style = assign_style(lead, selected_styles)
@@ -151,6 +158,13 @@ def create_campaign(
             )
             .all()
         )
+        from services.email_campaign.contacted import contacted
+        contacted_ids, contacted_addresses = contacted(db, user_id)
+        enriched_leads = [
+            lead for lead in enriched_leads
+            if lead.id not in contacted_ids
+            and lead.email.strip().lower() not in contacted_addresses
+        ]
 
         for lead in enriched_leads:
             try:

@@ -858,6 +858,15 @@ def _send_ready(db) -> tuple:
             failed_count += 1
             continue
 
+        # Never a second cold email to someone this user already wrote to in
+        # another campaign (ticket #45). The credit goes back.
+        from services.email_campaign.contacted import ALREADY_CONTACTED_MESSAGE, already_contacted
+        if already_contacted(db, email):
+            outcomes.fail(db, email, ALREADY_CONTACTED_MESSAGE)
+            db.commit()
+            failed_count += 1
+            continue
+
         # Nothing to send yet (a NULL body reached here 6 times and failed with
         # "'NoneType' object has no attribute 'encode'"). Send it back through
         # generation instead of burning the slot.
