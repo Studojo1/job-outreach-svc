@@ -949,7 +949,7 @@ async def search_leads(
             status_code=503,
             detail=("We could not reach our contact database just now, so no hiring "
                     "managers could be loaded. This is a problem on our side, not with "
-                    "your profile. Your progress is saved — please try again shortly."),
+                    "your profile. Your progress is saved. Please try again shortly."),
         ) from e
     except Exception as e:
         logger.error(f"Discovery error for candidate {request.candidate_id}: {e}", exc_info=True)

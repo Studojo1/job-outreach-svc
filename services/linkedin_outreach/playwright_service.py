@@ -517,7 +517,7 @@ async def playwright_send_invitation(
                     raise LinkedInAuthError("Session expired — browser redirected to login", revoked=True)
                 if "/authwall" in final_url:
                     logger.warning("Playwright: authwall for %s — profile may be private or rate-limited", slug)
-                    return {"ok": False, "error": "LinkedIn showed authwall — profile may be private or rate-limited"}
+                    return {"ok": False, "error": "LinkedIn showed authwall: profile may be private or rate-limited"}
 
                 # Give React a minimal head start; _find_connect_button polls up to 12s more
                 await page.wait_for_timeout(1500)
