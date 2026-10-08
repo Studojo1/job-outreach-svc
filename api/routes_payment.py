@@ -363,13 +363,13 @@ async def create_order(
     # Resolve plan from plan_id (new) or tier (legacy email-only)
     if body.plan_id:
         if body.plan_id == "email_5":
-            raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
+            raise HTTPException(status_code=400, detail="Test tier is free, no payment needed")
         plan = get_plan(body.plan_id, settings.RAZORPAY_TEST_MODE)
         resolved_plan_id = body.plan_id
         resolved_tier = plan.email_credits if plan.email_credits else plan.linkedin_credits
     elif body.tier:
         if body.tier == 5:
-            raise HTTPException(status_code=400, detail="Test tier is free — no payment needed")
+            raise HTTPException(status_code=400, detail="Test tier is free, no payment needed")
         # Legacy: email-only
         from core.pricing import get_tier_pricing as _gtp
         _legacy = _gtp(body.tier, settings.RAZORPAY_TEST_MODE)
