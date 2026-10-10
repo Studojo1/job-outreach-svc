@@ -1148,17 +1148,21 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
     Every paid path routes through here: Razorpay verify, Dodo verify, both
     webhooks and the stranded-order reconciler (services/payment_reconciler.py),
     so a payment confirmed while the user's tab is closed is still reported.
+
+    Every attempt leaves a meta_purchase row (see _record_meta_purchase).
     """
     if not meta_capi.is_configured():
         return
     if order.meta_fbp == meta_capi.NO_CONSENT_MARK:
         # An EU/UK buyer who did not accept tracking (HP-N13).
         logger.info("[META_CAPI] Order %s: no tracking consent; Purchase not sent", order.id)
+        _record_meta_purchase(order, meta_capi.PurchaseResult("skipped", reason="no_consent"))
         return
     try:
         event_id = order.razorpay_order_id or order.dodo_checkout_id
         if not event_id:
             logger.warning("[META_CAPI] Order %s has no provider id; skipping Purchase", order.id)
+            _record_meta_purchase(order, meta_capi.PurchaseResult("skipped", reason="no_event_id"))
             return
 
         email = None
@@ -1168,7 +1172,7 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
         except Exception:
             pass  # match quality suffers, the event still counts
 
-        await meta_capi.send_purchase(
+        result = await meta_capi.send_purchase(
             event_id=str(event_id),
             # PaymentOrder stores minor units; Meta wants major.
             value=(order.amount_cents or 0) / 100.0,
@@ -1185,6 +1189,50 @@ async def _report_purchase_to_meta(db: Session, order: PaymentOrder) -> None:
     except Exception as e:
         # A payment must never fail because an analytics call did.
         logger.warning("[META_CAPI] Purchase reporting failed for order %s: %s", order.id, e)
+        result = meta_capi.PurchaseResult("error", error=meta_capi.safe_error(f"{type(e).__name__}: {e}"))
+    _record_meta_purchase(order, result)
+
+
+META_PURCHASE_EVENT = "meta_purchase"
+
+
+def _record_meta_purchase(order: PaymentOrder, result: meta_capi.PurchaseResult) -> None:
+    """One system_events row per Purchase attempt, so whether payment X was
+    reported, and what Meta answered, outlives the pod logs. Never raises.
+
+    Its own short session. The caller's session belongs to the thread that is
+    blocked in _run_async (or asyncio.run, in the reconciler) while this runs on
+    an event loop, and a commit or rollback in it would expire or discard the
+    order that the caller still uses afterwards (send_receipt). Nothing
+    personal is stored: no email, IP, user agent, fbp or fbc.
+    """
+    order_id = None
+    try:
+        from dataclasses import asdict
+
+        from database.models import SystemEvent
+        from database.session import SessionLocal
+
+        order_id = order.id
+        meta = {
+            "payment_order_id": order_id,
+            "event_id": str(order.razorpay_order_id or order.dodo_checkout_id or "") or None,
+            "value": (order.amount_cents or 0) / 100.0,
+            "currency": order.currency or "INR",
+            **asdict(result),
+        }
+        user_id = str(order.user_id) if order.user_id else None
+        s = SessionLocal()
+        try:
+            s.add(SystemEvent(event_type=META_PURCHASE_EVENT, user_id=user_id, meta=meta))
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+    except Exception:
+        logger.exception("[META_CAPI] could not record the Purchase attempt for order %s", order_id)
 
 
 def _finalize_credits(db: Session, order: PaymentOrder) -> None:
