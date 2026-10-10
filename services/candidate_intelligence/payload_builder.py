@@ -155,6 +155,7 @@ _NON_ANSWERS = {
     "skip", "none", "n/a", "na", "no", "nope", "nothing", "not sure", "unsure",
     "idk", "i don't know", "i dont know", "any", "anything", "no preference",
     "not really", "-", "--",
+    "nil", "no idea", "all", "etc", "etc.", "yes", "not yet", "nah", "ok", ".",
 }
 
 
@@ -207,6 +208,33 @@ def parse_dream_companies(raw: str, limit: int = 10) -> list[str]:
         if len(out) >= limit:
             break
 
+    return out
+
+
+def usable_dream_companies(stored) -> list[str]:
+    """The stored dream-company answers that can name a company, in order.
+
+    candidates.dream_companies is read by lead discovery and lead scoring, and
+    it holds answers parse_dream_companies would not keep: rows from before the
+    parser (24 Sep) are a plain comma split ("No"), and its earlier list let
+    "etc" and "all" through. Drops the parser's non-answers, anything under
+    two characters or without a letter, and case-insensitive repeats. Each
+    stored entry is one answer and is never split again ("Johnson and
+    Johnson" stays whole).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in stored if isinstance(stored, list) else []:
+        if not isinstance(raw, str):
+            continue
+        name = raw.strip().strip(".!?\"'").strip()
+        low = name.lower()
+        if len(name) < 2 or low in _NON_ANSWERS or low in seen:
+            continue
+        if not re.search(r"[^\W\d_]", name):
+            continue
+        seen.add(low)
+        out.append(name)
     return out
 
 
