@@ -17,6 +17,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database.models import CompanyProfile
+from services.company_intelligence.llm_company_research import clean_industry
 from services.lead_discovery.domain_utils import clean_domain
 
 logger = logging.getLogger(__name__)
@@ -68,11 +69,15 @@ def company_size_bucket(num_employees) -> Optional[str]:
 
 
 def _first_industry(industries) -> Optional[str]:
+    # Cleaned here too: profiles researched before clean_industry existed keep
+    # their citation links until they are researched again, and are read here
+    # meanwhile.
     if isinstance(industries, str):
         industries = [industries]
     for ind in industries or []:
-        if isinstance(ind, str) and ind.strip():
-            return ind.strip()[:255]
+        industry = clean_industry(ind)
+        if industry:
+            return industry[:255]
     return None
 
 
