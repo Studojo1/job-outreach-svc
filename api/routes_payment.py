@@ -1204,7 +1204,9 @@ def _record_meta_purchase(order: PaymentOrder, result: meta_capi.PurchaseResult)
     blocked in _run_async (or asyncio.run, in the reconciler) while this runs on
     an event loop, and a commit or rollback in it would expire or discard the
     order that the caller still uses afterwards (send_receipt). Nothing
-    personal is stored: no email, IP, user agent, fbp or fbc.
+    personal is stored: no email, IP, user agent, fbp or fbc. user_id stays
+    NULL with the buyer in metadata, as for pause events: the frontend sends a
+    user their own system_events rows.
     """
     order_id = None
     try:
@@ -1219,12 +1221,12 @@ def _record_meta_purchase(order: PaymentOrder, result: meta_capi.PurchaseResult)
             "event_id": str(order.razorpay_order_id or order.dodo_checkout_id or "") or None,
             "value": (order.amount_cents or 0) / 100.0,
             "currency": order.currency or "INR",
+            "owner_user_id": str(order.user_id) if order.user_id else None,
             **asdict(result),
         }
-        user_id = str(order.user_id) if order.user_id else None
         s = SessionLocal()
         try:
-            s.add(SystemEvent(event_type=META_PURCHASE_EVENT, user_id=user_id, meta=meta))
+            s.add(SystemEvent(event_type=META_PURCHASE_EVENT, user_id=None, meta=meta))
             s.commit()
         except Exception:
             s.rollback()
