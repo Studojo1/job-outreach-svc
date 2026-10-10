@@ -23,8 +23,10 @@ from sqlalchemy import or_
 
 from services.shared.schemas.filter_schema import LeadFilter
 from services.shared.schemas.target_segment_schema import TargetSegment
+from services.candidate_intelligence.payload_builder import usable_dream_companies
 from services.lead_discovery.apollo_query_builder import build_apollo_query
 from services.lead_discovery.apollo_service import search_people_chunked
+from services.lead_scoring.lead_scoring_service import company_matches_dream
 from database.conflict import insert_ignore
 from database.models import Lead
 from core.logger import get_logger
@@ -908,14 +910,16 @@ def collect_dream_company_leads(
 ) -> int:
     """Secondary search pass — find leads at the candidate's dream companies.
 
-    For each company (capped at 5), clones the base filters with
-    q_organization_name set, and searches 1 page (up to 100 leads).
+    For each answer that names a company (usable_dream_companies, capped at
+    5), clones the base filters with q_organization_name set, and searches 1
+    page (up to 100 leads). That search is fuzzy ("cred" also returns Credai
+    Bengaluru), so only people at an organization the answer names are kept.
     Deduplication is handled by _store_people() which checks apollo_id.
 
     Returns total new leads added across all dream company searches.
     """
     total_added = 0
-    companies = [c.strip() for c in dream_companies if c.strip()][:5]
+    companies = usable_dream_companies(dream_companies)[:5]
 
     if not companies:
         return 0
@@ -938,6 +942,15 @@ def collect_dream_company_leads(
 
             if not people:
                 logger.info("[DREAM] No results for company '%s'", company_name)
+                continue
+
+            found = len(people)
+            people = [p for p in people
+                      if company_matches_dream(parse_apollo_person(p)["company"], company_name)]
+            if len(people) < found:
+                logger.info("[DREAM] Company '%s': dropped %d of %d people at organizations it does not name",
+                            company_name, found - len(people), found)
+            if not people:
                 continue
 
             # Use a high target so we store all results from the single page
