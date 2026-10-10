@@ -116,7 +116,7 @@ def _no_secrets_or_personal_data(meta_row):
 
 def _expected(**result):
     return {"payment_order_id": 7, "event_id": "order_rz_7", "value": 1499.0, "currency": "INR",
-            "outcome": None, "reason": None, "http_status": None, "events_received": None,
+            "owner_user_id": "u", "outcome": None, "reason": None, "http_status": None, "events_received": None,
             "fbtrace_id": None, "error": None, **result}
 
 
@@ -124,7 +124,8 @@ def test_sent_purchase_is_recorded(meta, S):
     _report(S)
     assert len(meta["calls"]) == 1 and meta["calls"][0]["json"]["data"][0]["event_id"] == "order_rz_7"
     [(event_type, user_id, row)] = _rows(S)
-    assert (event_type, user_id) == ("meta_purchase", "u")
+    # Not the buyer's own row: the frontend streams a user's system_events to them.
+    assert (event_type, user_id) == ("meta_purchase", None)
     assert row == _expected(outcome="sent", http_status=200, events_received=1, fbtrace_id="AbC123xyz")
     _no_secrets_or_personal_data(row)
 
@@ -164,7 +165,8 @@ def test_skips_are_recorded_and_nothing_is_sent(meta, S, changes, reason):
     _report(S, **changes)
     assert meta["calls"] == []
     [(_, user_id, row)] = _rows(S)
-    assert user_id == "u" and row["outcome"] == "skipped" and row["reason"] == reason
+    assert user_id is None and row["owner_user_id"] == "u"
+    assert row["outcome"] == "skipped" and row["reason"] == reason
     assert row["http_status"] is None and row["error"] is None
 
 
