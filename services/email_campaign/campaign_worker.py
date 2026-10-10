@@ -480,7 +480,7 @@ def _enrich_one(db, email) -> bool:
     Every outcome (no match, replacement, credit pause, silent outage) is
     handled here, so the JIT loop and the Apollo frontload behave the same.
     """
-    from services.enrichment.enrichment_service import enrich_single_lead_classified
+    from services.enrichment.enrichment_service import apply_reveal_fields, enrich_single_lead_classified
 
     # No Apollo spend on a row the campaign has no paid credit for (PP-P26).
     # Here rather than in _enrich_upcoming so the frontload path is capped too.
@@ -528,6 +528,7 @@ def _enrich_one(db, email) -> bool:
         lead.email = result.data["email"]
         if result.data.get("name"):
             lead.name = result.data["name"]
+        apply_reveal_fields(lead, result.data)
         lead.email_verified = True
         lead.status = "enriched"
 
