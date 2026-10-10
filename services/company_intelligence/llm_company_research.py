@@ -174,8 +174,10 @@ def research_company(name: str, domain: Optional[str] = None) -> Optional[dict]:
 # The web search answer cites its sources inline, so a label can arrive as
 # "AdTech ([example.com](https://example.com/profiles/company/56206-18))".
 # A link target may hold one level of parentheses (Wikipedia's "Foo_(company)").
+# The gap between two links must match one way only: as "\s*[,;]?\s*" a run of
+# space-separated links that is never closed backtracked exponentially.
 _MD_LINK = r"\[[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)"
-_CITATION = re.compile(r"\(\s*" + _MD_LINK + r"(?:\s*[,;]?\s*" + _MD_LINK + r")*\s*\)")
+_CITATION = re.compile(r"\(\s*" + _MD_LINK + r"(?:\s*(?:[,;]\s*)?" + _MD_LINK + r")*\s*\)")
 _LINK_TEXT = re.compile(r"\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
 _BARE_URL = re.compile(r"(?:https?://|www\.)[^\s()]+", re.IGNORECASE)
 _EMPTY_PARENS = re.compile(r"\(\s*\)")
