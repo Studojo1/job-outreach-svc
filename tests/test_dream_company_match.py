@@ -138,6 +138,13 @@ def test_an_empty_name_never_matches(company, answer):
     assert not company_matches_dream(company, answer)
 
 
+def test_a_one_letter_name_never_matches():
+    # "G" and "t" are company names on production leads; "P&G" and "L&T" are
+    # real answers, and each holds that letter as a word of its own.
+    assert not company_matches_dream("G", "P&G")
+    assert not company_matches_dream("t", "L&T")
+
+
 # ── scoring ─────────────────────────────────────────────────────────────────
 
 PROFILE = {
@@ -160,6 +167,19 @@ def test_a_no_answer_gives_no_bonus():
     scored = _score([lead], ["no"])["x"]
     assert scored["_dream_company_score"] == 0
     assert scored["score"] == _score([lead], [])["x"]["score"] < 65
+
+
+@pytest.mark.parametrize("company, dream", [
+    ("Clappia No-Code Platform", ["no"]),
+    ("YES SECURITIES", ["Yes"]),
+    ("all things people", ["all"]),
+])
+def test_a_non_answer_that_is_a_word_of_the_name_gives_no_bonus(company, dream):
+    # Production lead companies. The word rule alone calls each one a match;
+    # only dropping the non-answer keeps the bonus off.
+    assert company_matches_dream(company, dream[0])
+    lead = {"apollo_person_id": "x", "title": "Accountant", "company": company}
+    assert _score([lead], dream)["x"]["_dream_company_score"] == 0
 
 
 @pytest.mark.parametrize("company, dream", [
