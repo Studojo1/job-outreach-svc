@@ -123,7 +123,7 @@ def _run_enrichment_in_background(
     order_id comes straight from the request body, so every order lookup here
     is scoped to user_id: a caller must not be able to move someone else's order.
     """
-    from services.enrichment.enrichment_service import _enrich_single_lead
+    from services.enrichment.enrichment_service import _enrich_single_lead, apply_reveal_fields
 
     db = SessionLocal()
     job = _enrichment_jobs[job_id]
@@ -183,6 +183,7 @@ def _run_enrichment_in_background(
                     lead.email = result["email"]
                     if result.get("name"):
                         lead.name = result["name"]
+                    apply_reveal_fields(lead, result)
                     lead.email_verified = True
                     lead.status = "enriched"
                     db.commit()  # Per-lead commit — data is never lost

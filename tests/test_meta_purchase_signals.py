@@ -97,9 +97,10 @@ def test_create_order_stores_signals_and_purchase_forwards_them(env, monkeypatch
 
     async def fake_send(**kw):
         sent.update(kw)
-        return True
+        return routes_payment.meta_capi.PurchaseResult("sent", http_status=200)
     monkeypatch.setattr(routes_payment.meta_capi, "is_configured", lambda: True)
     monkeypatch.setattr(routes_payment.meta_capi, "send_purchase", fake_send)
+    monkeypatch.setattr(routes_payment, "_record_meta_purchase", lambda order, result: None)
     asyncio.run(routes_payment._report_purchase_to_meta(s, order))
 
     assert sent["event_id"] == "order_rz_meta"

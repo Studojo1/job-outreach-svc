@@ -13,9 +13,11 @@ Returns individual component scores per lead for accurate DB storage.
 import json
 import os
 import re
+import unicodedata
 from typing import Dict, Any, List
 
 from core.logger import get_logger
+from services.candidate_intelligence.payload_builder import usable_dream_companies
 from services.shared.ai.apollo_industry_mapper import APOLLO_INDUSTRY_MAP
 
 logger = get_logger(__name__)
@@ -311,6 +313,47 @@ def _is_generic_tech_industry(industry: str) -> bool:
     return _normalize_industry(industry) in _GENERIC_TECH_INDUSTRIES
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# DREAM COMPANY MATCHING
+# ══════════════════════════════════════════════════════════════════════════════
+def _name_tokens(name) -> list[str]:
+    """Lower-case, accent-free words of a company name. "&" reads as "and"."""
+    text = unicodedata.normalize("NFKD", str(name or "")).lower().replace("&", " and ")
+    return re.findall(r"[^\W_]+", "".join(ch for ch in text if not unicodedata.combining(ch)))
+
+
+def _is_joined_run(tokens: list[str], target: str) -> bool:
+    """Is target the words of a contiguous run of tokens, written without spaces?"""
+    for start in range(len(tokens)):
+        run = ""
+        for token in tokens[start:]:
+            run += token
+            if not target.startswith(run):
+                break
+            if run == target:
+                return True
+    return False
+
+
+def company_matches_dream(company, dream_company) -> bool:
+    """Does a lead's company name refer to one of the student's dream companies?
+
+    Whole words only, never a raw substring: "ey" is not "Bright Money", "cred"
+    is not "Credai Bengaluru", "meta" is not "Metal Avenues". The answer must
+    be a contiguous run of whole words in the company name (answer "Google",
+    company "Google DeepMind"), or the company name a run of whole words in the
+    answer (company "Google", answer "Google India"). The spaces inside the run
+    do not count, so "JP Morgan" matches "JPMorgan Chase" and "J.P. Morgan",
+    but the run still starts and ends on a word boundary. A name with fewer
+    than two letters or digits, including an empty one, never matches.
+    """
+    company_words, dream_words = _name_tokens(company), _name_tokens(dream_company)
+    company_key, dream_key = "".join(company_words), "".join(dream_words)
+    if len(company_key) < 2 or len(dream_key) < 2:
+        return False
+    return _is_joined_run(company_words, dream_key) or _is_joined_run(dream_words, company_key)
+
+
 _C_LEVEL_RE = re.compile(r"\b(ceo|cto|cfo|coo)\b")
 _VP_RE = re.compile(r"\b[sea]?vp\b")  # VP, SVP, EVP, AVP
 
@@ -493,6 +536,9 @@ def score_and_select_leads(
         "ranching", "dairy", "fishery",
     }
 
+    # The stored answers include "No" and "etc"; only names count.
+    dream_names = usable_dream_companies(dream_companies)
+
     scored_leads = []
     log_traces = []
 
@@ -565,14 +611,11 @@ def score_and_select_leads(
         # matter how poor the other signals are).
         dc_score = 0
         is_dream = False
-        if dream_companies:
-            lead_company = (lead.get("company") or "").lower()
-            for dc in dream_companies:
-                dc_lower = dc.lower()
-                if dc_lower in lead_company or lead_company in dc_lower:
-                    dc_score = 10
-                    is_dream = True
-                    break
+        for dc in dream_names:
+            if company_matches_dream(lead.get("company"), dc):
+                dc_score = 10
+                is_dream = True
+                break
 
         # --- 7. Niche-keyword penalty ---
         # Penalize when the candidate selected niches (AI, SaaS, Devtools)

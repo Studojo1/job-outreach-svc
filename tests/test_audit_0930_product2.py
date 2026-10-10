@@ -253,9 +253,10 @@ def _report(S, monkeypatch):
 
     async def fake_send(**kw):
         sent.append(kw)
-        return True
+        return meta_capi.PurchaseResult("sent", http_status=200)
     monkeypatch.setattr(routes_payment.meta_capi, "is_configured", lambda: True)
     monkeypatch.setattr(routes_payment.meta_capi, "send_purchase", fake_send)
+    monkeypatch.setattr(routes_payment, "_record_meta_purchase", lambda order, result: None)
     s = S()
     order = s.query(PaymentOrder).filter_by(razorpay_order_id="order_rz_p2").one()
     asyncio.run(routes_payment._report_purchase_to_meta(s, order))

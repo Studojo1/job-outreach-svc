@@ -53,7 +53,9 @@ def db():
         User(id="u", email="u@x.com", name="U", email_verified=True, created_at=NOW, updated_at=NOW),
         Candidate(id=1, user_id="u", resume_text="."),
         EmailAccount(id=5, user_id="u", email_address="u@gmail.com", provider="gmail",
-                     access_token="t", refresh_token="r", token_expiry=NOW + timedelta(days=9)),  # noqa: S106
+                     # The worker checks expiry against the real clock: a fixed date went
+                     # stale and sent the test to Google for a token refresh.
+                     access_token="t", refresh_token="r", token_expiry=datetime.utcnow() + timedelta(days=9)),  # noqa: S106
         UserCredit(user_id="u", total_credits=10, used_credits=10),
         Campaign(id=10, candidate_id=1, email_account_id=5, name="c", status="running",
                  credits_reserved=10, credits_released=0),
