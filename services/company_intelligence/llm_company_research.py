@@ -171,6 +171,36 @@ def research_company(name: str, domain: Optional[str] = None) -> Optional[dict]:
     return _normalise(parsed, name, domain)
 
 
+# The web search answer cites its sources inline, so a label can arrive as
+# "AdTech ([example.com](https://example.com/profiles/company/56206-18))".
+# A link target may hold one level of parentheses (Wikipedia's "Foo_(company)").
+# The gap between two links must match one way only: as "\s*[,;]?\s*" a run of
+# space-separated links that is never closed backtracked exponentially.
+_MD_LINK = r"\[[^\]]*\]\((?:[^()\s]|\([^()\s]*\))*\)"
+_CITATION = re.compile(r"\(\s*" + _MD_LINK + r"(?:\s*(?:[,;]\s*)?" + _MD_LINK + r")*\s*\)")
+_LINK_TEXT = re.compile(r"\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)")
+_BARE_URL = re.compile(r"(?:https?://|www\.)[^\s()]+", re.IGNORECASE)
+_EMPTY_PARENS = re.compile(r"\(\s*\)")
+
+
+def clean_industry(text: Optional[str]) -> Optional[str]:
+    """An industry label without its citation links, or None if nothing is left.
+
+    A parenthesised link goes entirely, any other markdown link becomes its
+    text, and bare URLs go. Punctuation is trimmed only where something was
+    removed, so "Other business activities n.e.c." keeps its full stop.
+    """
+    if not isinstance(text, str):
+        return None
+    cleaned = _CITATION.sub(" ", text)
+    cleaned = _LINK_TEXT.sub(r"\1", cleaned)
+    cleaned = _BARE_URL.sub(" ", cleaned)
+    cleaned = _EMPTY_PARENS.sub(" ", cleaned)
+    if cleaned != text:
+        cleaned = cleaned.rstrip(" .,;:|/-").lstrip(" ,;:|/-")
+    return " ".join(cleaned.split()) or None
+
+
 def _normalise(raw: dict, name: str, fallback_domain: Optional[str]) -> dict:
     """Coerce raw LLM output into the canonical extracted_facts shape."""
     def _str(v, maxlen=200):
@@ -208,7 +238,7 @@ def _normalise(raw: dict, name: str, fallback_domain: Optional[str]) -> dict:
         # Company profile fields (persisted on CompanyProfile)
         "name": name,
         "discovered_domain": discovered_domain,
-        "industries": _list(raw.get("industries"), 5),
+        "industries": [i for i in map(clean_industry, _list(raw.get("industries"), 5)) if i],
         "keywords": _list(raw.get("keywords"), 10),
         "employee_count": _int(raw.get("employee_count")),
     }

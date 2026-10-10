@@ -205,13 +205,14 @@ def remaining(db: Session) -> dict:
 
 def _enrich_lead(lead: Lead) -> str:
     """Store the address on the lead. Returns the result's error_type or 'ok'."""
-    from services.enrichment.enrichment_service import enrich_single_lead_classified
+    from services.enrichment.enrichment_service import apply_reveal_fields, enrich_single_lead_classified
 
     result = enrich_single_lead_classified(lead)
     if result.success:
         lead.email = result.data["email"]
         if result.data.get("name"):
             lead.name = result.data["name"]
+        apply_reveal_fields(lead, result.data)
         lead.email_verified = True
         lead.status = "enriched"
         return "ok"

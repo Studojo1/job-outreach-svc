@@ -17,7 +17,9 @@ browser sends, so Meta collapses the two copies into one conversion.
 
 import hashlib
 import logging
+import re
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -26,6 +28,35 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 GRAPH_VERSION = "v21.0"
+
+
+@dataclass
+class PurchaseResult:
+    """What became of one Purchase, in a form safe to store: no token, no
+    request URL and no personal data."""
+    outcome: str  # "sent" | "rejected" | "error" | "skipped"
+    reason: str | None = None  # skips only
+    http_status: int | None = None
+    events_received: int | None = None
+    fbtrace_id: str | None = None
+    error: str | None = None  # Meta's message, or the exception, at most 300 chars
+
+
+def safe_error(text) -> str:
+    """An error string without the access token or any URL: a transport error
+    can quote the request URL, and the token rides in its query string."""
+    text = str(text or "")
+    if settings.META_CAPI_TOKEN:
+        text = text.replace(settings.META_CAPI_TOKEN, "[token]")
+    return re.sub(r"https?://\S+", "[url]", text)[:300]
+
+
+def _json_body(resp) -> dict:
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 - a non-JSON reply is still an answer
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _hash(value: str) -> str:
@@ -54,19 +85,19 @@ async def send_purchase(
     user_agent: str | None = None,
     fbp: str | None = None,
     fbc: str | None = None,
-) -> bool:
+) -> PurchaseResult:
     """Report one confirmed purchase to Meta.
 
     Never raises: a payment must never fail because an analytics call did.
-    Returns True only when Meta acknowledged the event.
+    The outcome is "sent" only when Meta acknowledged the event.
     """
     if not is_configured():
-        return False
+        return PurchaseResult("skipped", reason="not_configured")
     if not event_id:
         # Without a stable id the browser copy cannot be deduplicated against
         # this one, and the sale would be counted twice.
         logger.warning("[META_CAPI] Refusing to send Purchase with no event_id")
-        return False
+        return PurchaseResult("skipped", reason="no_event_id")
 
     user_data: dict = {}
     if email:
@@ -104,6 +135,7 @@ async def send_purchase(
                 params={"access_token": settings.META_CAPI_TOKEN},
                 json=payload,
             )
+        body = _json_body(resp)
         if resp.status_code != 200:
             # Log the body, not just the status: Meta puts the real reason
             # (bad token, malformed user_data) in the response.
@@ -111,14 +143,17 @@ async def send_purchase(
                 "[META_CAPI] Purchase rejected %s for event_id=%s: %s",
                 resp.status_code, event_id, resp.text[:300],
             )
-            return False
+            err = body.get("error") if isinstance(body.get("error"), dict) else {}
+            return PurchaseResult("rejected", http_status=resp.status_code, fbtrace_id=err.get("fbtrace_id"),
+                                  error=safe_error(err.get("message") or resp.text))
         logger.info(
             "[META_CAPI] Purchase sent: event_id=%s value=%s %s", event_id, value, currency
         )
-        return True
+        return PurchaseResult("sent", http_status=200, events_received=body.get("events_received"),
+                              fbtrace_id=body.get("fbtrace_id"))
     except Exception as e:
         logger.warning("[META_CAPI] Purchase send failed for event_id=%s: %s", event_id, e)
-        return False
+        return PurchaseResult("error", error=safe_error(f"{type(e).__name__}: {e}"))
 
 
 # ── Consent (audit HP-N13) ───────────────────────────────────────────────────

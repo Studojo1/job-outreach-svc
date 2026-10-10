@@ -93,7 +93,7 @@ def erase_contact(db: Session, address: str) -> dict:
         # and credit accounting. Everything that identifies the person goes.
         counts["leads"] = db.execute(text(
             "UPDATE leads SET email = NULL, email_verified = false, name = 'Removed contact', title = NULL, "
-            "linkedin_url = NULL, apollo_id = NULL, status = 'removed' WHERE lower(trim(email)) = :e"
+            "linkedin_url = NULL, location = NULL, apollo_id = NULL, status = 'removed' WHERE lower(trim(email)) = :e"
         ), p).rowcount
     if "emails_sent" in tables:
         counts["emails_cancelled"] = _cancel_pending(db, a)

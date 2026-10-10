@@ -256,7 +256,8 @@ def test_removal_request_flow(db):
 
     db.add_all([
         Lead(id=1, candidate_id=1, name="Priya S", title="Recruiter", company="Zomato", email="Priya@Zomato.com",
-             email_verified=True, linkedin_url="https://www.linkedin.com/in/Priya-S/", status="enriched"),
+             email_verified=True, linkedin_url="https://www.linkedin.com/in/Priya-S/", location="Gurugram, India",
+             status="enriched"),
         Lead(id=2, candidate_id=1, name="Rahul", company="Zomato", email="rahul@zomato.com", email_verified=True),
         EmailSent(id=1, campaign_id=10, lead_id=1, to_email="priya@zomato.com", subject="Hi", body="b",
                   status="replied", reply_text="thanks but no", sent_at=NOW),
@@ -291,7 +292,8 @@ def test_removal_request_flow(db):
                               "api_enrich_cache": 1, "apollo_reveals": 1}
 
     lead = db.get(Lead, 1)
-    assert (lead.email, lead.name, lead.linkedin_url, lead.email_verified) == (None, "Removed contact", None, False)
+    assert (lead.email, lead.name, lead.linkedin_url, lead.location, lead.email_verified) == (
+        None, "Removed contact", None, None, False)
     assert db.get(Lead, 2).email == "rahul@zomato.com"
     e1, e2 = db.get(EmailSent, 1), db.get(EmailSent, 2)
     assert (e1.to_email, e1.reply_text, e1.status) == (None, None, "replied")  # history kept, person gone

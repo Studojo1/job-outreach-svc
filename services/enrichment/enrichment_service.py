@@ -120,6 +120,7 @@ def enrich_contacts(
                 lead.email = result["email"]
                 if result.get("name"):
                     lead.name = result["name"]
+                apply_reveal_fields(lead, result)
                 lead.email_verified = True
                 lead.status = "enriched"
                 enriched_count += 1
@@ -272,8 +273,36 @@ def enrich_single_lead_classified(lead: Lead) -> EnrichmentResult:
     full_name = f"{first} {last}".strip()
     if full_name:
         result_dict["name"] = full_name
+    # The free people search returns neither of these, so this paid reveal is
+    # the only place a lead gets them. Location follows parse_apollo_person.
+    linkedin_url = person.get("linkedin_url")
+    if isinstance(linkedin_url, str) and linkedin_url.startswith("http") and "linkedin.com/" in linkedin_url:
+        result_dict["linkedin_url"] = linkedin_url
+    location = ", ".join(
+        p for p in (person.get("city"), person.get("state"), person.get("country")) if isinstance(p, str) and p
+    )
+    if location:
+        result_dict["location"] = location
     _record_apollo_reveal()  # 1 successful reveal = 1 Apollo credit burned
     return EnrichmentResult(success=True, data=result_dict)
+
+
+def apply_reveal_fields(lead: Lead, data: Optional[Dict[str, str]]) -> None:
+    """Copy the linkedin_url and location of a successful reveal onto `lead`,
+    only where the lead's own value is blank. Never raises.
+
+    A lead with no apollo_id keeps a blank linkedin_url: routes_discovery takes
+    apollo_id NULL plus linkedin_url set to mean a web-discovered lead and
+    deletes those, sent emails included, on every new LinkedIn search.
+    """
+    try:
+        data = data or {}
+        if data.get("linkedin_url") and lead.apollo_id and not lead.linkedin_url:
+            lead.linkedin_url = data["linkedin_url"]
+        if data.get("location") and not lead.location:
+            lead.location = data["location"][:255]  # varchar(255)
+    except Exception as e:  # noqa: BLE001 - optional fields must not break a paid reveal
+        logger.warning("[ENRICHMENT] could not keep reveal fields: %s", e)
 
 
 def _enrich_single_lead(lead: Lead) -> Optional[Dict[str, str]]:
@@ -353,6 +382,7 @@ def enrich_preview_leads(candidate_id: int, n: int = 15) -> None:
                     lead.email = result["email"]
                     if result.get("name"):
                         lead.name = result["name"]
+                    apply_reveal_fields(lead, result)
                     lead.email_verified = True
                     lead.status = "enriched"
                     db.commit()
