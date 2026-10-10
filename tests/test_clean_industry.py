@@ -6,6 +6,7 @@ removed where research output becomes company_profiles.industries and where
 a profile's industry is copied onto a lead.
 """
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -78,6 +79,17 @@ def test_citation_shapes(raw, expected):
 @pytest.mark.parametrize("nothing", ["([tradeevo.com](https://tradeevo.com/))", "https://x.com/a", "", "   ", None, 42])
 def test_none_when_nothing_is_left(nothing):
     assert clean_industry(nothing) is None
+
+
+def test_an_unclosed_run_of_links_is_cleaned_in_linear_time():
+    # The research text is model output. With an ambiguous gap between links
+    # this took about 2 seconds at 22 links and doubled with each one more,
+    # holding the GIL the whole time.
+    raw = "AdTech (" + "[a.com](https://a.com/x) " * 22 + "and more"
+    started = time.perf_counter()
+    cleaned = clean_industry(raw)
+    assert time.perf_counter() - started < 0.5
+    assert "](" not in cleaned and "https" not in cleaned
 
 
 # ── where research output becomes an industry ──────────────────────────────
