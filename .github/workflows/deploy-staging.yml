@@ -115,6 +115,14 @@ jobs:
             AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4o-mini \
             AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
             -n ${{ env.NAMESPACE }}
+          # Student agent (services/agent), Phase 1: on for the allowlist only. The
+          # list lives in the GitHub Actions variable AGENT_ALLOWLIST_STAGING (comma
+          # separated emails or user ids), so no address is committed. Blank means
+          # nobody. Production (deploy.yml) never sets these, so it stays off there.
+          kubectl set env deployment/${{ env.SERVICE_NAME }} \
+            AGENT_ENABLED=true \
+            AGENT_ALLOWLIST="${{ vars.AGENT_ALLOWLIST_STAGING }}" \
+            -n ${{ env.NAMESPACE }}
           # Bob (Mesa) secrets — only set when configured in GitHub secrets,
           # so an empty secret never wipes a value already on the deployment.
           # Meta Conversions API is OFF on staging. The token is the live one,

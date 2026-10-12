@@ -130,6 +130,28 @@ class Settings(BaseSettings):
     MESA_LI_AT: str = ""
     MESA_JSESSIONID: str = ""
 
+    # STUDENT AGENT (services/agent, api/routes_agent.py). Phase 1, staging only.
+    # Off unless AGENT_ENABLED is true AND the user is on AGENT_ALLOWLIST
+    # (comma separated emails or user ids, "*" = everyone, blank = nobody).
+    # The no-deploy kill switch is the AGENT_DISABLED env var, read per request.
+    # Every value has a default so a pod never exits on a missing one.
+    AGENT_ENABLED: bool = False
+    AGENT_ALLOWLIST: str = ""
+    AGENT_DEPLOYMENT: str = ""          # blank falls back to AZURE_OPENAI_EMAIL_DEPLOYMENT
+    AGENT_DAILY_MESSAGE_CAP: int = 60
+    AGENT_DAILY_TOKEN_CAP: int = 400000
+    AGENT_DAILY_DRAFT_CAP: int = 30
+    AGENT_DAILY_REVISION_CAP: int = 60
+    AGENT_MAX_WAITING_DRAFTS: int = 10  # drafting plus needs_review
+    AGENT_DRAFTS_PER_CALL: int = 5
+    AGENT_MAX_STEPS: int = 8
+    AGENT_MAX_TOOL_CALLS: int = 16
+    AGENT_RUN_WALL_SECONDS: int = 150
+    AGENT_DRAFT_WAIT_SECONDS: int = 90
+    AGENT_MAX_OUTPUT_TOKENS: int = 1200
+    AGENT_MAX_CONCURRENT_RUNS: int = 6  # per pod
+    AGENT_DRAFT_WORKERS: int = 2        # per pod
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).parent.parent / ".env",
         env_file_encoding="utf-8",

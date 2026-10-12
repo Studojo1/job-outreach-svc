@@ -56,6 +56,9 @@ DELETE = (
     "outreach_orders", "outreach_campaigns", "outreach_contacts",
     "linkedin_connection_requests", "linkedin_outreach_leads", "linkedin_search_jobs",
     "linkedin_campaigns", "linkedin_tokens", "user_linkedin_sessions",
+    # Student agent (migration 076), children first; drafts hold email copy.
+    "agent_confirmations", "agent_memories", "agent_drafts", "agent_messages", "agent_runs", "agent_threads",
+    "agent_settings", "agent_usage_daily",
     "candidates", "email_accounts",
     "internship_applications", "application_resume_uploads",
     "resume_drafts", "resumes", "rsb_sessions",
