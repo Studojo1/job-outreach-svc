@@ -10,11 +10,13 @@ ids.
 from datetime import date, datetime
 from decimal import Decimal
 
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from database.models import (
-    Campaign, Candidate, CreditLedger, EmailAccount, EmailSent, Lead, LinkedInCampaign,
-    LinkedInConnectionRequest, OutreachOrder, PaymentOrder, User, UserCredit,
+    AgentDraft, AgentMemory, AgentMessage, AgentSetting, AgentThread, Campaign, Candidate, CreditLedger,
+    EmailAccount, EmailSent, Lead, LinkedInCampaign, LinkedInConnectionRequest, OutreachOrder, PaymentOrder,
+    User, UserCredit,
 )
 from services.connections import connection_status
 
@@ -45,6 +47,17 @@ LI_CAMPAIGN_COLS = ("id", "candidate_id", "name", "status", "target_role", "targ
 LI_REQUEST_COLS = ("id", "campaign_id", "name", "headline", "company", "location", "profile_url", "connection_note",
                    "followup_message", "match_reason", "status", "sent_at", "accepted_at", "followup_sent_at",
                    "reply_text", "reply_received_at", "reply_sentiment", "created_at")
+
+# Student agent (migration 076). Chat rows are the student's own words and the
+# replies they saw; tool rows (internal lookups) and run telemetry stay out.
+AGENT_THREAD_COLS = ("id", "scope", "title", "status", "created_at", "updated_at")
+AGENT_MESSAGE_COLS = ("id", "thread_id", "role", "content", "created_at")
+AGENT_DRAFT_COLS = ("id", "lead_id", "kind", "status", "style", "instructions", "subject", "body",
+                    "original_subject", "original_body", "version", "versions", "edited_by", "approved_at",
+                    "approved_version", "skipped_at", "skip_reason", "discarded_at", "discard_reason",
+                    "created_at", "updated_at")
+AGENT_MEMORY_COLS = ("id", "text", "scope", "company", "use_in_emails", "source", "created_at")
+AGENT_SETTINGS_COLS = ("review_before_send", "followups", "never_contact", "updated_at")
 
 
 def _jsonable(v):
@@ -95,4 +108,26 @@ def export_user_data(db: Session, user_id: str) -> dict:
         "linkedin_connection_requests": _rows(
             db.query(LinkedInConnectionRequest).filter(LinkedInConnectionRequest.user_id == user_id)
             .order_by(LinkedInConnectionRequest.id), LI_REQUEST_COLS),
+        "agent": _agent_rows(db, user_id),
+    }
+
+
+def _agent_rows(db: Session, user_id: str) -> dict | None:
+    # Migration 076 lands the eight agent tables together; a database without
+    # them (a test schema, a service ahead of its migration) has no agent data.
+    if not inspect(db.get_bind()).has_table("agent_threads"):
+        return None
+    settings = db.query(AgentSetting).filter(AgentSetting.user_id == user_id).first()
+    return {
+        "threads": _rows(
+            db.query(AgentThread).filter(AgentThread.user_id == user_id).order_by(AgentThread.id), AGENT_THREAD_COLS),
+        "messages": _rows(
+            db.query(AgentMessage).filter(AgentMessage.user_id == user_id, AgentMessage.role.in_(("user", "assistant")),
+                                          AgentMessage.tool_calls.is_(None)).order_by(AgentMessage.id),
+            AGENT_MESSAGE_COLS),
+        "drafts": _rows(
+            db.query(AgentDraft).filter(AgentDraft.user_id == user_id).order_by(AgentDraft.id), AGENT_DRAFT_COLS),
+        "memories": _rows(
+            db.query(AgentMemory).filter(AgentMemory.user_id == user_id).order_by(AgentMemory.id), AGENT_MEMORY_COLS),
+        "settings": _rows([settings], AGENT_SETTINGS_COLS)[0] if settings else None,
     }

@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, ARRAY, BigInteger, JSON
+from sqlalchemy import Date, Index
 from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -669,3 +670,185 @@ class LinkedInConnectionRequest(Base):
 
     campaign = relationship("LinkedInCampaign", back_populates="requests")
     user = relationship("User")
+
+
+# ---------------------------------------------------------------------------
+# Student agent, Phase 1 (migration 076_agent_runtime.sql, staging only).
+# Read and written only through services/agent/store.py. Column names and
+# nullability match the SQL exactly (tests/test_agent_migration.py checks it).
+# Value sets are enforced in code, see store.py. Nothing here is on the send
+# path: no campaign worker phase reads these tables.
+# ---------------------------------------------------------------------------
+
+_AGENT_ID = BigInteger().with_variant(Integer, "sqlite")
+# none_as_null: a Python None is SQL NULL, so `tool_calls IS NULL` finds final assistant rows.
+_AGENT_JSON = JSONB(none_as_null=True).with_variant(JSON(none_as_null=True), "sqlite")
+
+
+class AgentThread(Base):
+    """One conversation. scope is 'main' or 'outreach:<id>' (one active per outreach)."""
+    __tablename__ = "agent_threads"
+    __table_args__ = (
+        Index("ix_agent_threads_user", "user_id", "updated_at"),
+        Index("uq_agent_threads_scope", "user_id", "scope", unique=True,
+              postgresql_where=text("status = 'active' AND scope <> 'main'"),
+              sqlite_where=text("status = 'active' AND scope <> 'main'")),
+    )
+    id = Column(_AGENT_ID, primary_key=True, autoincrement=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="SET NULL"), nullable=True)
+    scope = Column(String(40), nullable=False, default="main")
+    title = Column(String(80), nullable=False, default="New chat")
+    status = Column(String(20), nullable=False, default="active")      # active | archived
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AgentRun(Base):
+    """One run per user message: status, persisted stream events, usage, heartbeat, cancel flag."""
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        Index("ix_agent_runs_user_started", "user_id", "started_at"),
+        Index("ix_agent_runs_thread", "thread_id", "id"),
+        Index("ix_agent_runs_running", "status",
+              postgresql_where=text("status = 'running'"), sqlite_where=text("status = 'running'")),
+    )
+    id = Column(_AGENT_ID, primary_key=True, autoincrement=True)
+    thread_id = Column(_AGENT_ID, ForeignKey("agent_threads.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), nullable=False, default="running")    # running | done | error | cancelled | limit
+    events = Column(_AGENT_JSON, nullable=False, default=list)         # persisted stream frames (all but text)
+    model = Column(String(60), nullable=True)
+    prompt_version = Column(String(20), nullable=True)
+    confirmation_id = Column(String(40), nullable=True)
+    steps = Column(Integer, nullable=False, default=0)
+    tool_calls = Column(Integer, nullable=False, default=0)
+    drafts_created = Column(Integer, nullable=False, default=0)
+    tokens_in = Column(Integer, nullable=False, default=0)
+    tokens_out = Column(Integer, nullable=False, default=0)
+    error = Column(Text, nullable=True)                                # internal, never shown
+    error_code = Column(String(30), nullable=True)
+    cancel_requested_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class AgentMessage(Base):
+    """Transcript row: role user, assistant or tool."""
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        Index("ix_agent_messages_thread", "thread_id", "id"),
+        Index("uq_agent_messages_turn", "thread_id", "client_turn_id", unique=True,
+              postgresql_where=text("client_turn_id IS NOT NULL"),
+              sqlite_where=text("client_turn_id IS NOT NULL")),
+    )
+    id = Column(_AGENT_ID, primary_key=True, autoincrement=True)
+    thread_id = Column(_AGENT_ID, ForeignKey("agent_threads.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(_AGENT_ID, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
+    role = Column(String(12), nullable=False)                          # user | assistant | tool
+    content = Column(Text, nullable=False, default="")
+    tool_calls = Column(_AGENT_JSON, nullable=True)                    # assistant rows that called tools
+    tool_call_id = Column(String(80), nullable=True)
+    tool_name = Column(String(60), nullable=True)
+    meta = Column(_AGENT_JSON, nullable=False, default=dict)
+    client_turn_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AgentDraft(Base):
+    """The d_<id> outreach: one email to one matched lead, with versions and the approval record."""
+    __tablename__ = "agent_drafts"
+    __table_args__ = (
+        Index("ix_agent_drafts_user_status", "user_id", "status", "updated_at"),
+        Index("ix_agent_drafts_lead", "lead_id"),
+        Index("uq_agent_drafts_live", "candidate_id", "lead_id", "kind", unique=True,
+              postgresql_where=text("status IN ('drafting', 'needs_review', 'approved', 'skipped')"),
+              sqlite_where=text("status IN ('drafting', 'needs_review', 'approved', 'skipped')")),
+    )
+    id = Column(_AGENT_ID, primary_key=True, autoincrement=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+    thread_id = Column(_AGENT_ID, ForeignKey("agent_threads.id", ondelete="SET NULL"), nullable=True)
+    run_id = Column(_AGENT_ID, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
+    kind = Column(String(20), nullable=False, default="first_touch")
+    status = Column(String(20), nullable=False, default="drafting")
+    style = Column(String(30), nullable=True)
+    instructions = Column(String(400), nullable=True)
+    subject = Column(Text, nullable=False, default="")
+    body = Column(Text, nullable=False, default="")
+    original_subject = Column(Text, nullable=True)
+    original_body = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=0)               # 0 while drafting, then 1, 2, ...
+    versions = Column(_AGENT_JSON, nullable=False, default=list)       # older copies, newest first
+    edited_by = Column(String(10), nullable=False, default="agent")    # agent | student
+    facts_used = Column(_AGENT_JSON, nullable=False, default=list)
+    flags = Column(_AGENT_JSON, nullable=False, default=list)
+    failure_reason = Column(String(200), nullable=True)
+    skip_reason = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    approved_version = Column(Integer, nullable=True)
+    approved_hash = Column(String(64), nullable=True)
+    skipped_at = Column(DateTime, nullable=True)
+    discarded_at = Column(DateTime, nullable=True)
+    discard_reason = Column(String(200), nullable=True)
+    email_sent_id = Column(Integer, ForeignKey("emails_sent.id", ondelete="SET NULL"), nullable=True)  # Phase 2
+    heartbeat_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AgentConfirmation(Base):
+    """A ticket for an action that needs the student's click; args are executed verbatim."""
+    __tablename__ = "agent_confirmations"
+    __table_args__ = (Index("ix_agent_confirmations_user", "user_id", "created_at"),)
+    id = Column(String(40), primary_key=True)                          # c_ + 12 hex
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    thread_id = Column(_AGENT_ID, ForeignKey("agent_threads.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(_AGENT_ID, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True)
+    tool = Column(String(60), nullable=False)
+    args = Column(_AGENT_JSON, nullable=False, default=dict)
+    summary = Column(String(400), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")     # pending | approved | declined | expired | failed
+    result = Column(_AGENT_JSON, nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    decided_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AgentMemory(Base):
+    """A preference the student asked the agent to keep. Hard deleted on forget."""
+    __tablename__ = "agent_memories"
+    __table_args__ = (Index("ix_agent_memories_user", "user_id", "created_at"),)
+    id = Column(_AGENT_ID, primary_key=True, autoincrement=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    text = Column(String(400), nullable=False)
+    scope = Column(String(20), nullable=False, default="everywhere")   # everywhere | emails | matching | company
+    company = Column(String(200), nullable=True)
+    use_in_emails = Column(Boolean, nullable=False, default=False)
+    source = Column(String(20), nullable=False, default="chat")        # chat | settings | profile
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+
+
+class AgentSetting(Base):
+    """Standing switches, one row per user. followups is stored only in Phase 1."""
+    __tablename__ = "agent_settings"
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), primary_key=True)
+    review_before_send = Column(Boolean, nullable=False, default=True)
+    followups = Column(Boolean, nullable=False, default=True)
+    never_contact = Column(_AGENT_JSON, nullable=False, default=list)  # [{kind, value}]
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AgentUsageDaily(Base):
+    """Per user per IST day counters for the agent caps."""
+    __tablename__ = "agent_usage_daily"
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), primary_key=True)
+    day = Column(Date, primary_key=True)
+    messages = Column(Integer, nullable=False, default=0)
+    drafts = Column(Integer, nullable=False, default=0)
+    revisions = Column(Integer, nullable=False, default=0)
+    tokens = Column(Integer, nullable=False, default=0)
