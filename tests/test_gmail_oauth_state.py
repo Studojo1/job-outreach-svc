@@ -164,3 +164,54 @@ def test_complete_turns_a_taken_mailbox_into_409(monkeypatch):
             routes_gmail.GmailCompleteRequest(code="c", state=google_oauth.sign_gmail_state("u1")),
             current_user=_U("u1"), db=None))
     assert exc.value.status_code == 409
+
+
+# ── The onboarding flow (/flow) comes back to itself ─────────────────────────
+
+@pytest.mark.parametrize("path", ["/flow/?step=gmail", "/flow/?step=connect", "/flow", "/flow/"])
+def test_flow_return_paths_are_allowed(path):
+    assert google_oauth.safe_return_path(path) == path
+
+
+@pytest.mark.parametrize("path", [
+    None, "", "https://evil.example/flow/", "//evil.example/flow/", "/flow//evil.example",
+    "/outreach/campaign", "/flowx", "/flow/\\\\evil", "/flow/?next=https://evil", "/flow/#x",
+])
+def test_other_return_paths_are_refused(path):
+    assert google_oauth.safe_return_path(path) is None
+
+
+def test_return_path_rides_in_the_signed_state():
+    state = google_oauth.sign_gmail_state("u1", "/flow/?step=gmail")
+    assert google_oauth.verify_gmail_state(state) == "u1"
+    assert google_oauth.gmail_state_return_path(state) == "/flow/?step=gmail"
+    assert google_oauth.gmail_state_return_path(google_oauth.sign_gmail_state("u1")) is None
+    assert google_oauth.gmail_state_return_path(google_oauth.sign_gmail_state("u1", "https://evil")) is None
+
+
+def test_connect_url_echoes_only_an_accepted_return():
+    ok = routes_gmail.gmail_oauth_connect_url(return_to="/flow/?step=gmail", current_user=_U("u1"))
+    state = parse_qs(urlparse(ok["url"]).query)["state"][0]
+    assert ok["return_to"] == "/flow/?step=gmail"
+    assert google_oauth.gmail_state_return_path(state) == "/flow/?step=gmail"
+    bad = routes_gmail.gmail_oauth_connect_url(return_to="https://evil.example/", current_user=_U("u1"))
+    assert bad["return_to"] is None
+    plain = routes_gmail.gmail_oauth_connect_url(current_user=_U("u1"))
+    assert plain["return_to"] is None
+
+
+def test_callback_with_a_flow_return_lands_on_the_flow(monkeypatch):
+    monkeypatch.setattr(routes_gmail.settings, "FRONTEND_URL", "https://studojo.pro/outreach")
+    state = google_oauth.sign_gmail_state("u1", "/flow/?step=gmail")
+    resp = asyncio.run(routes_gmail.gmail_oauth_callback(code="c0de", state=state))
+    loc = urlparse(resp.headers["location"])
+    q = parse_qs(loc.query)
+    assert (loc.scheme, loc.netloc, loc.path) == ("https", "studojo.pro", "/flow/")
+    assert q["step"] == ["gmail"] and q["gmail_code"] == ["c0de"] and q["gmail_state"] == [state]
+
+
+def test_cancel_with_a_flow_return_lands_on_the_flow(monkeypatch):
+    monkeypatch.setattr(routes_gmail.settings, "FRONTEND_URL", "https://studojo.pro/outreach")
+    state = google_oauth.sign_gmail_state("u1", "/flow/?step=connect")
+    resp = asyncio.run(routes_gmail.gmail_oauth_callback(error="access_denied", state=state))
+    assert resp.headers["location"] == "https://studojo.pro/flow/?step=connect&gmail_error=cancelled"
