@@ -5,6 +5,7 @@ Login OAuth is handled by BetterAuth on the main Studojo frontend.
 
 import httpx
 import logging
+import re
 from typing import Dict, Any
 from urllib.parse import urlencode
 
@@ -38,35 +39,62 @@ def _state_key() -> bytes:
     return hashlib.sha256(f"{_STATE_PURPOSE}:{GMAIL_CLIENT_SECRET}".encode()).digest()
 
 
-def sign_gmail_state(user_id: str) -> str:
+# Pages that may ask Google's callback to come straight back to them instead of
+# the outreach tool's own Gmail page: the onboarding flow at /flow. A path on
+# the site's own origin only, never a full URL, so this is not an open redirect.
+_RETURN_PATH = re.compile(r"^/flow(?:/[A-Za-z0-9._~\-/]*)?(?:\?[A-Za-z0-9._~\-=&%]*)?$")
+
+
+def safe_return_path(path: str | None) -> str | None:
+    """The return path if it is one this flow may come back to, else None."""
+    if not path or len(path) > 200 or "//" in path or "\\" in path:
+        return None
+    return path if _RETURN_PATH.match(path) else None
+
+
+def sign_gmail_state(user_id: str, return_to: str | None = None) -> str:
     """OAuth `state` naming the user who started the flow, signed and short-lived.
 
     It used to be the bare user id, so anyone could complete Google's consent
     with their own Gmail and put someone else's id in `state` (audit N03).
+    `return_to`, when allowed, rides inside the signed state so nobody can
+    change where the callback lands.
     """
     import secrets
     import time
     import jwt
     now = int(time.time())
-    return jwt.encode(
-        {"sub": user_id, "purpose": _STATE_PURPOSE, "iat": now,
-         "exp": now + STATE_TTL_SECONDS, "nonce": secrets.token_urlsafe(8)},
-        _state_key(), algorithm="HS256",
-    )
+    claims = {"sub": user_id, "purpose": _STATE_PURPOSE, "iat": now,
+              "exp": now + STATE_TTL_SECONDS, "nonce": secrets.token_urlsafe(8)}
+    ret = safe_return_path(return_to)
+    if ret:
+        claims["ret"] = ret
+    return jwt.encode(claims, _state_key(), algorithm="HS256")
 
 
-def verify_gmail_state(state: str):
-    """The user id a state was signed for, or None if forged, expired or garbled."""
+def _state_claims(state: str):
     import jwt
     try:
         claims = jwt.decode(state, _state_key(), algorithms=["HS256"],
                             options={"require": ["sub", "exp", "purpose"]})
     except jwt.PyJWTError:
         return None
-    return claims["sub"] if claims.get("purpose") == _STATE_PURPOSE else None
+    return claims if claims.get("purpose") == _STATE_PURPOSE else None
 
 
-def generate_gmail_auth_url(user_id: str) -> str:
+def verify_gmail_state(state: str):
+    """The user id a state was signed for, or None if forged, expired or garbled."""
+    claims = _state_claims(state)
+    return claims["sub"] if claims else None
+
+
+def gmail_state_return_path(state: str):
+    """Where a valid state asked the callback to land, or None (the default page)."""
+    claims = _state_claims(state) if state else None
+    return safe_return_path(claims.get("ret")) if claims else None
+
+
+def generate_gmail_auth_url(user_id: str, return_to: str | None = None) -> str:
     """Generates the Gmail OAuth consent URL using the Gmail OAuth client."""
     params = urlencode({
         "client_id": GMAIL_CLIENT_ID,
@@ -75,7 +103,7 @@ def generate_gmail_auth_url(user_id: str) -> str:
         "scope": " ".join(GMAIL_SCOPES),
         "access_type": "offline",
         "prompt": "consent",
-        "state": sign_gmail_state(user_id),
+        "state": sign_gmail_state(user_id, return_to),
     })
     logger.info(f"Generated Gmail OAuth redirect URL for user_id: {user_id}")
     return f"{GOOGLE_AUTH_URL}?{params}"
