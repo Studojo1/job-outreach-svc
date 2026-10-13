@@ -78,3 +78,16 @@ def test_debug_routes_are_gone():
     assert "/debug/console" not in paths
     assert not any(p.endswith("/debug-cookies") for p in paths)
     assert not any(getattr(r, "path", "").endswith("/debug-cookies") for r in auth_router.routes)
+
+
+def test_no_debug_route_is_mounted():
+    """No route with "debug" in its path ships, under any name.
+
+    Listing known paths let /api/v1/auth/debug-voyager through: it echoed the
+    start of the caller's LinkedIn cookie and of LINKEDIN_PROXY_URL (which can
+    carry the proxy's credentials), and proxied arbitrary profile lookups.
+    """
+    from api.main import app
+
+    debug = sorted(p for p in (getattr(r, "path", "") for r in app.routes) if "debug" in p.lower())
+    assert debug == []
