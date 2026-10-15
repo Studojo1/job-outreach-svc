@@ -84,8 +84,10 @@ class Settings(BaseSettings):
     # emails (the routing fix still applies); nothing else sends through it.
     EMAILER_URL: str = "http://emailer-service:8087"
     EMAILER_INTERNAL_SECRET: str = ""
-    # Founders who get the paid-not-launched alert. Comma-separated.
-    OPS_ALERT_RECIPIENTS: str = "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+    # Who gets routine ops alerts (paid-not-launched, reconcile, campaign
+    # notices). Comma-separated. Jeremy and Pranav Hegde get new-ticket emails
+    # (frontend) but not these (owner decision, 2026-10-15).
+    OPS_ALERT_RECIPIENTS: str = "pranavshastry4@gmail.com"
 
     # OBSERVABILITY
     SENTRY_DSN: str = ""
