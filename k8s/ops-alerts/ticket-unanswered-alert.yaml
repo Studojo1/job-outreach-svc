@@ -133,7 +133,7 @@ data:
         acs = os.environ["ACS_CONNECTION_STRING"]
         sender = os.environ.get("ALERT_SENDER", "pranav@support.studojo.com")
         recipients = [e.strip() for e in os.environ.get(
-            "ALERT_RECIPIENTS", "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+            "ALERT_RECIPIENTS", "pranavshastry4@gmail.com"
         ).split(",") if e.strip()]
 
         conn = psycopg2.connect(db)
@@ -196,7 +196,7 @@ spec:
                 - name: ALERT_SENDER
                   value: "pranav@support.studojo.com"
                 - name: ALERT_RECIPIENTS
-                  value: "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+                  value: "pranavshastry4@gmail.com"
                 - name: WAIT_HOURS
                   value: "24"
                 - name: DIGEST_HOUR_UTC

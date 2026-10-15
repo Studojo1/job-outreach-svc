@@ -79,7 +79,10 @@ def test_very_old_pause_goes_to_the_founders_once_not_the_customer(db, sent):
     _campaign(db, 1, "paused", unsent=10, paused_at=NOW - timedelta(days=120))
     campaign_notices.run(db, NOW)
     campaign_notices.run(db, NOW + timedelta(hours=1))
-    assert _templates(sent) == ["ops-alert", "ops-alert"]  # two founders, first run only
+    assert _templates(sent) == ["ops-alert"]  # first run only
+    # Routine alerts go to pranavshastry4 only; Jeremy and Pranav Hegde get
+    # new-ticket emails, not these (owner decision, 2026-10-15).
+    assert [c["to"] for c in sent] == ["pranavshastry4@gmail.com"]
     assert "campaign 1" in sent[0]["message"]
 
 

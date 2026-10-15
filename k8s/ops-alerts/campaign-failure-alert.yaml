@@ -28,7 +28,7 @@ data:
     ACS = os.environ["ACS_CONNECTION_STRING"]
     SENDER = os.environ.get("ALERT_SENDER", "pranav@support.studojo.com")
     RECIPIENTS = [e.strip() for e in os.environ.get(
-        "ALERT_RECIPIENTS", "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+        "ALERT_RECIPIENTS", "pranavshastry4@gmail.com"
     ).split(",") if e.strip()]
     THRESHOLD = int(os.environ.get("FAIL_THRESHOLD", "6"))
 
@@ -193,7 +193,7 @@ spec:
                 - name: ALERT_SENDER
                   value: "pranav@support.studojo.com"
                 - name: ALERT_RECIPIENTS
-                  value: "jeremy.zac@gmail.com,businessconnect.pranav@gmail.com"
+                  value: "pranavshastry4@gmail.com"
                 - name: FAIL_THRESHOLD
                   value: "6"
               volumeMounts:
