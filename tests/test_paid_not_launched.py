@@ -221,7 +221,8 @@ def test_daily_digest_fires_once_a_day_without_nudges(db, sent):
     launch_nudge.sweep(db, now=NOW)
     launch_nudge.sweep(db, now=NOW + timedelta(hours=3))
     launch_nudge.sweep(db, now=NOW + timedelta(hours=25))
-    assert len([c for c in sent if c["template"] == "ops-alert"]) == 2 * 2  # two founders, twice
+    alerts = [c for c in sent if c["template"] == "ops-alert"]
+    assert [c["to"] for c in alerts] == ["pranavshastry4@gmail.com"] * 2  # once a day, twice
 
 
 def test_maybe_sweep_runs_at_most_hourly(db, sent, monkeypatch):
