@@ -16,6 +16,8 @@ from services.authentication.google_oauth import (
     generate_gmail_auth_url,
     exchange_gmail_code,
     get_google_user_info,
+    gmail_state_return_path,
+    safe_return_path,
     verify_gmail_state,
 )
 from pydantic import BaseModel
@@ -38,11 +40,32 @@ def gmail_oauth_connect(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/connect-url")
-def gmail_oauth_connect_url(current_user: User = Depends(get_current_user)):
-    """Return the Google OAuth URL as JSON (for authenticated frontend calls)."""
+def gmail_oauth_connect_url(
+    return_to: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
+    """Return the Google OAuth URL as JSON (for authenticated frontend calls).
+
+    `return_to` (the onboarding flow, /flow/...) makes the callback land back
+    on that page instead of the outreach tool's Gmail page. It is echoed back
+    only when accepted, so the page knows it can go to Google in the same tab.
+    """
     logger.info(f"[GmailOAuth] OAuth URL requested for user_id={current_user.id}")
-    url = generate_gmail_auth_url(str(current_user.id))
-    return {"url": url}
+    ret = safe_return_path(return_to)
+    url = generate_gmail_auth_url(str(current_user.id), ret)
+    return {"url": url, "return_to": ret}
+
+
+def _site_origin() -> str:
+    """scheme://host of the site (FRONTEND_URL can carry a path, e.g. /outreach)."""
+    from urllib.parse import urlsplit
+    u = urlsplit(settings.FRONTEND_URL)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def _back_to(ret: str, params: dict) -> str:
+    from urllib.parse import urlencode
+    return f"{_site_origin()}{ret}{'&' if '?' in ret else '?'}{urlencode(params)}"
 
 
 @router.get("/callback")
@@ -64,14 +87,21 @@ async def gmail_oauth_callback(
     """
     from urllib.parse import urlencode
     frontend_base = f"{settings.FRONTEND_URL}/connect/gmail"
+    # A flow that started at /flow asked (inside the signed state) to come
+    # straight back there; that page finishes with POST /complete itself.
+    ret = gmail_state_return_path(state)
     # Cancel on Google's screen comes back as ?error=access_denied with no
     # code. A required `code` turned that into a raw 422 on the API host.
     if error or not code:
         logger.info("[GmailOAuth] Callback without a code (error=%s)", error)
+        if ret:
+            return RedirectResponse(url=_back_to(ret, {"gmail_error": "cancelled"}))
         return RedirectResponse(url=f"{frontend_base}?status=error&message=cancelled")
     if not state or verify_gmail_state(state) is None:
         logger.warning("[GmailOAuth] Callback with missing/invalid/expired state")
         return RedirectResponse(url=f"{frontend_base}?status=error&message=invalid_state")
+    if ret:
+        return RedirectResponse(url=_back_to(ret, {"gmail_code": code, "gmail_state": state}))
     return RedirectResponse(url=f"{frontend_base}?{urlencode({'gmail_code': code, 'gmail_state': state})}")
 
 
