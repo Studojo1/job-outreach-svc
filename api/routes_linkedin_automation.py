@@ -1315,7 +1315,7 @@ async def send_one_now(
 
     token_row = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
     if not token_row:
-        raise HTTPException(status_code=400, detail="No LinkedIn token found — reconnect first")
+        raise HTTPException(status_code=400, detail="No LinkedIn token found. Reconnect first")
 
     try:
         li_at = decrypt(token_row.li_at_enc, token_row.nonce)
@@ -1324,7 +1324,7 @@ async def send_one_now(
         c.status = "auth_failed"
         c.updated_at = datetime.utcnow()
         db.commit()
-        raise HTTPException(status_code=400, detail="Token decryption failed — reconnect LinkedIn") from None
+        raise HTTPException(status_code=400, detail="Token decryption failed. Reconnect LinkedIn") from None
 
     # Try up to 5 pending requests — skip any that can't be resolved
     candidates = (
@@ -1371,7 +1371,7 @@ async def send_one_now(
             break
 
     if not req:
-        raise HTTPException(status_code=404, detail="Could not resolve any pending leads — try again later")
+        raise HTTPException(status_code=404, detail="Could not resolve any pending leads. Try again later")
 
     # Resolve URN (best-effort — Playwright fallback works without it).
     # Manual sends do NOT flip the campaign to auth_failed on a single
@@ -1810,7 +1810,7 @@ async def inbox_reply(
     if r.status not in ("accepted", "followup_sent", "replied"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot send reply yet — connection status is '{r.status}'",
+            detail=f"Cannot send reply yet: connection status is '{r.status}'",
         )
 
     token = db.query(LinkedInToken).filter(LinkedInToken.user_id == current_user.id).first()
@@ -1821,7 +1821,7 @@ async def inbox_reply(
         li_at = decrypt(token.li_at_enc, token.nonce)
         jsessionid = decrypt_second(token.jsessionid_enc, token.nonce)
     except Exception:
-        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed — reconnect") from None
+        raise HTTPException(status_code=401, detail="LinkedIn session decrypt failed. Reconnect") from None
 
     cookies_blob = None
     if getattr(token, "cookies_blob_enc", None) and getattr(token, "cookies_blob_nonce", None):
@@ -1843,7 +1843,7 @@ async def inbox_reply(
         campaign.status = "auth_failed"
         campaign.updated_at = datetime.utcnow()
         db.commit()
-        raise HTTPException(status_code=401, detail="LinkedIn session expired — reconnect first") from None
+        raise HTTPException(status_code=401, detail="LinkedIn session expired. Reconnect first") from None
 
     if not ok:
         raise HTTPException(status_code=502, detail="LinkedIn rejected the message. Try again in a minute.")

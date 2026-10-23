@@ -528,13 +528,13 @@ async def preview_email(
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=503,
-            detail="Preview generation timed out. Your campaign will still work — emails are generated fresh per lead just before sending.",
+            detail="Preview generation timed out. Your campaign will still work: emails are generated fresh per lead just before sending.",
         ) from None
     except Exception as e:
         logger.exception("[CAMPAIGN] preview generation failed")
         raise HTTPException(
             status_code=500,
-            detail="Preview generation failed. Your campaign will still work — emails are generated fresh per lead just before sending.",
+            detail="Preview generation failed. Your campaign will still work: emails are generated fresh per lead just before sending.",
         ) from e
 
 
@@ -1286,7 +1286,7 @@ async def send_test_emails(
     logger.info("[TEST_EMAILS] Created %d test emails for campaign %d", len(created_emails), campaign_id)
 
     return {
-        "message": f"{len(created_emails)} test email(s) scheduled — sending in ~2 minutes",
+        "message": f"{len(created_emails)} test email(s) scheduled, sending in ~2 minutes",
         "emails": created_emails,
     }
 

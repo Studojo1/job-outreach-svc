@@ -795,7 +795,7 @@ def send_one_email(
     if already >= DAILY_SEND_CAP:
         raise HTTPException(
             status_code=429,
-            detail=f"You've sent {already} emails today. The daily limit is {DAILY_SEND_CAP} — try again tomorrow.",
+            detail=f"You've sent {already} emails today. The daily limit is {DAILY_SEND_CAP}. Try again tomorrow.",
         )
 
     # Check the balance BEFORE spending an Apollo credit on a lookup the
@@ -886,7 +886,7 @@ def send_one_email(
                 logger.error("[EXT-SEND] Apollo credits exhausted: %s", result.error_detail[:200])
                 raise HTTPException(
                     status_code=503,
-                    detail="lookup_unavailable: We can't look up contacts right now. Your draft is saved — try again shortly.",
+                    detail="lookup_unavailable: We can't look up contacts right now. Your draft is saved. Try again shortly.",
                 )
             _log_resolution(current_user.id, request.company, "error", False, result.error_type or "unknown")
             logger.warning(
@@ -895,7 +895,7 @@ def send_one_email(
             )
             raise HTTPException(
                 status_code=503,
-                detail="lookup_failed: Couldn't reach the contact lookup service. Your draft is saved — try again shortly.",
+                detail="lookup_failed: Couldn't reach the contact lookup service. Your draft is saved. Try again shortly.",
             )
         revealed = (result.data or {}).get("email")
         if not _reveal_belongs_to(revealed, request.company, (contact or {}).get("company_domains")):
