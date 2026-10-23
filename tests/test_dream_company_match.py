@@ -276,3 +276,57 @@ def test_dream_pass_with_only_non_answers_searches_nothing(db, monkeypatch):
     monkeypatch.setattr(lc, "_try_collect_page", fake_page)
     assert lc.collect_dream_company_leads(_filters(), ["No", "etc", "all", "."], 1, db) == 0
     assert searched == [] and db.query(Lead).count() == 0
+
+
+def _sized_filters():
+    # What the role search hands the dream pass: titles banded by company size,
+    # the largest band ending at 1,000 employees.
+    return LeadFilter(
+        target_segments=[
+            TargetSegment(company_size_range="1,50", person_titles=["Growth Manager"]),
+            TargetSegment(company_size_range="201,1000", person_titles=["Marketing Manager"]),
+        ],
+        person_locations=["Singapore"],
+    )
+
+
+def test_dream_search_sends_no_company_size_band(db, monkeypatch):
+    # Grab, Shopee, noon and Careem all have more than 1,000 employees. With the
+    # bands sent, Apollo returned nobody at them; without, Grab returned 100.
+    payloads = []
+
+    def fake_page(payload):
+        payloads.append(payload)
+        return [_person("g1", "Grab")]
+    monkeypatch.setattr(lc, "_try_collect_page", fake_page)
+
+    lc.collect_dream_company_leads(_sized_filters(), ["Grab"], 1, db)
+
+    assert len(payloads) == 1
+    assert "organization_num_employees_ranges" not in payloads[0]
+    # Everything else about the role search is kept.
+    assert payloads[0]["q_organization_name"] == "Grab"
+    assert payloads[0]["person_titles"] == ["Growth Manager", "Marketing Manager"]
+    assert payloads[0]["person_locations"] == ["Singapore"]
+
+
+def test_the_role_search_still_sends_its_size_bands():
+    # Control: the bands are dropped for a named company only.
+    payload = lc.build_apollo_query(_sized_filters(), page=1)
+    assert payload["organization_num_employees_ranges"] == ["1,50", "201,1000"]
+
+
+@pytest.mark.parametrize("n, searched", [(5, 5), (12, 12), (25, 25), (104, 25)])
+def test_dream_pass_searches_up_to_the_cap(db, monkeypatch, n, searched):
+    names = [f"Company{i}" for i in range(n)]
+    seen = []
+
+    def fake_page(payload):
+        seen.append(payload["q_organization_name"])
+        return []
+    monkeypatch.setattr(lc, "_try_collect_page", fake_page)
+
+    lc.collect_dream_company_leads(_filters(), names, 1, db)
+
+    assert seen == names[:searched]
+    assert lc.MAX_DREAM_COMPANIES == 25

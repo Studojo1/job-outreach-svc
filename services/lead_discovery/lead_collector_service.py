@@ -611,6 +611,11 @@ def _try_collect_page(apollo_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 MAX_LEADS_PER_COMPANY = 4
 
+# The dream pass runs inside the /discovery/search request, one Apollo call
+# (~0.7s) per company. The quiz keeps at most 10 answers; admin-entered lists
+# can be longer (one student was given 104), so cap it below ingress limits.
+MAX_DREAM_COMPANIES = 25
+
 
 def _store_people(
     people: List[Dict[str, Any]],
@@ -911,15 +916,20 @@ def collect_dream_company_leads(
     """Secondary search pass — find leads at the candidate's dream companies.
 
     For each answer that names a company (usable_dream_companies, capped at
-    5), clones the base filters with q_organization_name set, and searches 1
-    page (up to 100 leads). That search is fuzzy ("cred" also returns Credai
-    Bengaluru), so only people at an organization the answer names are kept.
-    Deduplication is handled by _store_people() which checks apollo_id.
+    MAX_DREAM_COMPANIES), clones the base filters with q_organization_name
+    set, and searches 1 page (up to 100 leads). That search is fuzzy ("cred"
+    also returns Credai Bengaluru), so only people at an organization the
+    answer names are kept. Deduplication is handled by _store_people() which
+    checks apollo_id.
+
+    The company-size bands of the role search are dropped: the company is
+    already named, and the bands stop at 1,000 employees, so every larger
+    dream company (noon, Careem, Grab, Shopee) used to return nobody.
 
     Returns total new leads added across all dream company searches.
     """
     total_added = 0
-    companies = usable_dream_companies(dream_companies)[:5]
+    companies = usable_dream_companies(dream_companies)[:MAX_DREAM_COMPANIES]
 
     if not companies:
         return 0
@@ -938,6 +948,7 @@ def collect_dream_company_leads(
                 email_status=["verified"],
             )
             apollo_payload = build_apollo_query(dream_filters, page=1)
+            apollo_payload.pop("organization_num_employees_ranges", None)
             people = _try_collect_page(apollo_payload)
 
             if not people:
