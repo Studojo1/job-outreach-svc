@@ -115,7 +115,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 def _ocr_pdf_via_azure_vision(doc, num_pages: int) -> str:
-    """Render PDF pages to PNGs and ask gpt-4o (vision) to extract text.
+    """Render PDF pages to PNGs and ask gpt-4o-mini (vision) to extract text.
 
     Uses the same Azure OpenAI deployment the rest of the codebase uses.
     Caps page count to keep vision token cost bounded.

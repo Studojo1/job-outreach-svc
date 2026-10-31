@@ -38,9 +38,10 @@ class Settings(BaseSettings):
     # Cheap/fast model used for batch & pattern tasks: justifier, company fit scoring,
     # fact extractor, reply classifier, role/location normalization. ~17x cheaper.
     AZURE_OPENAI_FAST_DEPLOYMENT: str = "gpt-4o-mini"
-    # Cold-outreach email writer. Kept on gpt-4o because reasoning models tend to
-    # produce over-structured prose; gpt-4o writes warmer, more human cold emails.
-    AZURE_OPENAI_EMAIL_DEPLOYMENT: str = "gpt-4o"
+    # Cold-outreach email writer. Not a reasoning model (they tend to produce
+    # over-structured prose). Owner rule, 31 Oct 2026: gpt-4o-mini everywhere,
+    # never gpt-4o.
+    AZURE_OPENAI_EMAIL_DEPLOYMENT: str = "gpt-4o-mini"
     AZURE_OPENAI_KEY: str
 
     # RAZORPAY

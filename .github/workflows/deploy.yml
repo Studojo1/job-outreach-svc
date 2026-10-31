@@ -105,7 +105,7 @@ jobs:
           kubectl set env deployment/${{ env.SERVICE_NAME }} \
             AZURE_OPENAI_LLM_DEPLOYMENT=gpt-5-mini \
             AZURE_OPENAI_FAST_DEPLOYMENT=gpt-4o-mini \
-            AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o \
+            AZURE_OPENAI_EMAIL_DEPLOYMENT=gpt-4o-mini \
             AZURE_OPENAI_API_VERSION=2025-04-01-preview \
             AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small \
             -n studojo
